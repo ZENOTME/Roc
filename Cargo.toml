@@ -1,0 +1,20 @@
+[package]
+name = "roc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Extensible Arrow execution engine with pipeline scheduling"
+license = "Apache-2.0"
+
+[dependencies]
+arrow = { version = "56.2.0", default-features = false }
+async-channel = "2.5"
+arrow-schema = { version = "=56.2.1", features = ["serde"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio-util = "0.7"
+
+[dev-dependencies]
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
