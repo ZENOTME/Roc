@@ -1,22 +1,23 @@
-//! Lowers a bound operator tree into a pipeline graph.
 use super::{PipelineGraph, PipelineGraphBuilder, PipelineId};
 use crate::{
     Result,
     operator::{OperatorTree, OperatorTreeNode},
 };
 
-/// Builds a tree whose operators already hold any runtime services they need.
+/// Builds pipeline graph based on operator tree.
 pub fn build_pipeline_graph(tree: OperatorTree) -> Result<PipelineGraph> {
     let mut graph = PipelineGraphBuilder::new();
-    build_pipeline_node(tree.root(), 0, &mut graph)?;
+    build_pipeline_on_node(tree.root(), 0, &mut graph)?;
     graph.finish()
 }
 
-/// Asks an operator to place itself and its children into the pipeline graph.
-pub fn build_pipeline_node(
-    node: &OperatorTreeNode,
+/// Builds pipleine based on tree current_node.
+pub fn build_pipeline_on_node(
+    current_node: &OperatorTreeNode,
     current: PipelineId,
     graph: &mut PipelineGraphBuilder,
 ) -> Result<()> {
-    node.operator().build_pipeline(node, current, graph)
+    current_node
+        .operator()
+        .build_pipeline(current_node, current, graph)
 }

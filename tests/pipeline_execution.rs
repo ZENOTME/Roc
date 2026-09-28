@@ -1,8 +1,8 @@
 use arrow::record_batch::RecordBatch;
 use futures::{channel::oneshot, future::BoxFuture};
 use roc::{
-    CancellationToken, Error, Result,
-    exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkStatus, SourceExec, SourceExecutor},
+    Cancel, Error, Result,
+    exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor},
     pipeline::{Executor, Pipeline, PipelineExecutionConfig, PipelineGraph, PipelineGraphExecutor},
 };
 use std::sync::{
@@ -63,11 +63,7 @@ struct EmptySource {
 }
 
 impl SourceExec for EmptySource {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         if let Some(required_finishes) = self.required_finishes
             && self.prior_finishes.load(Ordering::SeqCst) != required_finishes
         {
@@ -80,13 +76,21 @@ impl SourceExec for EmptySource {
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
         Ok(Box::new(EmptySourceExecutor))
     }
+
+    fn finalize<'a>(
+        &'a self,
+        _global: GlobalExecContextRef,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 struct EmptySourceExecutor;
 impl SourceExecutor for EmptySourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async { Ok(None) })
     }
@@ -95,16 +99,20 @@ impl SourceExecutor for EmptySourceExecutor {
 struct WaitForCancelSource(mpsc::Sender<()>);
 
 impl SourceExec for WaitForCancelSource {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         self.0.send(()).unwrap();
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
         Ok(Box::new(WaitForCancelExecutor))
+    }
+
+    fn finalize<'a>(
+        &'a self,
+        _global: GlobalExecContextRef,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -113,10 +121,10 @@ struct WaitForCancelExecutor;
 impl SourceExecutor for WaitForCancelExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        ctx: &'a CancellationToken,
+        cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            ctx.cancelled().await;
+            cancel.cancelled().await;
             Err(Error::Cancelled)
         })
     }
@@ -128,11 +136,7 @@ struct FailingSource {
 }
 
 impl SourceExec for FailingSource {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
 
@@ -141,6 +145,14 @@ impl SourceExec for FailingSource {
             worker: self.next_worker.fetch_add(1, Ordering::SeqCst),
             cancelled_workers: self.cancelled_workers.clone(),
         }))
+    }
+
+    fn finalize<'a>(
+        &'a self,
+        _global: GlobalExecContextRef,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -152,13 +164,13 @@ struct FailingSourceExecutor {
 impl SourceExecutor for FailingSourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        ctx: &'a CancellationToken,
+        cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             if self.worker == 0 {
                 Err(Error::Execution("source failed".into()))
             } else {
-                ctx.cancelled().await;
+                cancel.cancelled().await;
                 self.cancelled_workers.fetch_add(1, Ordering::SeqCst);
                 Err(Error::Cancelled)
             }
@@ -168,11 +180,7 @@ impl SourceExecutor for FailingSourceExecutor {
 
 struct CountingSink(Arc<AtomicUsize>);
 impl SinkExec for CountingSink {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
@@ -182,7 +190,7 @@ impl SinkExec for CountingSink {
     fn finalize<'a>(
         &'a self,
         _global: GlobalExecContextRef,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -195,13 +203,13 @@ struct CountingSinkExecutor;
 impl SinkExecutor for CountingSinkExecutor {
     fn sink<'a>(
         &'a mut self,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
         _input: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkStatus>> {
-        Box::pin(async { Ok(SinkStatus::NeedMoreInput) })
+    ) -> BoxFuture<'a, Result<SinkResult>> {
+        Box::pin(async { Ok(SinkResult::NeedMoreInput) })
     }
 
-    fn combine<'a>(self: Box<Self>, _ctx: &'a CancellationToken) -> BoxFuture<'a, Result<()>> {
+    fn combine(self: Box<Self>, _cancel: &Cancel) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -224,7 +232,7 @@ fn runs_pipeline_tasks_and_waits_for_dependencies_to_finalize() {
     let executor = PipelineGraphExecutor::new(graph)
         .with_task_executor(ThreadTaskExecutor)
         .with_parallelism(2)
-        .with_cancel(CancellationToken::new());
+        .with_cancel(Cancel::new());
 
     futures::executor::block_on(executor.execute()).unwrap();
     assert_eq!(finishes.load(Ordering::SeqCst), 3);
@@ -242,7 +250,7 @@ fn caller_can_cancel_execution_without_a_tokio_runtime() {
         vec![vec![]],
     )
     .unwrap();
-    let cancel = CancellationToken::new();
+    let cancel = Cancel::new();
     let executor = PipelineGraphExecutor::new(graph)
         .with_task_executor(ThreadTaskExecutor)
         .with_parallelism(2)
@@ -269,7 +277,7 @@ fn worker_failure_cancels_siblings_and_skips_finalize() {
     };
     let result = futures::executor::block_on(pipeline.execute(
         Arc::new(ThreadTaskExecutor),
-        CancellationToken::new(),
+        Cancel::new(),
         PipelineExecutionConfig::default(),
         2,
     ));

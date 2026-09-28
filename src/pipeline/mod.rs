@@ -2,7 +2,7 @@ mod build;
 mod execution;
 mod graph;
 
-pub use build::{build_pipeline_graph, build_pipeline_node};
+pub use build::{build_pipeline_graph, build_pipeline_on_node};
 pub(crate) use execution::yield_now;
 pub use execution::{Executor, PipelineExecutionConfig, PipelineGraphExecutor};
 pub use graph::{PipelineGraph, PipelineGraphBuilder, PipelineGraphError, PipelineId};

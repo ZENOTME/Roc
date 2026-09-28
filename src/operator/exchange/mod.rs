@@ -7,7 +7,7 @@ use crate::{
     Error, Result,
     exec::{ExchangeSinkExec, ExchangeSourceExec},
     operator::OperatorTreeNode,
-    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_node},
+    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
 use arrow::datatypes::SchemaRef;
 use std::{fmt, sync::Arc};
@@ -16,23 +16,49 @@ pub type ExchangeId = usize;
 
 #[derive(Clone)]
 pub struct ExchangeSourceOperator {
-    pub exchange: ExchangeId,
-    pub schema: SchemaRef,
-    pub service: Arc<dyn ExchangeService>,
+    exchange: ExchangeId,
+    service: Arc<dyn ExchangeService>,
 }
 
 #[derive(Clone)]
 pub struct ExchangeSinkOperator {
-    pub exchanges: Vec<ExchangeId>,
-    pub schema: SchemaRef,
-    pub service: Arc<dyn ExchangeService>,
+    exchanges: Vec<ExchangeId>,
+    schema: SchemaRef,
+    service: Arc<dyn ExchangeService>,
+}
+
+impl ExchangeSourceOperator {
+    pub fn new(exchange: ExchangeId, service: Arc<dyn ExchangeService>) -> Self {
+        Self { exchange, service }
+    }
+
+    pub(crate) fn into_parts(self) -> (ExchangeId, Arc<dyn ExchangeService>) {
+        (self.exchange, self.service)
+    }
+}
+
+impl ExchangeSinkOperator {
+    pub fn new(
+        exchanges: Vec<ExchangeId>,
+        schema: SchemaRef,
+        service: Arc<dyn ExchangeService>,
+    ) -> Self {
+        Self {
+            exchanges,
+            schema,
+            service,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<ExchangeId>, SchemaRef, Arc<dyn ExchangeService>) {
+        (self.exchanges, self.schema, self.service)
+    }
 }
 
 impl fmt::Debug for ExchangeSourceOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExchangeSourceOperator")
             .field("exchange", &self.exchange)
-            .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
 }
@@ -52,17 +78,16 @@ impl Operator for ExchangeSourceOperator {
     }
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        if !node.children().is_empty() {
+        if !current_node.children().is_empty() {
             return Err(Error::Plan("exchange source cannot have children".into()));
         }
-        let service = self.service.clone();
         graph
             .pipeline_mut(current)?
-            .set_source(Box::new(ExchangeSourceExec::new(self.clone(), service)))
+            .set_source(Box::new(ExchangeSourceExec::new(self.clone())))
     }
 }
 
@@ -73,23 +98,18 @@ impl Operator for ExchangeSinkOperator {
 
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        let [child] = node.children() else {
+        let [child] = current_node.children() else {
             return Err(Error::Plan(
                 "exchange sink operator requires one child".into(),
             ));
         };
-        let service = self.service.clone();
         graph
             .pipeline_mut(current)?
-            .set_sink(Box::new(ExchangeSinkExec::new(
-                self.clone(),
-                service,
-                self.schema.clone(),
-            )))?;
-        build_pipeline_node(child, current, graph)
+            .set_sink(Box::new(ExchangeSinkExec::new(self.clone())))?;
+        build_pipeline_on_node(child, current, graph)
     }
 }

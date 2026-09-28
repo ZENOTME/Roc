@@ -1,9 +1,13 @@
 //! Pipeline task execution and pipeline-graph scheduling.
 use super::{Pipeline, PipelineGraph};
 use crate::{
-    CancellationToken, Error, Result,
-    exec::{GlobalExecContextRef, ProcessExecutor, SinkExecutor, SinkStatus, SourceExecutor},
+    Cancel, Error, Result,
+    exec::{
+        GlobalExecContextRef, ProcessExecutor, ProcessResult, SinkExecutor, SinkResult,
+        SourceExecutor,
+    },
 };
+use arrow::record_batch::RecordBatch;
 use futures::{
     StreamExt,
     future::{Either, select},
@@ -28,6 +32,7 @@ pub trait Executor: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineExecutionConfig {
     pub batch_rows: usize,
+    /// Maximum execute/finish/sink calls between yields, including empty outputs.
     pub yield_batches: usize,
 }
 
@@ -53,7 +58,7 @@ impl PipelineExecutionConfig {
 pub struct PipelineGraphExecutor<E> {
     graph: PipelineGraph,
     task_executor: E,
-    cancel: CancellationToken,
+    cancel: Cancel,
     config: PipelineExecutionConfig,
     parallelism: usize,
 }
@@ -63,7 +68,7 @@ impl PipelineGraphExecutor<()> {
         Self {
             graph,
             task_executor: (),
-            cancel: CancellationToken::new(),
+            cancel: Cancel::new(),
             config: PipelineExecutionConfig::default(),
             parallelism: 1,
         }
@@ -81,7 +86,7 @@ impl<E> PipelineGraphExecutor<E> {
         }
     }
 
-    pub fn with_cancel(mut self, cancel: CancellationToken) -> Self {
+    pub fn with_cancel(mut self, cancel: Cancel) -> Self {
         self.cancel = cancel;
         self
     }
@@ -97,7 +102,7 @@ impl<E> PipelineGraphExecutor<E> {
     }
 }
 
-struct CancelOnDrop(CancellationToken);
+struct CancelOnDrop(Cancel);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
@@ -116,7 +121,7 @@ impl Pipeline {
     pub async fn execute<E: Executor>(
         self,
         task_executor: Arc<E>,
-        cancel: CancellationToken,
+        cancel: Cancel,
         config: PipelineExecutionConfig,
         parallelism: usize,
     ) -> Result<()> {
@@ -124,9 +129,9 @@ impl Pipeline {
         if parallelism == 0 {
             return Err(Error::Plan("task parallelism must be positive".into()));
         }
-        let local_cancel = cancel.child_token();
+        let local_cancel = cancel.child();
         let _guard = CancelOnDrop(local_cancel.clone());
-        let global = self.init_global_context(config.batch_rows, &local_cancel)?;
+        let global = self.init_global_context(&local_cancel)?;
         let executors = (0..parallelism)
             .map(|_| self.new_executor(&global))
             .collect::<Result<Vec<_>>>()?;
@@ -157,18 +162,14 @@ impl Pipeline {
         self.finalize(&global, &local_cancel).await
     }
 
-    fn init_global_context(
-        &self,
-        batch_rows: usize,
-        cancel: &CancellationToken,
-    ) -> Result<PipelineGlobalContext> {
-        let sink = self.sink.init_global_context(batch_rows, cancel)?;
+    fn init_global_context(&self, cancel: &Cancel) -> Result<PipelineGlobalContext> {
+        let sink = self.sink.init_global_context(cancel)?;
         let processors = self
             .processors
             .iter()
-            .map(|process| process.init_global_context(batch_rows, cancel))
+            .map(|process| process.init_global_context(cancel))
             .collect::<Result<Vec<_>>>()?;
-        let source = self.source.init_global_context(batch_rows, cancel)?;
+        let source = self.source.init_global_context(cancel)?;
         Ok(PipelineGlobalContext {
             source,
             processors,
@@ -192,11 +193,7 @@ impl Pipeline {
         })
     }
 
-    async fn finalize(
-        &self,
-        global: &PipelineGlobalContext,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
+    async fn finalize(&self, global: &PipelineGlobalContext, cancel: &Cancel) -> Result<()> {
         self.source.finalize(global.source.clone(), cancel).await?;
         self.sink.finalize(global.sink.clone(), cancel).await
     }
@@ -209,35 +206,86 @@ struct PipelineExecutor {
     sink: Box<dyn SinkExecutor>,
 }
 impl PipelineExecutor {
-    async fn execute(
-        mut self,
-        cancel: CancellationToken,
-        config: PipelineExecutionConfig,
-    ) -> Result<()> {
-        let mut yielded_batches = 0;
-        'source: loop {
-            let morsel = self.source.next_batch(&cancel).await?;
-            let Some(morsel) = morsel else { break };
-            for offset in (0..morsel.num_rows()).step_by(config.batch_rows) {
-                if cancel.is_cancelled() {
-                    return Err(Error::Cancelled);
+    async fn execute(mut self, cancel: Cancel, config: PipelineExecutionConfig) -> Result<()> {
+        let mut work_since_yield = 0;
+        // Pending calls form a depth-first stack. A MoreResult continuation stays
+        // below its output so downstream drains before the input is reused.
+        let mut pending: Vec<(usize, RecordBatch)> = Vec::with_capacity(self.processors.len() + 1);
+        let mut morsel: Option<RecordBatch> = None;
+        let mut offset = 0;
+        // Once input ends, finish processors in order. Their outputs must drain
+        // through the remaining pipeline before finishing the next processor.
+        let mut finishing = None;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if let Some((index, input)) = pending.pop() {
+                if index == self.processors.len() {
+                    if self.sink.sink(&cancel, &input).await? == SinkResult::Finished {
+                        break;
+                    }
+                } else {
+                    let output = match self.processors[index].execute(&cancel, &input)? {
+                        ProcessResult::NeedMoreInput(output) => output,
+                        ProcessResult::MoreResult(output) => {
+                            pending.push((index, input));
+                            output
+                        }
+                        ProcessResult::Finished(output) => {
+                            pending.clear();
+                            morsel = None;
+                            finishing = Some(index + 1);
+                            output
+                        }
+                    };
+                    if output.num_rows() > 0 {
+                        pending.push((index + 1, output));
+                    }
                 }
-                let mut batch =
-                    morsel.slice(offset, config.batch_rows.min(morsel.num_rows() - offset));
-                for processor in &mut self.processors {
-                    batch = processor.execute(&cancel, batch)?;
+            } else if let Some(index) = finishing {
+                if index == self.processors.len() {
+                    break;
                 }
-                let status = self.sink.sink(&cancel, &batch).await?;
-                if status == SinkStatus::Finished {
-                    break 'source;
+                match self.processors[index].finish(&cancel)? {
+                    Some(output) => {
+                        if output.num_rows() > 0 {
+                            pending.push((index + 1, output));
+                        }
+                    }
+                    None => finishing = Some(index + 1),
                 }
-                yielded_batches += 1;
-                if yielded_batches >= config.yield_batches {
-                    yielded_batches = 0;
+            } else {
+                if morsel.is_none() {
+                    morsel = self.source.next_batch(&cancel).await?;
+                    offset = 0;
+                }
+                let Some(input) = &morsel else {
+                    finishing = Some(0);
+                    continue;
+                };
+                if input.num_rows() == 0 {
+                    morsel = None;
                     yield_now().await;
+                    continue;
                 }
+                let rows = config.batch_rows.min(input.num_rows() - offset);
+                pending.push((0, input.slice(offset, rows)));
+                offset += rows;
+                if offset == input.num_rows() {
+                    morsel = None;
+                }
+                continue;
+            }
+            // Include empty continuations and finish outputs so draining cannot
+            // prevent cancellation or cooperative yield.
+            work_since_yield += 1;
+            if work_since_yield >= config.yield_batches {
+                work_since_yield = 0;
+                yield_now().await;
             }
         }
+        pending.clear();
         self.sink.combine(&cancel).await
     }
 }
@@ -264,7 +312,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         if self.parallelism == 0 {
             return Err(Error::Plan("task parallelism must be positive".into()));
         }
-        let graph_cancel = self.cancel.child_token();
+        let graph_cancel = self.cancel.child();
         let _guard = CancelOnDrop(graph_cancel.clone());
         let mut graph = self.graph;
         let mut remaining_dependencies =
@@ -343,3 +391,6 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,49 +1,38 @@
-use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor};
-use crate::{Error, Result, expr, operator::ProjectOperator};
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
+use crate::{Cancel, Result};
+use arrow::record_batch::RecordBatch;
+use datafusion_physical_expr::projection::Projector;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct ProjectExec {
-    operator: ProjectOperator,
-    schema: SchemaRef,
+    projector: Projector,
 }
 
 impl ProjectExec {
-    pub fn new(operator: ProjectOperator, schema: SchemaRef) -> Self {
-        Self { operator, schema }
+    pub fn new(projector: Projector) -> Self {
+        Self { projector }
     }
 }
 
 impl ProcessExec for ProjectExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &crate::CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
-        global.downcast::<()>().map_err(|_| {
-            Error::Execution("project exec received an invalid global context".into())
-        })?;
-        Ok(Box::new(ProjectExecutor {
-            operator: self.operator.clone(),
-            schema: self.schema.clone(),
-        }))
+
+    fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
+        Ok(Box::new(self.clone()))
     }
 }
 
-struct ProjectExecutor {
-    operator: ProjectOperator,
-    schema: SchemaRef,
-}
+impl ProcessExecutor for ProjectExec {
+    fn execute(&mut self, _cancel: &Cancel, input: &RecordBatch) -> Result<ProcessResult> {
+        Ok(ProcessResult::NeedMoreInput(
+            self.projector.project_batch(input)?,
+        ))
+    }
 
-impl ProcessExecutor for ProjectExecutor {
-    fn execute(
-        &mut self,
-        _cancel: &crate::CancellationToken,
-        input: RecordBatch,
-    ) -> Result<RecordBatch> {
-        expr::project(input, &self.operator.expressions, self.schema.clone())
+    fn finish(&mut self, _cancel: &Cancel) -> Result<Option<RecordBatch>> {
+        Ok(None)
     }
 }

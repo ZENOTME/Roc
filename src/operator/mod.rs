@@ -4,7 +4,7 @@ mod filter;
 mod project;
 mod scan;
 
-pub use aggregate::{AggregateExpr, AggregateFunction, AggregateLayout, AggregateOperator};
+pub use aggregate::AggregateOperator;
 pub use exchange::{
     ExchangeConsumer, ExchangeHandle, ExchangeId, ExchangeService, ExchangeSink,
     ExchangeSinkOperator, ExchangeSourceOperator,
@@ -23,11 +23,13 @@ use crate::{
 use std::{fmt::Debug, sync::Arc};
 
 pub trait Operator: Debug + Send + Sync {
+    /// Operator name.
     fn name(&self) -> &'static str;
 
+    /// Builds pipeline base on this operator.
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()>;

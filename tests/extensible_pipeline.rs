@@ -1,20 +1,16 @@
 use futures::future::BoxFuture;
 use roc::{
-    CancellationToken, Error, Result,
+    Cancel, Error, Result,
     exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
     operator::{Operator, OperatorTree, OperatorTreeNode},
-    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_node},
+    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
 };
 use std::sync::Arc;
 
 struct NoopExec;
 
 impl SourceExec for NoopExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &roc::CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
@@ -22,13 +18,17 @@ impl SourceExec for NoopExec {
             "this test only constructs the graph".into(),
         ))
     }
+
+    fn finalize<'a>(
+        &'a self,
+        _global: GlobalExecContextRef,
+        _cancel: &'a Cancel,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 impl SinkExec for NoopExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &roc::CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
 
@@ -40,7 +40,7 @@ impl SinkExec for NoopExec {
     fn finalize<'a>(
         &'a self,
         _global: GlobalExecContextRef,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -61,11 +61,11 @@ impl Operator for CustomSource {
     }
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        assert!(node.children().is_empty());
+        assert!(current_node.children().is_empty());
         graph.pipeline_mut(current)?.set_source(Box::new(NoopExec))
     }
 }
@@ -75,17 +75,17 @@ impl Operator for CustomBarrier {
     }
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        assert_eq!(node.children().len(), 1);
+        assert_eq!(current_node.children().len(), 1);
         graph
             .pipeline_mut(current)?
             .set_source(Box::new(NoopExec))?;
         let producer = graph.new_dependency(current)?;
         graph.pipeline_mut(producer)?.set_sink(Box::new(NoopExec))?;
-        build_pipeline_node(&node.children()[0], producer, graph)
+        build_pipeline_on_node(&current_node.children()[0], producer, graph)
     }
 }
 impl Operator for CustomSink {
@@ -94,13 +94,13 @@ impl Operator for CustomSink {
     }
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        assert_eq!(node.children().len(), 1);
+        assert_eq!(current_node.children().len(), 1);
         graph.pipeline_mut(current)?.set_sink(Box::new(NoopExec))?;
-        build_pipeline_node(&node.children()[0], current, graph)
+        build_pipeline_on_node(&current_node.children()[0], current, graph)
     }
 }
 
@@ -110,17 +110,17 @@ impl Operator for CustomTwoInput {
     }
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         graph
             .pipeline_mut(current)?
             .set_source(Box::new(NoopExec))?;
-        for child in node.children() {
+        for child in current_node.children() {
             let input = graph.new_dependency(current)?;
             graph.pipeline_mut(input)?.set_sink(Box::new(NoopExec))?;
-            build_pipeline_node(child, input, graph)?;
+            build_pipeline_on_node(child, input, graph)?;
         }
         Ok(())
     }

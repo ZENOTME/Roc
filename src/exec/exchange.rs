@@ -1,5 +1,5 @@
-use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkStatus, SourceExec, SourceExecutor};
-use crate::CancellationToken;
+use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
+use crate::Cancel;
 use crate::{
     Error, Result,
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
@@ -21,20 +21,14 @@ pub struct ExchangeSourceExec {
 }
 
 impl ExchangeSourceExec {
-    pub fn new(operator: ExchangeSourceOperator, service: Arc<dyn ExchangeService>) -> Self {
-        Self {
-            exchange: operator.exchange,
-            service,
-        }
+    pub fn new(operator: ExchangeSourceOperator) -> Self {
+        let (exchange, service) = operator.into_parts();
+        Self { exchange, service }
     }
 }
 
 impl SourceExec for ExchangeSourceExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(self.service.start_input(self.exchange, cancel)?))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
@@ -49,7 +43,7 @@ impl SourceExec for ExchangeSourceExec {
     fn finalize<'a>(
         &'a self,
         global: GlobalExecContextRef,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let global = global.downcast::<Arc<dyn ExchangeHandle>>().map_err(|_| {
@@ -67,10 +61,10 @@ struct ExchangeSourceExecutor {
 impl SourceExecutor for ExchangeSourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        ctx: &'a CancellationToken,
+        cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            let cancelled = ctx.cancelled().fuse();
+            let cancelled = cancel.cancelled().fuse();
             let next = self.consumer.next().fuse();
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
@@ -82,25 +76,18 @@ impl SourceExecutor for ExchangeSourceExecutor {
 }
 
 impl ExchangeSinkExec {
-    pub fn new(
-        operator: ExchangeSinkOperator,
-        service: Arc<dyn ExchangeService>,
-        schema: SchemaRef,
-    ) -> Self {
+    pub fn new(operator: ExchangeSinkOperator) -> Self {
+        let (exchanges, schema, service) = operator.into_parts();
         Self {
-            exchanges: operator.exchanges,
-            service,
+            exchanges,
             schema,
+            service,
         }
     }
 }
 
 impl SinkExec for ExchangeSinkExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
@@ -118,7 +105,7 @@ impl SinkExec for ExchangeSinkExec {
     fn finalize<'a>(
         &'a self,
         global: GlobalExecContextRef,
-        _ctx: &'a CancellationToken,
+        _cancel: &'a Cancel,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             global.downcast::<()>().map_err(|_| {
@@ -136,18 +123,18 @@ struct ExchangeSinkExecutor {
 impl SinkExecutor for ExchangeSinkExecutor {
     fn sink<'a>(
         &'a mut self,
-        ctx: &'a CancellationToken,
+        cancel: &'a Cancel,
         input: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkStatus>> {
+    ) -> BoxFuture<'a, Result<SinkResult>> {
         Box::pin(async move {
             for output in &mut self.outputs {
-                output.send(input, ctx).await?;
+                output.send(input, cancel).await?;
             }
-            Ok(SinkStatus::NeedMoreInput)
+            Ok(SinkResult::NeedMoreInput)
         })
     }
 
-    fn combine<'a>(self: Box<Self>, _ctx: &'a CancellationToken) -> BoxFuture<'a, Result<()>> {
+    fn combine(self: Box<Self>, _cancel: &Cancel) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

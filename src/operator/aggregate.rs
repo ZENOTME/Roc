@@ -1,133 +1,54 @@
 use super::Operator;
 use crate::{
     Error, Result,
-    expr::{self, Expr, NamedExpr},
-};
-use crate::{
-    exec::aggregate_execs,
     operator::OperatorTreeNode,
-    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_node},
+    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{Schema, SchemaRef};
+use datafusion_physical_expr::{aggregate::AggregateFunctionExpr, projection::Projector};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum AggregateFunction {
-    Count,
-    Sum,
-    Min,
-    Max,
-    Avg,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AggregateExpr {
-    pub name: String,
-    pub function: AggregateFunction,
-    /// None means COUNT(*); other functions require an expression.
-    pub expr: Option<Expr>,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AggregateOperator {
-    pub groups: Vec<NamedExpr>,
-    pub aggregates: Vec<AggregateExpr>,
-    pub input_schema: SchemaRef,
-}
-
-/// Schema-derived layout shared by the aggregate sink/source execution pair.
+/// Prepared DataFusion aggregates and grouping expressions.
 #[derive(Clone, Debug)]
-pub struct AggregateLayout {
-    pub operator: AggregateOperator,
-    pub output_schema: SchemaRef,
-    pub partial_schema: SchemaRef,
-    pub group_schema: SchemaRef,
-    pub value_types: Vec<DataType>,
+pub struct AggregateOperator {
+    groups: Projector,
+    aggregates: Vec<Arc<AggregateFunctionExpr>>,
 }
 
 impl AggregateOperator {
-    pub fn layout(&self, input: &SchemaRef) -> Result<AggregateLayout> {
-        if self.aggregates.is_empty() && self.groups.is_empty() {
+    /// Both the group projector and aggregate expressions must already be bound
+    /// to the same input. Fields and partial states come directly from DataFusion.
+    /// An empty group projector denotes global aggregation. Aggregates with an
+    /// effective ORDER BY are unsupported because workers do not preserve order.
+    pub fn try_new(groups: Projector, aggregates: Vec<Arc<AggregateFunctionExpr>>) -> Result<Self> {
+        if aggregates.is_empty() && groups.output_schema().fields().is_empty() {
             return Err(Error::Plan("aggregate needs a group or function".into()));
         }
-        let group_schema = expr::project_schema(input, &self.groups)?;
-        for field in group_schema.fields() {
-            if !matches!(
-                field.data_type(),
-                DataType::Boolean | DataType::Int32 | DataType::Int64 | DataType::Utf8
-            ) {
-                return Err(Error::Plan(format!(
-                    "unsupported group key type: {}",
-                    field.data_type()
-                )));
+        for aggregate in &aggregates {
+            if !aggregate.order_bys().is_empty() {
+                return Err(Error::Plan(
+                    "ordered aggregates require ordering support in the aggregate executor".into(),
+                ));
             }
         }
-        let mut fields: Vec<Field> = group_schema
-            .fields()
-            .iter()
-            .map(|field| field.as_ref().clone())
-            .collect();
-        let mut partial = fields.clone();
-        let mut value_types = vec![];
-        for (index, aggregate) in self.aggregates.iter().enumerate() {
-            let ty = match (&aggregate.expr, aggregate.function) {
-                (None, AggregateFunction::Count) => DataType::Int64,
-                (None, _) => return Err(Error::Plan("only COUNT accepts no expression".into())),
-                (Some(expression), function) => {
-                    let ty = expression.data_type(input)?;
-                    if function == AggregateFunction::Count {
-                        DataType::Int64
-                    } else {
-                        match ty {
-                            DataType::Int32 | DataType::Int64 => DataType::Int64,
-                            DataType::Float64 => DataType::Float64,
-                            _ => {
-                                return Err(Error::Plan(format!(
-                                    "unsupported aggregate type: {ty}"
-                                )));
-                            }
-                        }
-                    }
-                }
-            };
-            let output_type = if aggregate.function == AggregateFunction::Avg {
-                DataType::Float64
-            } else {
-                ty.clone()
-            };
-            fields.push(Field::new(
-                &aggregate.name,
-                output_type,
-                aggregate.function != AggregateFunction::Count,
-            ));
-            let partial_type = if ty == DataType::Int64
-                && matches!(
-                    aggregate.function,
-                    AggregateFunction::Sum | AggregateFunction::Avg
-                ) {
-                DataType::Decimal128(38, 0)
-            } else {
-                ty.clone()
-            };
-            partial.push(Field::new(format!("__a{index}_value"), partial_type, true));
-            partial.push(Field::new(
-                format!("__a{index}_count"),
-                DataType::Int64,
-                false,
-            ));
-            value_types.push(ty);
-        }
-        let mut names = std::collections::HashSet::new();
-        if fields.iter().any(|field| !names.insert(field.name())) {
-            return Err(Error::Plan("duplicate aggregate output name".into()));
-        }
-        Ok(AggregateLayout {
-            operator: self.clone(),
-            output_schema: Arc::new(Schema::new(fields)),
-            partial_schema: Arc::new(Schema::new(partial)),
-            group_schema,
-            value_types,
-        })
+        Ok(Self { groups, aggregates })
+    }
+
+    pub(crate) fn groups(&self) -> &Projector {
+        &self.groups
+    }
+
+    pub(crate) fn aggregates(&self) -> &[Arc<AggregateFunctionExpr>] {
+        &self.aggregates
+    }
+
+    pub fn output_schema(&self) -> SchemaRef {
+        let mut fields = self.groups.output_schema().fields().to_vec();
+        fields.extend(self.aggregates.iter().map(|aggregate| aggregate.field()));
+        Arc::new(Schema::new_with_metadata(
+            fields,
+            self.groups.output_schema().metadata().clone(),
+        ))
     }
 }
 
@@ -138,17 +59,17 @@ impl Operator for AggregateOperator {
 
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        let [child] = node.children() else {
+        let [child] = current_node.children() else {
             return Err(Error::Plan("aggregate operator requires one child".into()));
         };
-        let (sink, source) = aggregate_execs(self.layout(&self.input_schema)?);
+        let (sink, source) = self.clone().into_execs();
         graph.pipeline_mut(current)?.set_source(Box::new(source))?;
         let input = graph.new_dependency(current)?;
         graph.pipeline_mut(input)?.set_sink(Box::new(sink))?;
-        build_pipeline_node(child, input, graph)
+        build_pipeline_on_node(child, input, graph)
     }
 }

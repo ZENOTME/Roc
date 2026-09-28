@@ -7,14 +7,16 @@ description = "Extensible Arrow execution engine with pipeline scheduling"
 license = "Apache-2.0"
 
 [dependencies]
-arrow = { version = "56.2.0", default-features = false }
+arrow = { version = "59.2.0", default-features = false }
 async-channel = "2.5"
-arrow-schema = { version = "=56.2.1", features = ["serde"] }
+asyncband = { version = "0.7.2", default-features = false, features = ["shutdown"] }
+datafusion-common = { version = "55.1.0", default-features = false }
+datafusion-expr-common = { version = "55.1.0", default-features = false }
+datafusion-physical-expr = { version = "55.1.0", default-features = false }
 futures = "0.3"
-serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio-util = "0.7"
 
 [dev-dependencies]
+datafusion-functions-aggregate = { version = "55.1.0", default-features = false }
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }

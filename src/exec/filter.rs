@@ -1,46 +1,49 @@
-use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor};
-use crate::{Error, Result, expr, operator::FilterOperator};
-use arrow::record_batch::RecordBatch;
+use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
+use crate::{Cancel, Error, PhysicalExprRef, Result};
+use arrow::{array::BooleanArray, compute::filter_record_batch, record_batch::RecordBatch};
+use datafusion_common::ScalarValue;
+use datafusion_expr_common::columnar_value::ColumnarValue;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct FilterExec {
-    operator: FilterOperator,
+    predicate: PhysicalExprRef,
 }
 
 impl FilterExec {
-    pub fn new(operator: FilterOperator) -> Self {
-        Self { operator }
+    pub fn new(predicate: PhysicalExprRef) -> Self {
+        Self { predicate }
     }
 }
 
 impl ProcessExec for FilterExec {
-    fn init_global_context(
-        &self,
-        _batch_rows: usize,
-        _cancel: &crate::CancellationToken,
-    ) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
-        global.downcast::<()>().map_err(|_| {
-            Error::Execution("filter exec received an invalid global context".into())
-        })?;
-        Ok(Box::new(FilterExecutor {
-            operator: self.operator.clone(),
-        }))
+
+    fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
+        Ok(Box::new(self.clone()))
     }
 }
 
-struct FilterExecutor {
-    operator: FilterOperator,
-}
+impl ProcessExecutor for FilterExec {
+    fn execute(&mut self, _cancel: &Cancel, input: &RecordBatch) -> Result<ProcessResult> {
+        let output = match self.predicate.evaluate(input)? {
+            ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))) => input.clone(),
+            ColumnarValue::Scalar(ScalarValue::Boolean(Some(false) | None)) => input.slice(0, 0),
+            ColumnarValue::Array(array) => {
+                let mask = array
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .ok_or_else(|| Error::Execution("predicate must be Boolean".into()))?;
+                filter_record_batch(input, mask)?
+            }
+            _ => return Err(Error::Execution("predicate must be Boolean".into())),
+        };
+        Ok(ProcessResult::NeedMoreInput(output))
+    }
 
-impl ProcessExecutor for FilterExecutor {
-    fn execute(
-        &mut self,
-        _cancel: &crate::CancellationToken,
-        input: RecordBatch,
-    ) -> Result<RecordBatch> {
-        expr::filter(input, &self.operator.predicate)
+    fn finish(&mut self, _cancel: &Cancel) -> Result<Option<RecordBatch>> {
+        Ok(None)
     }
 }

@@ -1,18 +1,23 @@
 //! Filter operator descriptor.
 use super::Operator;
-use crate::expr::Expr;
+use crate::PhysicalExprRef;
 use crate::{
     Error, Result,
     exec::FilterExec,
     operator::OperatorTreeNode,
-    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_node},
+    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{DataType, SchemaRef};
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct FilterOperator {
-    pub predicate: Expr,
-    pub input_schema: SchemaRef,
+    /// Bound to the child output. Filtering preserves the input batch schema.
+    predicate: PhysicalExprRef,
+}
+
+impl FilterOperator {
+    pub fn new(predicate: PhysicalExprRef) -> Self {
+        Self { predicate }
+    }
 }
 
 impl Operator for FilterOperator {
@@ -22,19 +27,16 @@ impl Operator for FilterOperator {
 
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        let [child] = node.children() else {
+        let [child] = current_node.children() else {
             return Err(Error::Plan("filter operator requires one child".into()));
         };
-        if self.predicate.data_type(&self.input_schema)? != DataType::Boolean {
-            return Err(Error::Plan("filter predicate must be Boolean".into()));
-        }
         graph
             .pipeline_mut(current)?
-            .add_processor(Box::new(FilterExec::new(self.clone())));
-        build_pipeline_node(child, current, graph)
+            .add_processor(Box::new(FilterExec::new(self.predicate.clone())));
+        build_pipeline_on_node(child, current, graph)
     }
 }

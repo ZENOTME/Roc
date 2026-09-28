@@ -197,7 +197,7 @@ impl PipelineGraph {
 mod tests {
     use super::*;
 
-    use crate::CancellationToken;
+    use crate::Cancel;
     use crate::{
         Error, Result,
         exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
@@ -207,23 +207,23 @@ mod tests {
     struct UnusedExec;
 
     impl SourceExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _batch_rows: usize,
-            _cancel: &CancellationToken,
-        ) -> Result<GlobalExecContextRef> {
+        fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
             Err(Error::Execution("not run by graph tests".into()))
         }
         fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
             Err(Error::Execution("not run by graph tests".into()))
         }
+
+        fn finalize<'a>(
+            &'a self,
+            _global: GlobalExecContextRef,
+            _cancel: &'a Cancel,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
     }
     impl SinkExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _batch_rows: usize,
-            _cancel: &CancellationToken,
-        ) -> Result<GlobalExecContextRef> {
+        fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
             Err(Error::Execution("not run by graph tests".into()))
         }
 
@@ -233,7 +233,7 @@ mod tests {
         fn finalize<'a>(
             &'a self,
             _global: GlobalExecContextRef,
-            _ctx: &'a CancellationToken,
+            _cancel: &'a Cancel,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }

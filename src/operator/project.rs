@@ -1,19 +1,23 @@
 //! Projection operator descriptor.
 use super::Operator;
-use crate::expr::NamedExpr;
 use crate::{
     Error, Result,
     exec::ProjectExec,
-    expr,
     operator::OperatorTreeNode,
-    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_node},
+    pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::SchemaRef;
+use datafusion_physical_expr::projection::Projector;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ProjectOperator {
-    pub expressions: Vec<NamedExpr>,
-    pub input_schema: SchemaRef,
+    /// Prepared by the host against the child's output schema.
+    projector: Projector,
+}
+
+impl ProjectOperator {
+    pub fn new(projector: Projector) -> Self {
+        Self { projector }
+    }
 }
 
 impl Operator for ProjectOperator {
@@ -23,17 +27,16 @@ impl Operator for ProjectOperator {
 
     fn build_pipeline(
         &self,
-        node: &OperatorTreeNode,
+        current_node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        let [child] = node.children() else {
+        let [child] = current_node.children() else {
             return Err(Error::Plan("project operator requires one child".into()));
         };
-        let schema = expr::project_schema(&self.input_schema, &self.expressions)?;
         graph
             .pipeline_mut(current)?
-            .add_processor(Box::new(ProjectExec::new(self.clone(), schema)));
-        build_pipeline_node(child, current, graph)
+            .add_processor(Box::new(ProjectExec::new(self.projector.clone())));
+        build_pipeline_on_node(child, current, graph)
     }
 }
