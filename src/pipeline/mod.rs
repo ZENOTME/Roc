@@ -3,12 +3,12 @@ mod execution;
 mod graph;
 
 pub use build::{build_pipeline_graph, build_pipeline_on_node};
-pub(crate) use execution::yield_now;
+pub use execution::yield_now;
 pub use execution::{Executor, PipelineExecutionConfig, PipelineGraphExecutor};
 pub use graph::{PipelineGraph, PipelineGraphBuilder, PipelineGraphError, PipelineId};
 
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     exec::{ProcessExec, SinkExec, SourceExec},
 };
 
@@ -37,7 +37,9 @@ impl PipelineBuilder {
 
     pub fn set_source(&mut self, source: Box<dyn SourceExec>) -> Result<()> {
         if self.source.is_some() {
-            return Err(Error::Plan("pipeline has more than one source".into()));
+            return Err(Error::InvalidPlan(
+                "pipeline has more than one source".into(),
+            ));
         }
         self.source = Some(source);
         Ok(())
@@ -49,7 +51,7 @@ impl PipelineBuilder {
 
     pub fn set_sink(&mut self, sink: Box<dyn SinkExec>) -> Result<()> {
         if self.sink.is_some() {
-            return Err(Error::Plan("pipeline has more than one sink".into()));
+            return Err(Error::InvalidPlan("pipeline has more than one sink".into()));
         }
         self.sink = Some(sink);
         Ok(())
@@ -60,11 +62,11 @@ impl PipelineBuilder {
         Ok(Pipeline {
             source: self
                 .source
-                .ok_or_else(|| Error::Plan("pipeline has no source".into()))?,
+                .ok_or_else(|| Error::InvalidPlan("pipeline has no source".into()))?,
             processors: self.processors,
             sink: self
                 .sink
-                .ok_or_else(|| Error::Plan("pipeline has no sink".into()))?,
+                .ok_or_else(|| Error::InvalidPlan("pipeline has no sink".into()))?,
         })
     }
 }

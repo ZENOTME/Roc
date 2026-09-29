@@ -1,11 +1,11 @@
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
-use crate::Cancel;
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
     operator::{ExchangeId, ExchangeSinkOperator, ExchangeSourceOperator},
 };
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use asyncband::shutdown::ShutdownGuard;
 use futures::{FutureExt, future::BoxFuture};
 use std::sync::Arc;
 
@@ -28,47 +28,60 @@ impl ExchangeSourceExec {
 }
 
 impl SourceExec for ExchangeSourceExec {
-    fn init_global_context(&self, cancel: &Cancel) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(self.service.start_input(self.exchange, cancel)?))
+    fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
+        let handle = self.service.start_input(self.exchange, shutdown_guard)?;
+        Ok(Arc::new(ExchangeSourceGlobalContext { handle }))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        let global = global.downcast::<Arc<dyn ExchangeHandle>>().map_err(|_| {
-            Error::Execution("exchange source received an invalid global context".into())
-        })?;
+        let global = global
+            .downcast::<ExchangeSourceGlobalContext>()
+            .map_err(|_| {
+                Error::Execution("exchange source received an invalid global context".into())
+            })?;
         Ok(Box::new(ExchangeSourceExecutor {
-            consumer: global.consumer(),
+            consumer: global.handle.consumer(),
+            _global: global,
         }))
     }
 
     fn finalize<'a>(
         &'a self,
         global: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let global = global.downcast::<Arc<dyn ExchangeHandle>>().map_err(|_| {
-                Error::Execution("exchange source received an invalid global context".into())
-            })?;
-            global.finish().await
+            let global = global
+                .downcast::<ExchangeSourceGlobalContext>()
+                .map_err(|_| {
+                    Error::Execution("exchange source received an invalid global context".into())
+                })?;
+            global.handle.finish().await
         })
     }
 }
 
+struct ExchangeSourceGlobalContext {
+    handle: Arc<dyn ExchangeHandle>,
+}
+
 struct ExchangeSourceExecutor {
     consumer: Box<dyn ExchangeConsumer>,
+    _global: Arc<ExchangeSourceGlobalContext>,
 }
 
 impl SourceExecutor for ExchangeSourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        cancel: &'a Cancel,
+        shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            let cancelled = cancel.cancelled().fuse();
+            let cancelled = shutdown_guard.shutdown_requested().fuse();
             let next = self.consumer.next().fuse();
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
-                _ = cancelled => Err(Error::Cancelled),
+                _ = cancelled => {
+                    Err(Error::Cancelled)
+                },
                 batch = next => Ok(batch),
             }
         })
@@ -87,7 +100,7 @@ impl ExchangeSinkExec {
 }
 
 impl SinkExec for ExchangeSinkExec {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
@@ -105,7 +118,7 @@ impl SinkExec for ExchangeSinkExec {
     fn finalize<'a>(
         &'a self,
         global: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             global.downcast::<()>().map_err(|_| {
@@ -123,18 +136,18 @@ struct ExchangeSinkExecutor {
 impl SinkExecutor for ExchangeSinkExecutor {
     fn sink<'a>(
         &'a mut self,
-        cancel: &'a Cancel,
+        shutdown_guard: &'a ShutdownGuard,
         input: &'a RecordBatch,
     ) -> BoxFuture<'a, Result<SinkResult>> {
         Box::pin(async move {
             for output in &mut self.outputs {
-                output.send(input, cancel).await?;
+                output.send(input, shutdown_guard).await?;
             }
             Ok(SinkResult::NeedMoreInput)
         })
     }
 
-    fn combine(self: Box<Self>, _cancel: &Cancel) -> BoxFuture<'_, Result<()>> {
+    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }

@@ -4,18 +4,18 @@ use arrow::record_batch::RecordBatch;
 /// the execution engine. Storage-specific descriptors remain generic; decoded
 /// output does not.
 pub struct ScanSender<E> {
-    inner: async_channel::Sender<Result<RecordBatch, E>>,
+    inner: asyncband::mpmc::BoundedSender<Result<RecordBatch, E>>,
 }
 
 pub struct ScanReceiver<E> {
-    inner: async_channel::Receiver<Result<RecordBatch, E>>,
+    inner: asyncband::mpmc::BoundedReceiver<Result<RecordBatch, E>>,
 }
 
 #[derive(Debug)]
 pub struct ScanSendError<E>(pub Result<RecordBatch, E>);
 
 pub fn scan_channel<E>(capacity: usize) -> (ScanSender<E>, ScanReceiver<E>) {
-    let (sender, receiver) = async_channel::bounded(capacity);
+    let (sender, receiver) = asyncband::mpmc::bounded(capacity);
     (
         ScanSender { inner: sender },
         ScanReceiver { inner: receiver },
@@ -27,11 +27,7 @@ impl<E> ScanSender<E> {
         self.inner
             .send(item)
             .await
-            .map_err(|error| ScanSendError(error.0))
-    }
-
-    pub fn close(&self) -> bool {
-        self.inner.close()
+            .map_err(|error| ScanSendError(error.into_inner()))
     }
 }
 
@@ -44,13 +40,9 @@ impl<E> Clone for ScanSender<E> {
 }
 
 impl<E> ScanReceiver<E> {
-    /// Returns `None` when every producer has closed its side of the channel.
+    /// Drains buffered items after all senders are dropped, then returns `None`.
     pub async fn recv(&self) -> Option<Result<RecordBatch, E>> {
         self.inner.recv().await.ok()
-    }
-
-    pub fn close(&self) -> bool {
-        self.inner.close()
     }
 }
 
@@ -80,6 +72,65 @@ mod tests {
             drop(sender);
             assert!(first.recv().await.is_some());
             assert!(second.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn full_queue_applies_backpressure_and_drains_before_disconnect() {
+        futures::executor::block_on(async {
+            let (sender, receiver) = scan_channel::<u32>(1);
+            let last_sender = sender.clone();
+            sender.send(Err(1)).await.unwrap();
+            let mut pending = Box::pin(sender.send(Err(2)));
+            assert!(futures::poll!(&mut pending).is_pending());
+            assert!(matches!(receiver.recv().await, Some(Err(1))));
+            pending.await.unwrap();
+            drop(sender);
+            assert!(matches!(receiver.recv().await, Some(Err(2))));
+            let mut pending = Box::pin(receiver.recv());
+            assert!(futures::poll!(&mut pending).is_pending());
+            drop(last_sender);
+            assert!(matches!(
+                futures::poll!(&mut pending),
+                std::task::Poll::Ready(None)
+            ));
+        });
+    }
+
+    #[test]
+    fn dropping_last_receiver_wakes_sender_and_returns_unsent_item() {
+        futures::executor::block_on(async {
+            let (sender, receiver) = scan_channel::<u32>(1);
+            let last_receiver = receiver.clone();
+            sender.send(Err(1)).await.unwrap();
+            let mut pending = Box::pin(sender.send(Err(2)));
+            assert!(futures::poll!(&mut pending).is_pending());
+            drop(receiver);
+            assert!(futures::poll!(&mut pending).is_pending());
+            drop(last_receiver);
+            assert!(matches!(
+                futures::poll!(&mut pending),
+                std::task::Poll::Ready(Err(ScanSendError(Err(2))))
+            ));
+            assert!(matches!(
+                sender.send(Err(3)).await,
+                Err(ScanSendError(Err(3)))
+            ));
+        });
+    }
+
+    #[test]
+    fn dropping_pending_receive_does_not_consume_an_item() {
+        futures::executor::block_on(async {
+            let (sender, first) = scan_channel::<u32>(1);
+            let second = first.clone();
+            let mut pending = Box::pin(first.recv());
+            assert!(futures::poll!(&mut pending).is_pending());
+            drop(pending);
+            sender.send(Err(7)).await.unwrap();
+            assert!(matches!(second.recv().await, Some(Err(7))));
+            drop(sender);
+            assert!(first.recv().await.is_none());
         });
     }
 }

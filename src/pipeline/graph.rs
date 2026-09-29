@@ -1,6 +1,6 @@
 //! Immutable pipeline DAG, its validation, and graph construction.
 use super::{Pipeline, PipelineBuilder};
-use crate::{Error, Result};
+use crate::error::{Error, Result};
 use std::collections::{HashSet, VecDeque};
 
 pub type PipelineId = usize;
@@ -27,7 +27,7 @@ impl PipelineGraphBuilder {
 
     pub fn new_dependency(&mut self, dependent: PipelineId) -> Result<PipelineId> {
         if dependent >= self.pipelines.len() {
-            return Err(Error::Plan(format!("unknown pipeline {dependent}")));
+            return Err(Error::InvalidPlan(format!("unknown pipeline {dependent}")));
         }
         let id = self.pipelines.len();
         self.pipelines.push(PipelineBuilder::new());
@@ -39,7 +39,7 @@ impl PipelineGraphBuilder {
     pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder> {
         self.pipelines
             .get_mut(id)
-            .ok_or_else(|| Error::Plan(format!("unknown pipeline {id}")))
+            .ok_or_else(|| Error::InvalidPlan(format!("unknown pipeline {id}")))
     }
 
     pub fn finish(self) -> Result<PipelineGraph> {
@@ -57,7 +57,8 @@ impl PipelineGraphBuilder {
             .rev()
             .map(|inputs| inputs.into_iter().map(|id| count - 1 - id).collect())
             .collect();
-        PipelineGraph::new(pipelines, dependencies).map_err(|error| Error::Plan(error.to_string()))
+        PipelineGraph::new(pipelines, dependencies)
+            .map_err(|error| Error::InvalidPlan(error.to_string()))
     }
 }
 
@@ -197,17 +198,20 @@ impl PipelineGraph {
 mod tests {
     use super::*;
 
-    use crate::Cancel;
     use crate::{
-        Error, Result,
+        error::{Error, Result},
         exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
     };
+    use asyncband::shutdown::ShutdownGuard;
     use futures::future::BoxFuture;
 
     struct UnusedExec;
 
     impl SourceExec for UnusedExec {
-        fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+        fn init_global_context(
+            &self,
+            _shutdown_guard: &ShutdownGuard,
+        ) -> Result<GlobalExecContextRef> {
             Err(Error::Execution("not run by graph tests".into()))
         }
         fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
@@ -217,13 +221,16 @@ mod tests {
         fn finalize<'a>(
             &'a self,
             _global: GlobalExecContextRef,
-            _cancel: &'a Cancel,
+            _shutdown_guard: &'a ShutdownGuard,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }
     }
     impl SinkExec for UnusedExec {
-        fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+        fn init_global_context(
+            &self,
+            _shutdown_guard: &ShutdownGuard,
+        ) -> Result<GlobalExecContextRef> {
             Err(Error::Execution("not run by graph tests".into()))
         }
 
@@ -233,7 +240,7 @@ mod tests {
         fn finalize<'a>(
             &'a self,
             _global: GlobalExecContextRef,
-            _cancel: &'a Cancel,
+            _shutdown_guard: &'a ShutdownGuard,
         ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async { Ok(()) })
         }

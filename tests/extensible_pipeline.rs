@@ -1,6 +1,7 @@
+use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
-    Cancel, Error, Result,
+    error::{Error, Result},
     exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
     operator::{Operator, OperatorTree, OperatorTreeNode},
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
@@ -10,7 +11,7 @@ use std::sync::Arc;
 struct NoopExec;
 
 impl SourceExec for NoopExec {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
@@ -22,13 +23,13 @@ impl SourceExec for NoopExec {
     fn finalize<'a>(
         &'a self,
         _global: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
 impl SinkExec for NoopExec {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
 
@@ -40,7 +41,7 @@ impl SinkExec for NoopExec {
     fn finalize<'a>(
         &'a self,
         _global: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -152,4 +153,35 @@ fn two_input_operator_chooses_both_child_pipelines() {
     assert_eq!(graph.dependencies(0), Some([].as_slice()));
     assert_eq!(graph.dependencies(1), Some([].as_slice()));
     assert_eq!(graph.dependencies(2), Some([1, 0].as_slice()));
+}
+
+#[test]
+fn invalid_project_reports_operator_and_reason() {
+    use arrow::datatypes::{DataType, Field, Schema};
+    use roc::operator::{ProjectOperator, Projection};
+
+    for child_count in [0, 2] {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "customer_id",
+            DataType::Int64,
+            false,
+        )]));
+        let project = OperatorTreeNode::new(
+            ProjectOperator::new(Projection::from_indices(schema, &[0]).unwrap()),
+            (0..child_count)
+                .map(|_| OperatorTreeNode::new(CustomSource, vec![]))
+                .collect(),
+        );
+        let barrier = OperatorTreeNode::new(CustomBarrier, vec![project]);
+        let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
+
+        let error = build_pipeline_graph(OperatorTree::new(sink)).unwrap_err();
+        let Error::InvalidPlan(message) = error else {
+            panic!("expected InvalidPlan, got {error:?}");
+        };
+        assert_eq!(
+            message,
+            format!("project operator requires exactly 1 child, got {child_count}"),
+        );
+    }
 }

@@ -4,7 +4,7 @@ pub use service::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSin
 
 use super::Operator;
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     exec::{ExchangeSinkExec, ExchangeSourceExec},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
@@ -32,7 +32,7 @@ impl ExchangeSourceOperator {
         Self { exchange, service }
     }
 
-    pub(crate) fn into_parts(self) -> (ExchangeId, Arc<dyn ExchangeService>) {
+    pub fn into_parts(self) -> (ExchangeId, Arc<dyn ExchangeService>) {
         (self.exchange, self.service)
     }
 }
@@ -50,7 +50,7 @@ impl ExchangeSinkOperator {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<ExchangeId>, SchemaRef, Arc<dyn ExchangeService>) {
+    pub fn into_parts(self) -> (Vec<ExchangeId>, SchemaRef, Arc<dyn ExchangeService>) {
         (self.exchanges, self.schema, self.service)
     }
 }
@@ -83,7 +83,10 @@ impl Operator for ExchangeSourceOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
-            return Err(Error::Plan("exchange source cannot have children".into()));
+            return Err(Error::InvalidPlan(format!(
+                "exchange source operator requires 0 children, got {}",
+                current_node.children().len(),
+            )));
         }
         graph
             .pipeline_mut(current)?
@@ -103,9 +106,10 @@ impl Operator for ExchangeSinkOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::Plan(
-                "exchange sink operator requires one child".into(),
-            ));
+            return Err(Error::InvalidPlan(format!(
+                "exchange sink operator requires exactly 1 child, got {}",
+                current_node.children().len(),
+            )));
         };
         graph
             .pipeline_mut(current)?

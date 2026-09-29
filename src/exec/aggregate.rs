@@ -1,12 +1,17 @@
+use super::ProjectionExecutor;
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
-use crate::{Cancel, Error, Result, operator::AggregateOperator};
+use crate::expr::agg::executor::AggregateExpressionExecutor;
+use crate::{
+    error::{Error, Result},
+    operator::AggregateOperator,
+};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::{
-    array::{ArrayRef, new_empty_array},
+    array::ArrayRef,
     record_batch::{RecordBatch, RecordBatchOptions},
     row::{RowConverter, SortField},
 };
-use datafusion_expr_common::groups_accumulator::{EmitTo, GroupsAccumulator};
-use datafusion_physical_expr::GroupsAccumulatorAdapter;
+use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::{
@@ -18,16 +23,17 @@ use std::sync::{
 // workers. The pipeline applies its own configured batch size to each morsel.
 const AGGREGATE_MORSEL_ROWS: usize = 2048;
 
-/// Worker-local grouping; DataFusion owns aggregate state and evaluation.
+/// Worker-local grouping, expression evaluation, and aggregate states.
 struct AggregateState {
-    operator: Arc<AggregateOperator>,
     converter: RowConverter,
     index: HashMap<Vec<u8>, usize>,
     keys: Vec<Vec<u8>>,
-    accumulators: Vec<Box<dyn GroupsAccumulator>>,
+    groups: ProjectionExecutor,
+    output_schema: SchemaRef,
+    accumulators: Vec<AggregateExpressionExecutor>,
 }
 
-/// Each aggregate keeps its own DataFusion state arrays; there is no flattened
+/// Each aggregate keeps its own state arrays; there is no flattened
 /// partial schema or column-offset mapping between aggregates.
 struct PartialAggregate {
     groups: RecordBatch,
@@ -53,50 +59,50 @@ impl PartialAggregate {
 
 impl AggregateState {
     fn new(operator: Arc<AggregateOperator>) -> Result<Self> {
+        let groups = ProjectionExecutor::try_new(operator.groups().clone())?;
         let converter = RowConverter::new(
-            operator
-                .groups()
+            groups
                 .output_schema()
                 .fields()
                 .iter()
                 .map(|f| SortField::new(f.data_type().clone()))
                 .collect(),
         )?;
-        let grouped = !operator.groups().output_schema().fields().is_empty();
-        let mut accumulators = Vec::with_capacity(operator.aggregates().len());
+        let grouped = !groups.output_schema().fields().is_empty();
+        let mut fields = groups.output_schema().fields().to_vec();
+        let mut accumulators = vec![];
         for aggregate in operator.aggregates() {
-            let mut accumulator: Box<dyn GroupsAccumulator> =
-                if grouped && aggregate.groups_accumulator_supported() {
-                    aggregate.create_groups_accumulator()?
-                } else {
-                    let aggregate = aggregate.clone();
-                    Box::new(GroupsAccumulatorAdapter::new(move || {
-                        aggregate.create_accumulator()
-                    }))
-                };
+            let mut executor = AggregateExpressionExecutor::try_new(
+                aggregate.clone(),
+                operator.groups().input_schema().clone(),
+            )?;
+            let result = executor.result();
+            fields.push(Arc::new(Field::new(
+                aggregate.output_name(),
+                result.data_type.clone(),
+                result.nullable,
+            )));
             if !grouped {
-                // Allocate the global adapter's single group without merging
-                // any state rows, preserving scalar empty-input semantics.
-                let empty = aggregate
-                    .state_fields()?
-                    .iter()
-                    .map(|field| new_empty_array(field.data_type()))
-                    .collect::<Vec<_>>();
-                accumulator.merge_batch(&empty, &[], 1)?;
+                executor.resize(1);
             }
-            accumulators.push(accumulator);
+            accumulators.push(executor);
         }
+        let output_schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            groups.output_schema().metadata().clone(),
+        ));
         Ok(Self {
-            operator,
             converter,
             index: HashMap::new(),
             keys: vec![],
+            groups,
+            output_schema,
             accumulators,
         })
     }
 
     fn group_count(&self) -> usize {
-        if self.operator.groups().output_schema().fields().is_empty() {
+        if self.groups.output_schema().fields().is_empty() {
             1
         } else {
             self.keys.len()
@@ -129,17 +135,11 @@ impl AggregateState {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        let groups = self.operator.groups().project_batch(batch)?;
+        let groups = self.groups.project_batch(batch)?;
         let ids = self.group_ids(groups.columns(), batch.num_rows())?;
         let count = self.group_count();
-        for (accumulator, aggregate) in self.accumulators.iter_mut().zip(self.operator.aggregates())
-        {
-            let values = aggregate
-                .expressions()
-                .iter()
-                .map(|expr| expr.evaluate(batch)?.into_array(batch.num_rows()))
-                .collect::<datafusion_common::Result<Vec<_>>>()?;
-            accumulator.update_batch(&values, &ids, None, count)?;
+        for accumulator in &mut self.accumulators {
+            accumulator.update(batch, &ids, count)?;
         }
         Ok(())
     }
@@ -151,13 +151,13 @@ impl AggregateState {
         let ids = self.group_ids(partial.groups.columns(), partial.num_rows())?;
         let count = self.group_count();
         for (accumulator, state) in self.accumulators.iter_mut().zip(&partial.states) {
-            accumulator.merge_batch(state, &ids, count)?;
+            accumulator.merge(state, &ids, count)?;
         }
         Ok(())
     }
 
     fn group_columns(&self) -> Result<Vec<ArrayRef>> {
-        if self.operator.groups().output_schema().fields().is_empty() {
+        if self.groups.output_schema().fields().is_empty() {
             return Ok(vec![]);
         }
         let parser = self.converter.parser();
@@ -166,42 +166,30 @@ impl AggregateState {
             .convert_rows(self.keys.iter().map(|key| parser.parse(key)))?)
     }
 
-    fn finish_partial(mut self) -> Result<PartialAggregate> {
+    fn finish_partial(self) -> Result<PartialAggregate> {
         let count = self.group_count();
         let groups = RecordBatch::try_new_with_options(
-            self.operator.groups().output_schema().clone(),
+            self.groups.output_schema().clone(),
             self.group_columns()?,
             &RecordBatchOptions::new().with_row_count(Some(count)),
         )?;
         let states = self
             .accumulators
-            .iter_mut()
-            .zip(self.operator.aggregates())
-            .map(|(accumulator, aggregate)| {
-                if count == 0 {
-                    // The adapter cannot infer state array types without groups.
-                    Ok(aggregate
-                        .state_fields()?
-                        .iter()
-                        .map(|field| new_empty_array(field.data_type()))
-                        .collect())
-                } else {
-                    accumulator.state(EmitTo::All)
-                }
-            })
-            .collect::<datafusion_common::Result<Vec<_>>>()?;
+            .iter()
+            .map(|a| a.state())
+            .collect::<Result<Vec<_>>>()?;
         Ok(PartialAggregate { groups, states })
     }
 
     fn finish(mut self) -> Result<RecordBatch> {
         let count = self.group_count();
-        let schema = self.operator.output_schema();
+        let schema = self.output_schema.clone();
         if count == 0 {
             return Ok(RecordBatch::new_empty(schema));
         }
         let mut columns = self.group_columns()?;
         for accumulator in &mut self.accumulators {
-            columns.push(accumulator.evaluate(EmitTo::All)?);
+            columns.push(accumulator.evaluate()?);
         }
         Ok(RecordBatch::try_new_with_options(
             schema,
@@ -251,7 +239,7 @@ struct AggregateExecutor {
 }
 
 impl SinkExec for AggregateSinkExec {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(AggregateSinkGlobalContext {
             partials: Mutex::new(Vec::new()),
         }))
@@ -271,7 +259,7 @@ impl SinkExec for AggregateSinkExec {
     fn finalize<'a>(
         &'a self,
         global: GlobalExecContextRef,
-        cancel: &'a Cancel,
+        shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let global = global
@@ -283,7 +271,7 @@ impl SinkExec for AggregateSinkExec {
             let mut state = AggregateState::new(self.operator.clone())?;
             for partial in partials {
                 for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
-                    if cancel.is_cancelled() {
+                    if shutdown_guard.is_shutdown_requested() {
                         return Err(Error::Cancelled);
                     }
                     state.merge(&partial.slice(
@@ -304,7 +292,7 @@ impl SinkExec for AggregateSinkExec {
 impl SinkExecutor for AggregateExecutor {
     fn sink<'a>(
         &'a mut self,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
         input: &'a RecordBatch,
     ) -> BoxFuture<'a, Result<SinkResult>> {
         Box::pin(async move {
@@ -313,7 +301,7 @@ impl SinkExecutor for AggregateExecutor {
         })
     }
 
-    fn combine(self: Box<Self>, _cancel: &Cancel) -> BoxFuture<'_, Result<()>> {
+    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
         let Self { global, local } = *self;
         Box::pin(async move {
             let partial = local.finish_partial()?;
@@ -329,7 +317,7 @@ struct AggregateSourceGlobalContext {
 }
 
 impl SourceExec for AggregateSourceExec {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         let batch = self.shared.finalized.get().cloned().ok_or_else(|| {
             Error::Execution("aggregate source initialized before sink finalization".into())
         })?;
@@ -350,7 +338,7 @@ impl SourceExec for AggregateSourceExec {
     fn finalize<'a>(
         &'a self,
         _global: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -362,10 +350,10 @@ struct AggregateSourceExecutor {
 impl SourceExecutor for AggregateSourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
-        cancel: &'a Cancel,
+        shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            if cancel.is_cancelled() {
+            if shutdown_guard.is_shutdown_requested() {
                 return Err(Error::Cancelled);
             }
             let offset = self
@@ -386,20 +374,17 @@ impl SourceExecutor for AggregateSourceExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        expr::scalar::BoundScalarExprRef,
+        expr::{
+            agg::{AggregateFunction, BoundAggregateExpression},
+            scalar::BoundReferenceExpression,
+        },
+        operator::Projection,
+    };
     use arrow::{
         array::{Array, Float64Array, Int64Array, StringArray},
         datatypes::{DataType, Field, Schema, SchemaRef},
-    };
-    use datafusion_common::ScalarValue;
-    use datafusion_functions_aggregate::{
-        average::avg_udaf, count::count_udaf, covariance::covar_pop_udaf,
-        first_last::first_value_udaf, sum::sum_udaf,
-    };
-    use datafusion_physical_expr::{
-        PhysicalExprRef, PhysicalSortExpr,
-        aggregate::{AggregateExprBuilder, AggregateFunctionExpr},
-        expressions::{Column, Literal},
-        projection::{ProjectionExprs, Projector},
     };
 
     fn schema() -> SchemaRef {
@@ -409,35 +394,28 @@ mod tests {
         ]))
     }
 
-    fn value() -> PhysicalExprRef {
-        Arc::new(Column::new("value", 1))
+    fn value() -> BoundScalarExprRef {
+        BoundReferenceExpression::new(1).into_ref()
     }
-
-    fn groups(grouped: bool) -> Projector {
-        ProjectionExprs::from_indices(if grouped { &[0] } else { &[] }, &schema())
-            .make_projector(&schema())
-            .unwrap()
+    fn groups(grouped: bool) -> Projection {
+        Projection::from_indices(schema(), if grouped { &[0] } else { &[] }).unwrap()
     }
-
-    fn aggregates() -> Vec<Arc<AggregateFunctionExpr>> {
+    fn aggregates() -> Vec<Arc<BoundAggregateExpression>> {
+        use AggregateFunction::*;
         vec![
-            AggregateExprBuilder::new(sum_udaf(), vec![value()]).alias("sum"),
-            AggregateExprBuilder::new(avg_udaf(), vec![value()]).alias("avg"),
-            AggregateExprBuilder::new(count_udaf(), vec![value()]).alias("count"),
-            AggregateExprBuilder::new(count_udaf(), vec![value()])
-                .distinct()
-                .alias("distinct"),
-            // Multiple arguments and four state columns, through the adapter.
-            AggregateExprBuilder::new(covar_pop_udaf(), vec![value(), value()]).alias("covar"),
-            AggregateExprBuilder::new(
-                count_udaf(),
-                vec![Arc::new(Literal::new(ScalarValue::Int64(Some(1))))],
-            )
-            .alias("rows"),
+            Arc::new(BoundAggregateExpression::new(Sum, vec![value()])),
+            Arc::new(BoundAggregateExpression::new(Avg, vec![value()]).with_alias("avg")),
+            Arc::new(BoundAggregateExpression::new(Count, vec![value()]).with_alias("count")),
+            Arc::new(
+                BoundAggregateExpression::new(Count, vec![value()])
+                    .with_distinct()
+                    .with_alias("distinct"),
+            ),
+            Arc::new(
+                BoundAggregateExpression::new(CovarPop, vec![value(), value()]).with_alias("covar"),
+            ),
+            Arc::new(BoundAggregateExpression::new(Count, vec![]).with_alias("rows")),
         ]
-        .into_iter()
-        .map(|builder| Arc::new(builder.schema(schema()).build().unwrap()))
-        .collect()
     }
 
     fn batch(keys: Vec<Option<&str>>, values: Vec<Option<f64>>) -> RecordBatch {
@@ -452,10 +430,8 @@ mod tests {
     }
 
     #[test]
-    fn merges_native_and_adapter_states_across_workers() {
+    fn merges_distinct_and_multi_column_states_across_workers() {
         let aggregates = aggregates();
-        assert!(aggregates[0].groups_accumulator_supported());
-        assert!(!aggregates[4].groups_accumulator_supported());
         let operator = Arc::new(AggregateOperator::try_new(groups(true), aggregates).unwrap());
         let batches = [
             batch(
@@ -475,13 +451,16 @@ mod tests {
                 worker.update(&batch.slice(row, 1)).unwrap();
             }
             let partial = worker.finish_partial().unwrap();
-            assert_eq!(partial.groups.schema(), *operator.groups().output_schema());
+            assert_eq!(
+                partial.groups.schema(),
+                operator.groups().output_schema().unwrap()
+            );
             for row in 0..partial.num_rows() {
                 merged.merge(&partial.slice(row, 1)).unwrap();
             }
         }
         let result = merged.finish().unwrap();
-        assert_eq!(result.schema(), operator.output_schema());
+        assert_eq!(result.schema(), operator.output_schema().unwrap());
         assert_eq!(result.num_rows(), 3);
         let keys = result
             .column(0)
@@ -518,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_global_input_has_one_row_including_adapter_results() {
+    fn empty_global_input_has_one_row() {
         let operator = Arc::new(AggregateOperator::try_new(groups(false), aggregates()).unwrap());
         let mut merged = AggregateState::new(operator.clone()).unwrap();
         for update_empty in [false, true] {
@@ -542,8 +521,13 @@ mod tests {
             }
             for col in [2, 3, 5] {
                 assert_eq!(
-                    ScalarValue::try_from_array(result.column(col), 0).unwrap(),
-                    ScalarValue::Int64(Some(0))
+                    result
+                        .column(col)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(0),
+                    0
                 );
             }
         }
@@ -574,8 +558,13 @@ mod tests {
         }
         for (col, expected) in [(3, 0), (4, 0), (6, 2)] {
             assert_eq!(
-                ScalarValue::try_from_array(result.column(col), 0).unwrap(),
-                ScalarValue::Int64(Some(expected))
+                result
+                    .column(col)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+                expected
             );
         }
     }
@@ -594,16 +583,31 @@ mod tests {
         let result = merged.finish().unwrap();
         assert_eq!(result.num_rows(), 1);
         assert_eq!(
-            ScalarValue::try_from_array(result.column(0), 0).unwrap(),
-            ScalarValue::Float64(Some(8.))
+            result
+                .column(0)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            8.
         );
         assert_eq!(
-            ScalarValue::try_from_array(result.column(3), 0).unwrap(),
-            ScalarValue::Int64(Some(2))
+            result
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            2
         );
         assert_eq!(
-            ScalarValue::try_from_array(result.column(5), 0).unwrap(),
-            ScalarValue::Int64(Some(4))
+            result
+                .column(5)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            4
         );
     }
 
@@ -615,20 +619,25 @@ mod tests {
             state.update(&RecordBatch::new_empty(schema())).unwrap();
             let partial = state.finish_partial().unwrap();
             assert_eq!(partial.num_rows(), 0);
-            assert_eq!(partial.groups.schema(), *operator.groups().output_schema());
+            assert_eq!(
+                partial.groups.schema(),
+                operator.groups().output_schema().unwrap()
+            );
             for (arrays, aggregate) in partial.states.iter().zip(operator.aggregates()) {
-                let fields = aggregate.state_fields().unwrap();
+                let fields = AggregateExpressionExecutor::try_new(aggregate.clone(), schema())
+                    .unwrap()
+                    .state_types();
                 assert_eq!(arrays.len(), fields.len());
                 for (array, field) in arrays.iter().zip(fields) {
                     assert_eq!(array.len(), 0);
-                    assert_eq!(array.data_type(), field.data_type());
+                    assert_eq!(array.data_type(), &field);
                 }
             }
             let mut merged = AggregateState::new(operator.clone()).unwrap();
             merged.merge(&partial).unwrap();
             let result = merged.finish().unwrap();
             assert_eq!(result.num_rows(), 0);
-            assert_eq!(result.schema(), operator.output_schema());
+            assert_eq!(result.schema(), operator.output_schema().unwrap());
         }
 
         let operator = Arc::new(AggregateOperator::try_new(groups(true), vec![]).unwrap());
@@ -644,20 +653,259 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_specification_and_ordered_aggregates() {
+    fn rejects_empty_specification() {
         assert!(AggregateOperator::try_new(groups(false), vec![]).is_err());
-        let ordered = AggregateExprBuilder::new(first_value_udaf(), vec![value()])
-            .schema(schema())
-            .alias("first")
-            .order_by(vec![PhysicalSortExpr {
-                expr: value(),
-                options: Default::default(),
-            }])
-            .build()
+    }
+
+    #[test]
+    fn aggregate_filter_runs_before_arguments_and_preserves_empty_groups() {
+        use crate::expr::scalar::{
+            BoundConstantExpression, BoundFunctionExpression, ScalarFunction,
+        };
+        let input_schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+        let int = |v| BoundConstantExpression::int64(Some(v)).into_ref();
+        let predicate =
+            BoundFunctionExpression::new(ScalarFunction::NotEqual, vec![value(), int(0)])
+                .into_ref();
+        let division =
+            BoundFunctionExpression::new(ScalarFunction::Divide, vec![int(100), value()])
+                .into_ref();
+        let aggregates = vec![
+            Arc::new(
+                BoundAggregateExpression::new(AggregateFunction::Sum, vec![division])
+                    .with_filter(predicate.clone())
+                    .with_alias("sum"),
+            ),
+            Arc::new(
+                BoundAggregateExpression::new(AggregateFunction::Count, vec![value()])
+                    .with_distinct()
+                    .with_filter(predicate)
+                    .with_alias("distinct"),
+            ),
+        ];
+        let operator = Arc::new(
+            AggregateOperator::try_new(
+                Projection::from_indices(input_schema.clone(), &[0]).unwrap(),
+                aggregates,
+            )
+            .unwrap(),
+        );
+        let mut merged = AggregateState::new(operator.clone()).unwrap();
+        for _ in 0..2 {
+            let input = RecordBatch::try_new(
+                input_schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b", "a"])),
+                    Arc::new(Int64Array::from(vec![2, 0, 4])),
+                ],
+            )
             .unwrap();
-        assert!(matches!(
-            AggregateOperator::try_new(groups(true), vec![Arc::new(ordered)]),
-            Err(Error::Plan(_))
-        ));
+            let mut worker = AggregateState::new(operator.clone()).unwrap();
+            worker.update(&input).unwrap();
+            merged.merge(&worker.finish_partial().unwrap()).unwrap();
+        }
+        let result = merged.finish().unwrap();
+        assert_eq!(
+            result
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some(150), None]
+        );
+        assert_eq!(
+            result
+                .column(2)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[2, 0]
+        );
+    }
+
+    #[test]
+    fn extrema_merge_values_and_keep_string_null_semantics() {
+        let input_schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
+        let expr = BoundReferenceExpression::new(0).into_ref();
+        let aggregates = [AggregateFunction::Min, AggregateFunction::Max]
+            .into_iter()
+            .map(|f| {
+                Arc::new(
+                    BoundAggregateExpression::new(f, vec![expr.clone()])
+                        .with_alias(format!("{f:?}")),
+                )
+            })
+            .collect();
+        let operator = Arc::new(
+            AggregateOperator::try_new(Projection::new(input_schema.clone(), vec![]), aggregates)
+                .unwrap(),
+        );
+        let mut merged = AggregateState::new(operator.clone()).unwrap();
+        for values in [vec![Some("z"), None], vec![None, Some("a")], vec![None]] {
+            let input = RecordBatch::try_new(
+                input_schema.clone(),
+                vec![Arc::new(StringArray::from(values))],
+            )
+            .unwrap();
+            let mut worker = AggregateState::new(operator.clone()).unwrap();
+            worker.update(&input).unwrap();
+            merged.merge(&worker.finish_partial().unwrap()).unwrap();
+        }
+        let result = merged.finish().unwrap();
+        assert_eq!(
+            result
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "a"
+        );
+        assert_eq!(
+            result
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "z"
+        );
+        let empty = AggregateState::new(operator).unwrap().finish().unwrap();
+        assert!(empty.column(0).is_null(0));
+        assert!(empty.column(1).is_null(0));
+    }
+
+    #[test]
+    fn unsigned_sum_stays_exact_and_signed_sum_checks_overflow() {
+        use arrow::array::UInt64Array;
+        for (data_type, array) in [
+            (
+                DataType::UInt64,
+                Arc::new(UInt64Array::from(vec![
+                    Some(9_007_199_254_740_993),
+                    None,
+                    Some(2),
+                ])) as ArrayRef,
+            ),
+            (
+                DataType::Int64,
+                Arc::new(Int64Array::from(vec![Some(i64::MAX), None, Some(1)])) as ArrayRef,
+            ),
+        ] {
+            let input_schema =
+                Arc::new(Schema::new(vec![Field::new("v", data_type.clone(), true)]));
+            let operator = Arc::new(
+                AggregateOperator::try_new(
+                    Projection::new(input_schema.clone(), vec![]),
+                    vec![Arc::new(
+                        BoundAggregateExpression::new(
+                            AggregateFunction::Sum,
+                            vec![BoundReferenceExpression::new(0).into_ref()],
+                        )
+                        .with_alias("sum"),
+                    )],
+                )
+                .unwrap(),
+            );
+            let mut state = AggregateState::new(operator.clone()).unwrap();
+            let input = RecordBatch::try_new(input_schema, vec![array]).unwrap();
+            if data_type == DataType::Int64 {
+                assert!(state.update(&input).is_err());
+            } else {
+                state.update(&input).unwrap();
+                let mut merged = AggregateState::new(operator).unwrap();
+                merged.merge(&state.finish_partial().unwrap()).unwrap();
+                assert_eq!(
+                    merged
+                        .finish()
+                        .unwrap()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<UInt64Array>()
+                        .unwrap()
+                        .value(0),
+                    9_007_199_254_740_995
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_count_star_handles_zero_column_batches() {
+        use crate::expr::scalar::BoundConstantExpression;
+        let input_schema = Arc::new(Schema::empty());
+        let expressions = [true, false]
+            .into_iter()
+            .map(|v| {
+                Arc::new(
+                    BoundAggregateExpression::new(AggregateFunction::Count, vec![])
+                        .with_filter(BoundConstantExpression::boolean(Some(v)).into_ref())
+                        .with_alias(format!("count_{v}")),
+                )
+            })
+            .collect();
+        let operator = Arc::new(
+            AggregateOperator::try_new(Projection::new(input_schema.clone(), vec![]), expressions)
+                .unwrap(),
+        );
+        let mut state = AggregateState::new(operator).unwrap();
+        let batch = RecordBatch::try_new_with_options(
+            input_schema,
+            vec![],
+            &RecordBatchOptions::new().with_row_count(Some(3)),
+        )
+        .unwrap();
+        state.update(&batch).unwrap();
+        let result = state.finish().unwrap();
+        assert_eq!(
+            result
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            3
+        );
+        assert_eq!(
+            result
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+    }
+
+    #[test]
+    fn invalid_aggregate_signatures_are_plan_errors() {
+        use crate::expr::scalar::BoundConstantExpression;
+        for expr in [
+            BoundAggregateExpression::new(AggregateFunction::Sum, vec![]),
+            BoundAggregateExpression::new(AggregateFunction::Sum, vec![value()]).with_distinct(),
+            BoundAggregateExpression::new(AggregateFunction::Count, vec![]).with_distinct(),
+            BoundAggregateExpression::new(AggregateFunction::Count, vec![value(), value()]),
+            BoundAggregateExpression::new(AggregateFunction::CovarPop, vec![value()]),
+            BoundAggregateExpression::new(
+                AggregateFunction::Sum,
+                vec![BoundConstantExpression::string(Some("x")).into_ref()],
+            ),
+            BoundAggregateExpression::new(AggregateFunction::Count, vec![]).with_filter(value()),
+        ] {
+            assert!(matches!(
+                AggregateOperator::try_new(
+                    groups(false),
+                    vec![Arc::new(expr.with_alias("invalid"))]
+                ),
+                Err(Error::InvalidPlan(_))
+            ));
+        }
     }
 }

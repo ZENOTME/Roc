@@ -1,54 +1,63 @@
 use super::Operator;
+use super::Projection;
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{Schema, SchemaRef};
-use datafusion_physical_expr::{aggregate::AggregateFunctionExpr, projection::Projector};
+use crate::{
+    exec::ProjectionExecutor,
+    expr::agg::{BoundAggregateExpression, executor::AggregateExpressionExecutor},
+};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::sync::Arc;
 
-/// Prepared DataFusion aggregates and grouping expressions.
+/// Fully specified grouping and aggregate descriptions, without execution state.
 #[derive(Clone, Debug)]
 pub struct AggregateOperator {
-    groups: Projector,
-    aggregates: Vec<Arc<AggregateFunctionExpr>>,
+    groups: Projection,
+    aggregates: Vec<Arc<BoundAggregateExpression>>,
 }
-
 impl AggregateOperator {
-    /// Both the group projector and aggregate expressions must already be bound
-    /// to the same input. Fields and partial states come directly from DataFusion.
-    /// An empty group projector denotes global aggregation. Aggregates with an
-    /// effective ORDER BY are unsupported because workers do not preserve order.
-    pub fn try_new(groups: Projector, aggregates: Vec<Arc<AggregateFunctionExpr>>) -> Result<Self> {
-        if aggregates.is_empty() && groups.output_schema().fields().is_empty() {
-            return Err(Error::Plan("aggregate needs a group or function".into()));
+    pub fn try_new(
+        groups: Projection,
+        aggregates: Vec<Arc<BoundAggregateExpression>>,
+    ) -> Result<Self> {
+        if aggregates.is_empty() && groups.expressions().is_empty() {
+            return Err(Error::InvalidPlan(
+                "aggregate needs a group or function".into(),
+            ));
         }
-        for aggregate in &aggregates {
-            if !aggregate.order_bys().is_empty() {
-                return Err(Error::Plan(
-                    "ordered aggregates require ordering support in the aggregate executor".into(),
-                ));
-            }
-        }
-        Ok(Self { groups, aggregates })
+        let operator = Self { groups, aggregates };
+        operator.output_schema()?;
+        Ok(operator)
     }
-
-    pub(crate) fn groups(&self) -> &Projector {
+    pub fn groups(&self) -> &Projection {
         &self.groups
     }
-
-    pub(crate) fn aggregates(&self) -> &[Arc<AggregateFunctionExpr>] {
+    pub fn aggregates(&self) -> &[Arc<BoundAggregateExpression>] {
         &self.aggregates
     }
-
-    pub fn output_schema(&self) -> SchemaRef {
-        let mut fields = self.groups.output_schema().fields().to_vec();
-        fields.extend(self.aggregates.iter().map(|aggregate| aggregate.field()));
-        Arc::new(Schema::new_with_metadata(
+    /// Obtain result metadata from executor initialization, including on empty inputs.
+    pub fn output_schema(&self) -> Result<SchemaRef> {
+        let groups = ProjectionExecutor::try_new(self.groups.clone())?;
+        let mut fields = groups.output_schema().fields().to_vec();
+        for aggregate in &self.aggregates {
+            let executor = AggregateExpressionExecutor::try_new(
+                aggregate.clone(),
+                self.groups.input_schema().clone(),
+            )?;
+            let result = executor.result();
+            fields.push(Arc::new(Field::new(
+                aggregate.output_name(),
+                result.data_type.clone(),
+                result.nullable,
+            )));
+        }
+        Ok(Arc::new(Schema::new_with_metadata(
             fields,
-            self.groups.output_schema().metadata().clone(),
-        ))
+            groups.output_schema().metadata().clone(),
+        )))
     }
 }
 
@@ -64,7 +73,10 @@ impl Operator for AggregateOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::Plan("aggregate operator requires one child".into()));
+            return Err(Error::InvalidPlan(format!(
+                "aggregate operator requires exactly 1 child, got {}",
+                current_node.children().len(),
+            )));
         };
         let (sink, source) = self.clone().into_execs();
         graph.pipeline_mut(current)?.set_source(Box::new(source))?;

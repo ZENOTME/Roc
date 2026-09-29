@@ -1,8 +1,8 @@
 //! Filter operator descriptor.
 use super::Operator;
-use crate::PhysicalExprRef;
+use crate::expr::scalar::BoundScalarExprRef;
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     exec::FilterExec,
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
@@ -11,11 +11,11 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct FilterOperator {
     /// Bound to the child output. Filtering preserves the input batch schema.
-    predicate: PhysicalExprRef,
+    predicate: BoundScalarExprRef,
 }
 
 impl FilterOperator {
-    pub fn new(predicate: PhysicalExprRef) -> Self {
+    pub fn new(predicate: BoundScalarExprRef) -> Self {
         Self { predicate }
     }
 }
@@ -32,7 +32,10 @@ impl Operator for FilterOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::Plan("filter operator requires one child".into()));
+            return Err(Error::InvalidPlan(format!(
+                "filter operator requires exactly 1 child, got {}",
+                current_node.children().len(),
+            )));
         };
         graph
             .pipeline_mut(current)?

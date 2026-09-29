@@ -6,7 +6,7 @@ pub use storage::{ScanConsumer, ScanHandle, ScanRequest, ScanStorage};
 
 use super::Operator;
 use crate::{
-    Error, Result,
+    error::{Error, Result},
     exec::ScanExec,
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId},
@@ -35,11 +35,11 @@ impl<StorageTaskDesc> ScanOperator<StorageTaskDesc> {
         Self { source, storage }
     }
 
-    pub(crate) fn source(&self) -> &StorageTaskDesc {
+    pub fn source(&self) -> &StorageTaskDesc {
         &self.source
     }
 
-    pub(crate) fn storage(&self) -> &Arc<dyn ScanStorage<StorageTaskDesc = StorageTaskDesc>> {
+    pub fn storage(&self) -> &Arc<dyn ScanStorage<StorageTaskDesc = StorageTaskDesc>> {
         &self.storage
     }
 }
@@ -59,7 +59,10 @@ where
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
-            return Err(Error::Plan("scan cannot have children".into()));
+            return Err(Error::InvalidPlan(format!(
+                "scan operator requires 0 children, got {}",
+                current_node.children().len(),
+            )));
         }
         graph
             .pipeline_mut(current)?

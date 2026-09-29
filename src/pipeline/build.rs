@@ -1,6 +1,6 @@
 use super::{PipelineGraph, PipelineGraphBuilder, PipelineId};
 use crate::{
-    Result,
+    error::Result,
     operator::{OperatorTree, OperatorTreeNode},
 };
 
@@ -11,7 +11,7 @@ pub fn build_pipeline_graph(tree: OperatorTree) -> Result<PipelineGraph> {
     graph.finish()
 }
 
-/// Builds pipleine based on tree current_node.
+/// Builds pipelines for the current operator tree node.
 pub fn build_pipeline_on_node(
     current_node: &OperatorTreeNode,
     current: PipelineId,

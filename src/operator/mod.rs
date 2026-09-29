@@ -10,14 +10,14 @@ pub use exchange::{
     ExchangeSinkOperator, ExchangeSourceOperator,
 };
 pub use filter::FilterOperator;
-pub use project::ProjectOperator;
+pub use project::{ProjectOperator, Projection, ProjectionExpression};
 pub use scan::{
     ScanConsumer, ScanHandle, ScanOperator, ScanReceiver, ScanRequest, ScanSendError, ScanSender,
     ScanStorage, scan_channel,
 };
 
 use crate::{
-    Result,
+    error::Result,
     pipeline::{PipelineGraphBuilder, PipelineId},
 };
 use std::{fmt::Debug, sync::Arc};
@@ -26,7 +26,7 @@ pub trait Operator: Debug + Send + Sync {
     /// Operator name.
     fn name(&self) -> &'static str;
 
-    /// Builds pipeline base on this operator.
+    /// Builds pipeline base on this operator. Operator is responsible to call this function on its child operator.
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,

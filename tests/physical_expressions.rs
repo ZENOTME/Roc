@@ -1,3 +1,4 @@
+use asyncband::shutdown::ShutdownGuard;
 use std::sync::{Arc, Mutex};
 
 use arrow::{
@@ -5,21 +6,14 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
 };
-use datafusion_common::ScalarValue;
-use datafusion_expr_common::operator::Operator as ExprOp;
-use datafusion_functions_aggregate::{count::count_udaf, sum::sum_udaf};
-use datafusion_physical_expr::{
-    aggregate::AggregateExprBuilder,
-    expressions::{BinaryExpr, Column, Literal},
-    projection::{ProjectionExpr, ProjectionExprs, Projector},
-};
 use futures::future::BoxFuture;
 use roc::{
-    Cancel, PhysicalExprRef, Result,
+    error::Result,
     exec::{
         FilterExec, GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult, ProjectExec,
         ScanExec, SinkExec, SinkExecutor, SinkResult, SourceExec,
     },
+    expr::scalar::BoundScalarExprRef,
     operator::{
         AggregateOperator, FilterOperator, Operator, OperatorTree, OperatorTreeNode,
         ProjectOperator, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
@@ -29,27 +23,41 @@ use roc::{
         build_pipeline_on_node,
     },
 };
+use roc::{
+    expr::{
+        agg::{AggregateFunction, BoundAggregateExpression},
+        scalar::{
+            BoundConstantExpression, BoundFunctionExpression, BoundReferenceExpression,
+            ScalarFunction as ExprOp,
+        },
+    },
+    operator::{Projection, ProjectionExpression as ProjectionExpr},
+};
 
-fn column(index: usize) -> PhysicalExprRef {
-    // Deliberately not a schema field name: references must stay index-bound.
-    Arc::new(Column::new("display_only", index))
+fn column(index: usize) -> BoundScalarExprRef {
+    BoundReferenceExpression::new(index).into_ref()
 }
-
-fn literal(value: ScalarValue) -> PhysicalExprRef {
-    Arc::new(Literal::new(value))
-}
-
-fn binary(left: PhysicalExprRef, op: ExprOp, right: i64) -> PhysicalExprRef {
-    Arc::new(BinaryExpr::new(
-        left,
+fn binary(left: BoundScalarExprRef, op: ExprOp, right: i64) -> BoundScalarExprRef {
+    BoundFunctionExpression::new(
         op,
-        literal(ScalarValue::Int64(Some(right))),
-    ))
+        vec![left, BoundConstantExpression::int64(Some(right)).into_ref()],
+    )
+    .into_ref()
+}
+fn filter_executor(predicate: BoundScalarExprRef) -> Box<dyn ProcessExecutor> {
+    let exec = FilterExec::new(predicate);
+    exec.new_executor(
+        exec.init_global_context(&asyncband::shutdown::new().1)
+            .unwrap(),
+    )
+    .unwrap()
 }
 
-fn project_executor(projector: Projector) -> Box<dyn ProcessExecutor> {
+fn project_executor(projector: Projection) -> Box<dyn ProcessExecutor> {
     let exec = ProjectExec::new(projector);
-    let global = exec.init_global_context(&Cancel::new()).unwrap();
+    let global = exec
+        .init_global_context(&asyncband::shutdown::new().1)
+        .unwrap();
     exec.new_executor(global).unwrap()
 }
 
@@ -108,7 +116,7 @@ impl Operator for Collector {
     }
 }
 impl SinkExec for Collector {
-    fn init_global_context(&self, _cancel: &Cancel) -> Result<GlobalExecContextRef> {
+    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
@@ -117,7 +125,7 @@ impl SinkExec for Collector {
     fn finalize<'a>(
         &'a self,
         _: GlobalExecContextRef,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -125,7 +133,7 @@ impl SinkExec for Collector {
 impl SinkExecutor for Collector {
     fn sink<'a>(
         &'a mut self,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
         batch: &'a RecordBatch,
     ) -> BoxFuture<'a, Result<SinkResult>> {
         Box::pin(async move {
@@ -133,7 +141,7 @@ impl SinkExecutor for Collector {
             Ok(SinkResult::NeedMoreInput)
         })
     }
-    fn combine(self: Box<Self>, _cancel: &Cancel) -> BoxFuture<'_, Result<()>> {
+    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -185,28 +193,28 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         vec![],
     );
     let filtered = OperatorTreeNode::new(
-        FilterOperator::new(binary(column(0), ExprOp::Gt, 1)),
+        FilterOperator::new(binary(column(0), ExprOp::GreaterThan, 1)),
         vec![scan],
     );
     let reordered = OperatorTreeNode::new(
-        ProjectOperator::new(
-            ProjectionExprs::from_indices(&[1, 0], &scan_input)
-                .make_projector(&scan_input)
-                .unwrap(),
-        ),
+        ProjectOperator::new(Projection::from_indices(scan_input.clone(), &[1, 0]).unwrap()),
         vec![filtered],
     );
     let filter = OperatorTreeNode::new(
-        FilterOperator::new(binary(column(1), ExprOp::Lt, 5)),
+        FilterOperator::new(binary(column(1), ExprOp::LessThan, 5)),
         vec![reordered],
     );
-    let projector = ProjectionExprs::from(vec![
-        ProjectionExpr::new(literal(ScalarValue::Utf8(Some("constant".into()))), "label"),
-        ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
-    ])
-    .make_projector(&scan_output)
-    .unwrap();
-    let projected_schema = projector.output_schema().clone();
+    let projector = Projection::new(
+        scan_output.clone(),
+        vec![
+            ProjectionExpr::new(
+                BoundConstantExpression::string(Some("constant")).into_ref(),
+                "label",
+            ),
+            ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
+        ],
+    );
+    let projected_schema = projector.output_schema().unwrap();
     let project = OperatorTreeNode::new(ProjectOperator::new(projector), vec![filter]);
     let output_schema = Arc::new(
         Schema::new(vec![
@@ -217,23 +225,36 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         ])
         .with_metadata([("owner".to_owned(), "host".to_owned())].into()),
     );
-    let groups = ProjectionExprs::from(vec![ProjectionExpr::new(
-        literal(ScalarValue::Utf8(Some("all".into()))),
-        "category",
-    )])
-    .make_projector(&projected_schema)
-    .unwrap();
+    let groups = Projection::new(
+        projected_schema.clone(),
+        vec![ProjectionExpr::new(
+            BoundConstantExpression::string(Some("all")).into_ref(),
+            "category",
+        )],
+    );
     let aggregates = vec![
-        AggregateExprBuilder::new(sum_udaf(), vec![binary(column(1), ExprOp::Plus, 1)])
-            .alias("total"),
-        AggregateExprBuilder::new(count_udaf(), vec![literal(ScalarValue::Int64(Some(1)))])
-            .alias("rows"),
-        AggregateExprBuilder::new(count_udaf(), vec![literal(ScalarValue::Int64(None))])
-            .alias("null_count"),
-    ]
-    .into_iter()
-    .map(|builder| Arc::new(builder.schema(projected_schema.clone()).build().unwrap()))
-    .collect();
+        Arc::new(
+            BoundAggregateExpression::new(
+                AggregateFunction::Sum,
+                vec![binary(column(1), ExprOp::Add, 1)],
+            )
+            .with_alias("total"),
+        ),
+        Arc::new(
+            BoundAggregateExpression::new(
+                AggregateFunction::Count,
+                vec![BoundConstantExpression::int64(Some(1)).into_ref()],
+            )
+            .with_alias("rows"),
+        ),
+        Arc::new(
+            BoundAggregateExpression::new(
+                AggregateFunction::Count,
+                vec![BoundConstantExpression::int64(None).into_ref()],
+            )
+            .with_alias("null_count"),
+        ),
+    ];
     let aggregate = OperatorTreeNode::new(
         AggregateOperator::try_new(groups, aggregates).unwrap(),
         vec![project],
@@ -282,28 +303,31 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     )
     .unwrap();
     for (value, rows) in [(Some(true), 3), (Some(false), 0), (None, 0)] {
-        let result = FilterExec::new(literal(ScalarValue::Boolean(value)))
-            .execute(&Cancel::new(), &batch)
+        let result = filter_executor(BoundConstantExpression::boolean(value).into_ref())
+            .execute(&batch)
             .unwrap();
         let result = completed_batch(result);
         assert_eq!(result.num_rows(), rows);
         assert_eq!(result.schema(), input);
     }
-    let projector = ProjectionExprs::from(vec![
-        ProjectionExpr::new(column(0), "renamed"),
-        ProjectionExpr::new(literal(ScalarValue::Int64(Some(7))), "constant"),
-        ProjectionExpr::new(literal(ScalarValue::Int64(None)), "null"),
-    ])
-    .make_projector(&input)
-    .unwrap();
+    let projector = Projection::new(
+        input.clone(),
+        vec![
+            ProjectionExpr::new(column(0), "renamed"),
+            ProjectionExpr::new(
+                BoundConstantExpression::int64(Some(7)).into_ref(),
+                "constant",
+            ),
+            ProjectionExpr::new(BoundConstantExpression::int64(None).into_ref(), "null"),
+        ],
+    );
     let output = Arc::new(Schema::new(vec![
         Field::new("renamed", DataType::Int64, true),
         Field::new("constant", DataType::Int64, false),
         Field::new("null", DataType::Int64, true),
     ]));
-    let cancel = Cancel::new();
     let mut executor = project_executor(projector);
-    let result = completed_batch(executor.execute(&cancel, &batch).unwrap());
+    let result = completed_batch(executor.execute(&batch).unwrap());
     assert_eq!(result.schema(), output);
     assert_eq!(result.column(0).null_count(), 1);
     assert_eq!(
@@ -318,13 +342,11 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     );
     assert_eq!(result.column(2).null_count(), 3);
     assert_eq!(
-        completed_batch(executor.execute(&cancel, &batch.slice(0, 0)).unwrap()).num_rows(),
+        completed_batch(executor.execute(&batch.slice(0, 0)).unwrap()).num_rows(),
         0
     );
-    let empty = ProjectionExprs::from(Vec::<ProjectionExpr>::new())
-        .make_projector(&input)
-        .unwrap();
-    let zero_columns = completed_batch(project_executor(empty).execute(&cancel, &batch).unwrap());
+    let empty = Projection::new(input.clone(), Vec::<ProjectionExpr>::new());
+    let zero_columns = completed_batch(project_executor(empty).execute(&batch).unwrap());
     assert_eq!(
         (zero_columns.num_rows(), zero_columns.num_columns()),
         (3, 0)
@@ -332,30 +354,32 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
 }
 
 #[test]
-fn preserves_datafusion_errors() {
+fn preserves_arrow_kernel_errors() {
     let input = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
     let batch =
         RecordBatch::try_new(Arc::new(input), vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    let projector = ProjectionExprs::from(vec![ProjectionExpr::new(
-        binary(column(0), ExprOp::Divide, 0),
-        "x",
-    )])
-    .make_projector(&batch.schema())
-    .unwrap();
-    let error = project_executor(projector)
-        .execute(&Cancel::new(), &batch)
-        .unwrap_err();
-    assert!(matches!(error, roc::Error::DataFusion(_)));
+    let projector = Projection::new(
+        batch.schema().clone(),
+        vec![ProjectionExpr::new(
+            binary(column(0), ExprOp::Divide, 0),
+            "x",
+        )],
+    );
+    let error = project_executor(projector).execute(&batch).unwrap_err();
+    assert!(matches!(error, roc::error::Error::Arrow(_)));
 }
 
 #[test]
 fn filter_rejects_non_boolean_results_without_an_input_schema() {
     let input = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    for predicate in [column(0), literal(ScalarValue::Int64(Some(1)))] {
+    for predicate in [
+        column(0),
+        BoundConstantExpression::int64(Some(1)).into_ref(),
+    ] {
         assert!(matches!(
-            FilterExec::new(predicate).execute(&Cancel::new(), &batch),
-            Err(roc::Error::Execution(_))
+            filter_executor(predicate).execute(&batch),
+            Err(roc::error::Error::Execution(_))
         ));
     }
 }
@@ -384,17 +408,20 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
         vec![2, 0],
         Arc::new(MemoryStorage(batch)),
     ));
-    let cancel = Cancel::new();
-    let global = exec.init_global_context(&cancel).unwrap();
+    let (shutdown, shutdown_guard) = asyncband::shutdown::new();
+    let global = exec.init_global_context(&shutdown_guard).unwrap();
     let mut worker = exec.new_executor(global.clone()).unwrap();
-    assert_eq!(worker.next_batch(&cancel).await.unwrap().unwrap(), expected);
-    assert!(worker.next_batch(&cancel).await.unwrap().is_none());
-    cancel.cancel();
+    assert_eq!(
+        worker.next_batch(&shutdown_guard).await.unwrap().unwrap(),
+        expected
+    );
+    assert!(worker.next_batch(&shutdown_guard).await.unwrap().is_none());
+    shutdown.request_shutdown();
     assert!(matches!(
-        worker.next_batch(&cancel).await,
-        Err(roc::Error::Cancelled)
+        worker.next_batch(&shutdown_guard).await,
+        Err(roc::error::Error::Cancelled)
     ));
-    exec.finalize(global, &cancel).await.unwrap();
+    exec.finalize(global, &shutdown_guard).await.unwrap();
 }
 
 struct MemoryExchange {
@@ -408,7 +435,7 @@ impl roc::operator::ExchangeService for MemoryExchange {
     fn start_input(
         &self,
         exchange: usize,
-        _cancel: &Cancel,
+        _shutdown_guard: &ShutdownGuard,
     ) -> Result<Arc<dyn roc::operator::ExchangeHandle>> {
         assert_eq!(exchange, 7);
         Ok(Arc::new(MemoryScan(Arc::new(Mutex::new(
@@ -448,7 +475,7 @@ impl roc::operator::ExchangeSink for Collector {
     fn send<'a>(
         &'a mut self,
         batch: &'a RecordBatch,
-        _cancel: &'a Cancel,
+        _shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             self.0.lock().unwrap().push(batch.clone());
