@@ -1,5 +1,5 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
-use crate::expr::scalar::executor::ExpressionExecutor;
+use crate::expr::scalar::executor::{ExpressionExecutor, ExpressionInput};
 use crate::{error::Result, operator::Projection};
 use arrow::{
     datatypes::{Field, Schema, SchemaRef},
@@ -63,10 +63,7 @@ impl ProjectionExecutor {
     pub fn project_batch(&mut self, input: &RecordBatch) -> Result<RecordBatch> {
         let columns = self
             .expressions
-            .evaluate(input)?
-            .into_iter()
-            .map(|v| v.into_array(input.num_rows()))
-            .collect::<Result<_>>()?;
+            .evaluate_arrays(&ExpressionInput::new(input.columns(), input.num_rows()))?;
         Ok(RecordBatch::try_new_with_options(
             self.output_schema.clone(),
             columns,

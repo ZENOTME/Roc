@@ -13,7 +13,7 @@ use roc::{
         FilterExec, GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult, ProjectExec,
         ScanExec, SinkExec, SinkExecutor, SinkResult, SourceExec,
     },
-    expr::scalar::BoundScalarExprRef,
+    expr::scalar::ScalarExprRef,
     operator::{
         AggregateOperator, FilterOperator, Operator, OperatorTree, OperatorTreeNode,
         ProjectOperator, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
@@ -25,26 +25,25 @@ use roc::{
 };
 use roc::{
     expr::{
-        agg::{AggregateFunction, BoundAggregateExpression},
+        agg::{AggregateExpression, AggregateFunction},
         scalar::{
-            BoundConstantExpression, BoundFunctionExpression, BoundReferenceExpression,
-            ScalarFunction as ExprOp,
+            ConstantExpression, FunctionExpression, ReferenceExpression, ScalarFunction as ExprOp,
         },
     },
     operator::{Projection, ProjectionExpression as ProjectionExpr},
 };
 
-fn column(index: usize) -> BoundScalarExprRef {
-    BoundReferenceExpression::new(index).into_ref()
+fn column(index: usize) -> ScalarExprRef {
+    ReferenceExpression::new(index).into_ref()
 }
-fn binary(left: BoundScalarExprRef, op: ExprOp, right: i64) -> BoundScalarExprRef {
-    BoundFunctionExpression::new(
+fn binary(left: ScalarExprRef, op: ExprOp, right: i64) -> ScalarExprRef {
+    FunctionExpression::new(
         op,
-        vec![left, BoundConstantExpression::int64(Some(right)).into_ref()],
+        vec![left, ConstantExpression::int64(Some(right)).into_ref()],
     )
     .into_ref()
 }
-fn filter_executor(predicate: BoundScalarExprRef) -> Box<dyn ProcessExecutor> {
+fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
     let exec = FilterExec::new(predicate);
     exec.new_executor(
         exec.init_global_context(&asyncband::shutdown::new().1)
@@ -208,7 +207,7 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         scan_output.clone(),
         vec![
             ProjectionExpr::new(
-                BoundConstantExpression::string(Some("constant")).into_ref(),
+                ConstantExpression::string(Some("constant")).into_ref(),
                 "label",
             ),
             ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
@@ -228,29 +227,29 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
     let groups = Projection::new(
         projected_schema.clone(),
         vec![ProjectionExpr::new(
-            BoundConstantExpression::string(Some("all")).into_ref(),
+            ConstantExpression::string(Some("all")).into_ref(),
             "category",
         )],
     );
     let aggregates = vec![
         Arc::new(
-            BoundAggregateExpression::new(
+            AggregateExpression::new(
                 AggregateFunction::Sum,
                 vec![binary(column(1), ExprOp::Add, 1)],
             )
             .with_alias("total"),
         ),
         Arc::new(
-            BoundAggregateExpression::new(
+            AggregateExpression::new(
                 AggregateFunction::Count,
-                vec![BoundConstantExpression::int64(Some(1)).into_ref()],
+                vec![ConstantExpression::int64(Some(1)).into_ref()],
             )
             .with_alias("rows"),
         ),
         Arc::new(
-            BoundAggregateExpression::new(
+            AggregateExpression::new(
                 AggregateFunction::Count,
-                vec![BoundConstantExpression::int64(None).into_ref()],
+                vec![ConstantExpression::int64(None).into_ref()],
             )
             .with_alias("null_count"),
         ),
@@ -303,7 +302,7 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     )
     .unwrap();
     for (value, rows) in [(Some(true), 3), (Some(false), 0), (None, 0)] {
-        let result = filter_executor(BoundConstantExpression::boolean(value).into_ref())
+        let result = filter_executor(ConstantExpression::boolean(value).into_ref())
             .execute(&batch)
             .unwrap();
         let result = completed_batch(result);
@@ -314,11 +313,8 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         input.clone(),
         vec![
             ProjectionExpr::new(column(0), "renamed"),
-            ProjectionExpr::new(
-                BoundConstantExpression::int64(Some(7)).into_ref(),
-                "constant",
-            ),
-            ProjectionExpr::new(BoundConstantExpression::int64(None).into_ref(), "null"),
+            ProjectionExpr::new(ConstantExpression::int64(Some(7)).into_ref(), "constant"),
+            ProjectionExpr::new(ConstantExpression::int64(None).into_ref(), "null"),
         ],
     );
     let output = Arc::new(Schema::new(vec![
@@ -373,10 +369,7 @@ fn preserves_arrow_kernel_errors() {
 fn filter_rejects_non_boolean_results_without_an_input_schema() {
     let input = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    for predicate in [
-        column(0),
-        BoundConstantExpression::int64(Some(1)).into_ref(),
-    ] {
+    for predicate in [column(0), ConstantExpression::int64(Some(1)).into_ref()] {
         assert!(matches!(
             filter_executor(predicate).execute(&batch),
             Err(roc::error::Error::Execution(_))

@@ -1,4 +1,4 @@
-use crate::expr::scalar::BoundScalarExprRef;
+use crate::expr::scalar::ScalarExprRef;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateFunction {
@@ -25,15 +25,15 @@ impl AggregateFunction {
 
 /// Static aggregate call. COUNT with no arguments means COUNT(*).
 #[derive(Clone, Debug)]
-pub struct BoundAggregateExpression {
+pub struct AggregateExpression {
     alias: Option<String>,
     function: AggregateFunction,
-    arguments: Vec<BoundScalarExprRef>,
+    arguments: Vec<ScalarExprRef>,
     distinct: bool,
-    filter: Option<BoundScalarExprRef>,
+    filter: Option<ScalarExprRef>,
 }
-impl BoundAggregateExpression {
-    pub fn new(function: AggregateFunction, arguments: Vec<BoundScalarExprRef>) -> Self {
+impl AggregateExpression {
+    pub fn new(function: AggregateFunction, arguments: Vec<ScalarExprRef>) -> Self {
         Self {
             alias: None,
             function,
@@ -57,20 +57,20 @@ impl BoundAggregateExpression {
         self.distinct = true;
         self
     }
-    pub fn with_filter(mut self, filter: BoundScalarExprRef) -> Self {
+    pub fn with_filter(mut self, filter: ScalarExprRef) -> Self {
         self.filter = Some(filter);
         self
     }
     pub fn function(&self) -> AggregateFunction {
         self.function
     }
-    pub fn arguments(&self) -> &[BoundScalarExprRef] {
+    pub fn arguments(&self) -> &[ScalarExprRef] {
         &self.arguments
     }
     pub fn is_distinct(&self) -> bool {
         self.distinct
     }
-    pub fn filter(&self) -> Option<&BoundScalarExprRef> {
+    pub fn filter(&self) -> Option<&ScalarExprRef> {
         self.filter.as_ref()
     }
 }

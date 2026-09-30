@@ -7,7 +7,7 @@ use crate::{
 };
 use crate::{
     exec::ProjectionExecutor,
-    expr::agg::{BoundAggregateExpression, executor::AggregateExpressionExecutor},
+    expr::agg::{AggregateExpression, executor::AggregateExpressionExecutor},
 };
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::sync::Arc;
@@ -16,13 +16,10 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct AggregateOperator {
     groups: Projection,
-    aggregates: Vec<Arc<BoundAggregateExpression>>,
+    aggregates: Vec<Arc<AggregateExpression>>,
 }
 impl AggregateOperator {
-    pub fn try_new(
-        groups: Projection,
-        aggregates: Vec<Arc<BoundAggregateExpression>>,
-    ) -> Result<Self> {
+    pub fn try_new(groups: Projection, aggregates: Vec<Arc<AggregateExpression>>) -> Result<Self> {
         if aggregates.is_empty() && groups.expressions().is_empty() {
             return Err(Error::InvalidPlan(
                 "aggregate needs a group or function".into(),
@@ -35,7 +32,7 @@ impl AggregateOperator {
     pub fn groups(&self) -> &Projection {
         &self.groups
     }
-    pub fn aggregates(&self) -> &[Arc<BoundAggregateExpression>] {
+    pub fn aggregates(&self) -> &[Arc<AggregateExpression>] {
         &self.aggregates
     }
     /// Obtain result metadata from executor initialization, including on empty inputs.

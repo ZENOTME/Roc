@@ -1,0 +1,67 @@
+{
+  "host": "ssh dev",
+  "remote_directory": "/tmp/roc-add-dispatch.QrLprSFa",
+  "architecture": "x86_64-unknown-linux-gnu",
+  "cpu": "AMD EPYC 7K62 48-Core Processor",
+  "hypervisor": "KVM",
+  "guest_logical_cpus": 32,
+  "kernel": "Linux 6.6.119-49.20.tl4.x86_64",
+  "rustc": "1.95.0 (59807616e 2026-04-14)",
+  "llvm": "22.1.2",
+  "arrow": "59.3.0",
+  "criterion": "0.8.2",
+  "cpu_affinity": 2,
+  "samples": 100,
+  "warm_up_seconds": 0.5,
+  "measurement_seconds": 2,
+  "rows": [
+    64,
+    2048,
+    16384
+  ],
+  "nulls": [
+    false,
+    true
+  ],
+  "nullable_pattern": {
+    "left": "index % 10 == 0",
+    "right": "index % 10 == 3"
+  },
+  "input_values": "non-null values in 0..999; all underlying sums checked before timing",
+  "benchmark_sha256": "48006a54ff68dfabc1d15068f1c91fddad79f5d2afffdd9b10f370fa8f36c2e6",
+  "cargo_lock_sha256": "14b8f535579e41b4a9cc34e2bcf6b80c401d0023b86f62fe164628eda494c2e3",
+  "configurations": {
+    "default": {
+      "rustflags": "",
+      "target_directory": "target",
+      "cpu_target": "default x86_64"
+    },
+    "native": {
+      "rustflags": "-C target-cpu=native",
+      "target_directory": "target-native",
+      "cpu_target": "znver2",
+      "features_verified": [
+        "avx",
+        "avx2",
+        "sse2"
+      ]
+    }
+  },
+  "simd_observation": {
+    "scope": "typed binary and try_binary_no_nulls functions; not all checked/nullable paths",
+    "default": "SSE2 paddq xmm (128-bit)",
+    "native": "AVX2 vpaddq ymm (256-bit)"
+  },
+  "follow_up": {
+    "scope": "native, 2048 rows, no NULLs, unchecked and unchecked_all, both dispatches",
+    "runs": 2,
+    "unchanged_binary": true,
+    "criterion_filter": "add_dispatch/Int64/nulls=false/unchecked.*/.*/2048",
+    "csv": "add_dispatch_x86_native_rechecks.csv",
+    "shared_typed_functions": {
+      "unchecked": "0x1f0db0",
+      "unchecked_all": "0x1f42a0"
+    },
+    "finding": "original static slowdown reversed in both focused runs; cause not isolated"
+  }
+}

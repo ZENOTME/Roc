@@ -11,7 +11,7 @@ a Project that multiplies the aggregate's output column by three.
 
 ## Expressions and execution
 
-`expr/scalar/` contains `BoundScalarExpression` and one file per node: reference,
+`expr/scalar/` contains `ScalarExpression` and one file per node: reference,
 constant, function, cast, conjunction, not, case, and coalesce. Nodes are static
 descriptions with private fields and public constructors/accessors. They carry no
 inferred result metadata or mutable evaluation state. Constants carry their own
@@ -19,13 +19,50 @@ value type and casts carry their target type as part of the operation itself.
 `expr/agg/` separately describes bound aggregate calls. There is no umbrella
 expression type combining scalar and aggregate expressions.
 
-`expr::scalar::executor::ExpressionExecutor` initializes against a host-supplied Arrow schema.
-It owns each node's `ExpressionResult` (data type and conservative nullability),
-child states, and argument scratch space. Expression Arcs can be shared, while
-each worker has its own executor. Evaluation checks the input schema and retains
-scalar results until an operator needs to broadcast them to full columns.
-Empty batches do not evaluate functions, including constant expressions that
-would otherwise fail. Zero-column batches retain their explicit row counts.
+`expr::scalar::executor::ScalarExpressionExecutor` binds one expression against a
+host-supplied Arrow schema; `ExpressionExecutor` binds a list of expressions.
+`ScalarExpressionExecutor` is a dispatch enum. Each expression file implements
+its concrete executor: Reference, Constant, Function, Cast, Conjunction, Not,
+Case, and Coalesce.
+Concrete executors can be created and used independently through `try_new()` or
+the expression's `create_executor()`, and converted to the dispatch enum with
+`Into`. They own their kernels, child executors, and worker-local scratch space.
+Binding returns output metadata for the outer `ExpressionExecutor` collection;
+the dispatch enum stores no `ExpressionResult` or scalar flag.
+Function kernels share the signature `fn(&[ArrayRef]) -> Result<ArrayRef>`.
+Initialization chooses a function pointer for the operation, primitive numeric
+type, and broadcast direction. Evaluation traverses the bound executor tree
+without interpreting the expression description. Function executors reuse their
+argument vectors, releasing intermediate arrays after success or error.
+Expression Arcs can be shared, while each worker has its own executor.
+
+Evaluation accepts `ExpressionInput::new(&columns, num_rows)`, without a
+RecordBatch. Optional `with_selection(&rows)` addresses the original columns;
+array outputs follow selection order and preserve duplicates. The caller supplies
+columns matching the bound layout, consistent row counts, and valid selection
+indices. Evaluation performs no input or output validation; typed kernels
+downcast their arguments directly. `evaluate()`
+returns `ArrayRef`: scalar nodes hold one value, array nodes hold the selected row
+count. The executor's `is_scalar()` determines broadcast semantics; an array of
+length one remains an array. CASE and COALESCE conservatively always return
+arrays. `evaluate_array()` on a single executor or `evaluate_arrays()` on a list
+materializes scalar results when an operator needs full columns. Empty inputs
+always return empty arrays and skip kernels, including constant expressions that
+would otherwise fail. Zero-column inputs retain their explicit row counts.
+
+For example, a host can execute a binary function directly:
+
+```rust
+let expression = FunctionExpression::new(
+    ScalarFunction::Add,
+    vec![
+        ReferenceExpression::new(0).into_ref(),
+        ConstantExpression::int64(Some(3)).into_ref(),
+    ],
+);
+let mut executor = FunctionExpressionExecutor::try_new(&expression, schema)?;
+let output = executor.evaluate(&ExpressionInput::new(&columns, num_rows))?;
+```
 
 Scalar built-ins include arithmetic, comparisons, null tests, null-safe
 comparisons, strict/try casts, Boolean operations, CASE, and COALESCE. Numeric
@@ -40,12 +77,16 @@ Boolean value evaluation uses three-valued logic. Predicate selection accepts
 only TRUE; AND/OR predicates evaluate children in supplied order on remaining
 candidate rows. Value evaluation of AND/OR evaluates all children. CASE and
 COALESCE evaluate only the required rows, then restore the original order.
-Selected inputs currently use Arrow take kernels and may allocate; executor state
-does not imply reusable output buffers for every Arrow kernel.
+`select()` returns original row indices in selection order. Selected references
+use Arrow take on the referenced columns and may allocate; executor state does
+not imply reusable output buffers for every Arrow kernel. Casts and comparisons
+for non-numeric types currently retain Arrow's internal type dispatch. The
+current built-ins are deterministic and need no function-local mutable state;
+volatile functions and user-defined function state are not exposed yet.
 
 ## Operator parameters
 
-- `FilterOperator::new(predicate)` accepts a `BoundScalarExprRef`. Its worker
+- `FilterOperator::new(predicate)` accepts a `ScalarExprRef`. Its worker
   initializes the expression executor against the first batch schema, requires a
   Boolean result, and preserves the input schema.
 - `ProjectOperator::new(projection)` accepts a `Projection`: a host-supplied input
@@ -53,7 +94,7 @@ does not imply reusable output buffers for every Arrow kernel.
   including the derived output schema. `Projection::output_schema()` resolves
   metadata through executor initialization without storing it in expressions.
 - `AggregateOperator::try_new(groups, aggregates)` accepts a grouping `Projection`
-  and `Arc<BoundAggregateExpression>` values, all bound to the same input layout.
+  and `Arc<AggregateExpression>` values, all bound to the same input layout.
   An optional `with_alias(...)` names each output field; otherwise its aggregate
   function name is used.
   Workers evaluate group keys and aggregate arguments with scalar executors and
@@ -82,18 +123,18 @@ For example, a host can construct a projection over an existing child node:
 ```rust
 use arrow::datatypes::SchemaRef;
 use roc::{
-    expr::scalar::{BoundReferenceExpression, BoundConstantExpression,
-                  BoundFunctionExpression, ScalarFunction},
+    expr::scalar::{ReferenceExpression, ConstantExpression,
+                  FunctionExpression, ScalarFunction},
     operator::{OperatorTreeNode, ProjectOperator, Projection, ProjectionExpression},
 };
 
 fn project_plus_one(child: OperatorTreeNode, input_schema: SchemaRef) -> OperatorTreeNode {
     // The host has established that input column 0 is Int64.
-    let expression = BoundFunctionExpression::new(
+    let expression = FunctionExpression::new(
         ScalarFunction::Add,
         vec![
-            BoundReferenceExpression::new(0).into_ref(),
-            BoundConstantExpression::int64(Some(1)).into_ref(),
+            ReferenceExpression::new(0).into_ref(),
+            ConstantExpression::int64(Some(1)).into_ref(),
         ],
     ).into_ref();
     let projection = Projection::new(input_schema, vec![

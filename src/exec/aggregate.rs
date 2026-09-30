@@ -139,7 +139,14 @@ impl AggregateState {
         let ids = self.group_ids(groups.columns(), batch.num_rows())?;
         let count = self.group_count();
         for accumulator in &mut self.accumulators {
-            accumulator.update(batch, &ids, count)?;
+            accumulator.update(
+                &crate::expr::scalar::executor::ExpressionInput::new(
+                    batch.columns(),
+                    batch.num_rows(),
+                ),
+                &ids,
+                count,
+            )?;
         }
         Ok(())
     }
@@ -375,10 +382,10 @@ impl SourceExecutor for AggregateSourceExecutor {
 mod tests {
     use super::*;
     use crate::{
-        expr::scalar::BoundScalarExprRef,
+        expr::scalar::ScalarExprRef,
         expr::{
-            agg::{AggregateFunction, BoundAggregateExpression},
-            scalar::BoundReferenceExpression,
+            agg::{AggregateExpression, AggregateFunction},
+            scalar::ReferenceExpression,
         },
         operator::Projection,
     };
@@ -394,27 +401,27 @@ mod tests {
         ]))
     }
 
-    fn value() -> BoundScalarExprRef {
-        BoundReferenceExpression::new(1).into_ref()
+    fn value() -> ScalarExprRef {
+        ReferenceExpression::new(1).into_ref()
     }
     fn groups(grouped: bool) -> Projection {
         Projection::from_indices(schema(), if grouped { &[0] } else { &[] }).unwrap()
     }
-    fn aggregates() -> Vec<Arc<BoundAggregateExpression>> {
+    fn aggregates() -> Vec<Arc<AggregateExpression>> {
         use AggregateFunction::*;
         vec![
-            Arc::new(BoundAggregateExpression::new(Sum, vec![value()])),
-            Arc::new(BoundAggregateExpression::new(Avg, vec![value()]).with_alias("avg")),
-            Arc::new(BoundAggregateExpression::new(Count, vec![value()]).with_alias("count")),
+            Arc::new(AggregateExpression::new(Sum, vec![value()])),
+            Arc::new(AggregateExpression::new(Avg, vec![value()]).with_alias("avg")),
+            Arc::new(AggregateExpression::new(Count, vec![value()]).with_alias("count")),
             Arc::new(
-                BoundAggregateExpression::new(Count, vec![value()])
+                AggregateExpression::new(Count, vec![value()])
                     .with_distinct()
                     .with_alias("distinct"),
             ),
             Arc::new(
-                BoundAggregateExpression::new(CovarPop, vec![value(), value()]).with_alias("covar"),
+                AggregateExpression::new(CovarPop, vec![value(), value()]).with_alias("covar"),
             ),
-            Arc::new(BoundAggregateExpression::new(Count, vec![]).with_alias("rows")),
+            Arc::new(AggregateExpression::new(Count, vec![]).with_alias("rows")),
         ]
     }
 
@@ -659,28 +666,24 @@ mod tests {
 
     #[test]
     fn aggregate_filter_runs_before_arguments_and_preserves_empty_groups() {
-        use crate::expr::scalar::{
-            BoundConstantExpression, BoundFunctionExpression, ScalarFunction,
-        };
+        use crate::expr::scalar::{ConstantExpression, FunctionExpression, ScalarFunction};
         let input_schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("value", DataType::Int64, false),
         ]));
-        let int = |v| BoundConstantExpression::int64(Some(v)).into_ref();
+        let int = |v| ConstantExpression::int64(Some(v)).into_ref();
         let predicate =
-            BoundFunctionExpression::new(ScalarFunction::NotEqual, vec![value(), int(0)])
-                .into_ref();
+            FunctionExpression::new(ScalarFunction::NotEqual, vec![value(), int(0)]).into_ref();
         let division =
-            BoundFunctionExpression::new(ScalarFunction::Divide, vec![int(100), value()])
-                .into_ref();
+            FunctionExpression::new(ScalarFunction::Divide, vec![int(100), value()]).into_ref();
         let aggregates = vec![
             Arc::new(
-                BoundAggregateExpression::new(AggregateFunction::Sum, vec![division])
+                AggregateExpression::new(AggregateFunction::Sum, vec![division])
                     .with_filter(predicate.clone())
                     .with_alias("sum"),
             ),
             Arc::new(
-                BoundAggregateExpression::new(AggregateFunction::Count, vec![value()])
+                AggregateExpression::new(AggregateFunction::Count, vec![value()])
                     .with_distinct()
                     .with_filter(predicate)
                     .with_alias("distinct"),
@@ -733,13 +736,12 @@ mod tests {
     #[test]
     fn extrema_merge_values_and_keep_string_null_semantics() {
         let input_schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
-        let expr = BoundReferenceExpression::new(0).into_ref();
+        let expr = ReferenceExpression::new(0).into_ref();
         let aggregates = [AggregateFunction::Min, AggregateFunction::Max]
             .into_iter()
             .map(|f| {
                 Arc::new(
-                    BoundAggregateExpression::new(f, vec![expr.clone()])
-                        .with_alias(format!("{f:?}")),
+                    AggregateExpression::new(f, vec![expr.clone()]).with_alias(format!("{f:?}")),
                 )
             })
             .collect();
@@ -805,9 +807,9 @@ mod tests {
                 AggregateOperator::try_new(
                     Projection::new(input_schema.clone(), vec![]),
                     vec![Arc::new(
-                        BoundAggregateExpression::new(
+                        AggregateExpression::new(
                             AggregateFunction::Sum,
-                            vec![BoundReferenceExpression::new(0).into_ref()],
+                            vec![ReferenceExpression::new(0).into_ref()],
                         )
                         .with_alias("sum"),
                     )],
@@ -839,14 +841,14 @@ mod tests {
 
     #[test]
     fn filtered_count_star_handles_zero_column_batches() {
-        use crate::expr::scalar::BoundConstantExpression;
+        use crate::expr::scalar::ConstantExpression;
         let input_schema = Arc::new(Schema::empty());
         let expressions = [true, false]
             .into_iter()
             .map(|v| {
                 Arc::new(
-                    BoundAggregateExpression::new(AggregateFunction::Count, vec![])
-                        .with_filter(BoundConstantExpression::boolean(Some(v)).into_ref())
+                    AggregateExpression::new(AggregateFunction::Count, vec![])
+                        .with_filter(ConstantExpression::boolean(Some(v)).into_ref())
                         .with_alias(format!("count_{v}")),
                 )
             })
@@ -886,18 +888,18 @@ mod tests {
 
     #[test]
     fn invalid_aggregate_signatures_are_plan_errors() {
-        use crate::expr::scalar::BoundConstantExpression;
+        use crate::expr::scalar::ConstantExpression;
         for expr in [
-            BoundAggregateExpression::new(AggregateFunction::Sum, vec![]),
-            BoundAggregateExpression::new(AggregateFunction::Sum, vec![value()]).with_distinct(),
-            BoundAggregateExpression::new(AggregateFunction::Count, vec![]).with_distinct(),
-            BoundAggregateExpression::new(AggregateFunction::Count, vec![value(), value()]),
-            BoundAggregateExpression::new(AggregateFunction::CovarPop, vec![value()]),
-            BoundAggregateExpression::new(
+            AggregateExpression::new(AggregateFunction::Sum, vec![]),
+            AggregateExpression::new(AggregateFunction::Sum, vec![value()]).with_distinct(),
+            AggregateExpression::new(AggregateFunction::Count, vec![]).with_distinct(),
+            AggregateExpression::new(AggregateFunction::Count, vec![value(), value()]),
+            AggregateExpression::new(AggregateFunction::CovarPop, vec![value()]),
+            AggregateExpression::new(
                 AggregateFunction::Sum,
-                vec![BoundConstantExpression::string(Some("x")).into_ref()],
+                vec![ConstantExpression::string(Some("x")).into_ref()],
             ),
-            BoundAggregateExpression::new(AggregateFunction::Count, vec![]).with_filter(value()),
+            AggregateExpression::new(AggregateFunction::Count, vec![]).with_filter(value()),
         ] {
             assert!(matches!(
                 AggregateOperator::try_new(

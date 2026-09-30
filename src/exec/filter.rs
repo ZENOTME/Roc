@@ -1,19 +1,22 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
-use crate::expr::scalar::executor::ExpressionExecutor;
+use crate::expr::scalar::executor::{ExpressionExecutor, ExpressionInput};
 use crate::{
     error::{Error, Result},
-    expr::scalar::BoundScalarExprRef,
+    expr::scalar::ScalarExprRef,
 };
-use arrow::{compute::filter_record_batch, datatypes::DataType, record_batch::RecordBatch};
+use arrow::{
+    array::BooleanArray, compute::filter_record_batch, datatypes::DataType,
+    record_batch::RecordBatch,
+};
 use asyncband::shutdown::ShutdownGuard;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct FilterExec {
-    predicate: BoundScalarExprRef,
+    predicate: ScalarExprRef,
 }
 impl FilterExec {
-    pub fn new(predicate: BoundScalarExprRef) -> Self {
+    pub fn new(predicate: ScalarExprRef) -> Self {
         Self { predicate }
     }
 }
@@ -31,7 +34,7 @@ impl ProcessExec for FilterExec {
 
 /// Initialized against the first input schema, then retained across batches.
 struct FilterExecutor {
-    predicate: BoundScalarExprRef,
+    predicate: ScalarExprRef,
     expressions: Option<ExpressionExecutor>,
 }
 impl ProcessExecutor for FilterExecutor {
@@ -44,13 +47,21 @@ impl ProcessExecutor for FilterExecutor {
             }
             self.expressions = Some(executor);
         }
-        let mask = self.expressions.as_mut().unwrap().select(input)?;
-        let output = if mask.true_count() == mask.len() {
+        let selected = self
+            .expressions
+            .as_mut()
+            .unwrap()
+            .select(&ExpressionInput::new(input.columns(), input.num_rows()))?;
+        let output = if selected.len() == input.num_rows() {
             input.clone()
-        } else if mask.true_count() == 0 {
+        } else if selected.is_empty() {
             input.slice(0, 0)
         } else {
-            filter_record_batch(input, &mask)?
+            let mut mask = vec![false; input.num_rows()];
+            for row in selected {
+                mask[row] = true;
+            }
+            filter_record_batch(input, &BooleanArray::from(mask))?
         };
         Ok(ProcessResult::NeedMoreInput(output))
     }

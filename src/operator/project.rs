@@ -1,6 +1,6 @@
 //! Projection operator descriptor.
 use super::Operator;
-use crate::expr::scalar::{BoundReferenceExpression, BoundScalarExprRef};
+use crate::expr::scalar::{ReferenceExpression, ScalarExprRef};
 use crate::{
     error::{Error, Result},
     exec::ProjectExec,
@@ -11,18 +11,18 @@ use arrow::datatypes::SchemaRef;
 
 #[derive(Clone, Debug)]
 pub struct ProjectionExpression {
-    expression: BoundScalarExprRef,
+    expression: ScalarExprRef,
     name: String,
 }
 
 impl ProjectionExpression {
-    pub fn new(expression: BoundScalarExprRef, name: impl Into<String>) -> Self {
+    pub fn new(expression: ScalarExprRef, name: impl Into<String>) -> Self {
         Self {
             expression,
             name: name.into(),
         }
     }
-    pub fn expression(&self) -> &BoundScalarExprRef {
+    pub fn expression(&self) -> &ScalarExprRef {
         &self.expression
     }
     pub fn name(&self) -> &str {
@@ -50,7 +50,7 @@ impl Projection {
                     Error::InvalidPlan(format!("column index {index} out of bounds"))
                 })?;
                 Ok(ProjectionExpression::new(
-                    BoundReferenceExpression::new(index).into_ref(),
+                    ReferenceExpression::new(index).into_ref(),
                     field.name(),
                 ))
             })

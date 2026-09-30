@@ -1,6 +1,6 @@
 //! Filter operator descriptor.
 use super::Operator;
-use crate::expr::scalar::BoundScalarExprRef;
+use crate::expr::scalar::ScalarExprRef;
 use crate::{
     error::{Error, Result},
     exec::FilterExec,
@@ -11,11 +11,11 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct FilterOperator {
     /// Bound to the child output. Filtering preserves the input batch schema.
-    predicate: BoundScalarExprRef,
+    predicate: ScalarExprRef,
 }
 
 impl FilterOperator {
-    pub fn new(predicate: BoundScalarExprRef) -> Self {
+    pub fn new(predicate: ScalarExprRef) -> Self {
         Self { predicate }
     }
 }
