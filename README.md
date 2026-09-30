@@ -22,18 +22,19 @@ expression type combining scalar and aggregate expressions.
 `expr::scalar::executor::ScalarExpressionExecutor` binds one expression against a
 host-supplied Arrow schema; `ExpressionExecutor` binds a list of expressions.
 `ScalarExpressionExecutor` is a dispatch enum. Each expression file implements
-its concrete executor: Reference, Constant, Function, Cast, Conjunction, Not,
-Case, and Coalesce.
+its concrete executor: Reference, Constant, Cast, Conjunction, Not, Case, and
+Coalesce. Function expressions choose UnaryFunction or BinaryFunction executors.
 Concrete executors can be created and used independently through `try_new()` or
 the expression's `create_executor()`, and converted to the dispatch enum with
 `Into`. They own their kernels, child executors, and worker-local scratch space.
 Binding returns output metadata for the outer `ExpressionExecutor` collection;
 the dispatch enum stores no `ExpressionResult` or scalar flag.
-Function kernels share the signature `fn(&[ArrayRef]) -> Result<ArrayRef>`.
+Function kernels use `UnaryScalarKernel = fn(&ArrayRef) -> Result<ArrayRef>` or
+`BinaryScalarKernel = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>`.
 Initialization chooses a function pointer for the operation, primitive numeric
 type, and broadcast direction. Evaluation traverses the bound executor tree
-without interpreting the expression description. Function executors reuse their
-argument vectors, releasing intermediate arrays after success or error.
+without interpreting the expression description. Function executors pass child
+results directly to the kernel, without an argument vector or intermediate buffer.
 Expression Arcs can be shared, while each worker has its own executor.
 
 Evaluation accepts `ExpressionInput::new(&columns, num_rows)`, without a
@@ -60,7 +61,7 @@ let expression = FunctionExpression::new(
         ConstantExpression::int64(Some(3)).into_ref(),
     ],
 );
-let mut executor = FunctionExpressionExecutor::try_new(&expression, schema)?;
+let mut executor = BinaryFunctionExpressionExecutor::try_new(&expression, schema)?;
 let output = executor.evaluate(&ExpressionInput::new(&columns, num_rows))?;
 ```
 

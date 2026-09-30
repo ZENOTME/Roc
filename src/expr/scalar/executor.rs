@@ -1,5 +1,5 @@
 //! Dispatch independently constructed, worker-local scalar executors.
-pub use super::kernels::{ScalarFunction, is_number};
+pub use super::kernels::{BinaryScalarKernel, UnaryScalarKernel, is_number};
 use super::*;
 use super::{BindScalarExpression, SelectExpression, row_index};
 pub use super::{boolean, require_boolean};
@@ -102,7 +102,8 @@ impl ExpressionExecutor {
 pub enum ScalarExpressionExecutor {
     Reference(ReferenceExpressionExecutor),
     Constant(ConstantExpressionExecutor),
-    Function(FunctionExpressionExecutor),
+    UnaryFunction(UnaryFunctionExpressionExecutor),
+    BinaryFunction(BinaryFunctionExpressionExecutor),
     Cast(CastExpressionExecutor),
     Conjunction(ConjunctionExpressionExecutor),
     Not(NotExpressionExecutor),
@@ -117,7 +118,8 @@ impl ScalarExpressionExecutor {
         match self {
             Self::Reference(e) => e.is_scalar(),
             Self::Constant(e) => e.is_scalar(),
-            Self::Function(e) => e.is_scalar(),
+            Self::UnaryFunction(e) => e.is_scalar(),
+            Self::BinaryFunction(e) => e.is_scalar(),
             Self::Cast(e) => e.is_scalar(),
             Self::Conjunction(e) => e.is_scalar(),
             Self::Not(e) => e.is_scalar(),
@@ -129,7 +131,8 @@ impl ScalarExpressionExecutor {
         match self {
             Self::Reference(e) => e.evaluate(input),
             Self::Constant(e) => e.evaluate(input),
-            Self::Function(e) => e.evaluate(input),
+            Self::UnaryFunction(e) => e.evaluate(input),
+            Self::BinaryFunction(e) => e.evaluate(input),
             Self::Cast(e) => e.evaluate(input),
             Self::Conjunction(e) => e.evaluate(input),
             Self::Not(e) => e.evaluate(input),
@@ -141,7 +144,8 @@ impl ScalarExpressionExecutor {
         match self {
             Self::Reference(e) => e.evaluate_array(input),
             Self::Constant(e) => e.evaluate_array(input),
-            Self::Function(e) => e.evaluate_array(input),
+            Self::UnaryFunction(e) => e.evaluate_array(input),
+            Self::BinaryFunction(e) => e.evaluate_array(input),
             Self::Cast(e) => e.evaluate_array(input),
             Self::Conjunction(e) => e.evaluate_array(input),
             Self::Not(e) => e.evaluate_array(input),
@@ -169,7 +173,14 @@ impl BindScalarExpression for ScalarExpressionExecutor {
         match expression {
             ScalarExpression::Reference(e) => bind!(e, ReferenceExpressionExecutor, Reference),
             ScalarExpression::Constant(e) => bind!(e, ConstantExpressionExecutor, Constant),
-            ScalarExpression::Function(e) => bind!(e, FunctionExpressionExecutor, Function),
+            ScalarExpression::Function(e) => match e.arguments().len() {
+                1 => bind!(e, UnaryFunctionExpressionExecutor, UnaryFunction),
+                2 => bind!(e, BinaryFunctionExpressionExecutor, BinaryFunction),
+                _ => Err(Error::InvalidPlan(format!(
+                    "invalid argument count for {:?}",
+                    e.function()
+                ))),
+            },
             ScalarExpression::Cast(e) => bind!(e, CastExpressionExecutor, Cast),
             ScalarExpression::Conjunction(e) => {
                 bind!(e, ConjunctionExpressionExecutor, Conjunction)

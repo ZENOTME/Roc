@@ -338,11 +338,12 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
     );
 
     let add = FunctionExpression::new(ScalarFunction::Add, vec![reference(0), int(3)]);
-    let mut binary = FunctionExpressionExecutor::try_new(&add, schema.clone()).unwrap();
+    let mut binary = BinaryFunctionExpressionExecutor::try_new(&add, schema.clone()).unwrap();
     assert_eq!(
         ints(&binary.evaluate(&input).unwrap()),
         vec![Some(5), None, Some(7)]
     );
+    assert!(UnaryFunctionExpressionExecutor::try_new(&add, schema.clone()).is_err());
     let mut wrapped: ScalarExpressionExecutor = binary.into();
     assert_eq!(
         ints(&wrapped.evaluate(&input).unwrap()),
@@ -350,7 +351,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
     );
 
     let negate = FunctionExpression::new(ScalarFunction::Negate, vec![reference(0)]);
-    let mut unary = negate.create_executor(schema.clone()).unwrap();
+    let mut unary = UnaryFunctionExpressionExecutor::try_new(&negate, schema.clone()).unwrap();
     assert_eq!(
         ints(&unary.evaluate(&input).unwrap()),
         vec![Some(-2), None, Some(-4)]

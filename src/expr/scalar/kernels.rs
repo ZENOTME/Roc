@@ -15,7 +15,8 @@ use arrow::{
 };
 use std::sync::Arc;
 
-pub type ScalarFunction = fn(&[ArrayRef]) -> Result<ArrayRef>;
+pub type UnaryScalarKernel = fn(&ArrayRef) -> Result<ArrayRef>;
+pub type BinaryScalarKernel = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>;
 
 pub fn is_number(t: &DataType) -> bool {
     matches!(
@@ -79,27 +80,14 @@ pub(super) fn prepare(
     })
 }
 
-/// Arity and argument types have been resolved by prepare(). Shape is bound once.
-pub(super) fn bind(
+pub(super) fn bind_unary(
     function: ScalarFunction,
     data_type: &DataType,
-    scalars: &[bool],
-) -> Result<ScalarFunction> {
-    if matches!(
-        function,
-        ScalarFunction::Negate | ScalarFunction::IsNull | ScalarFunction::IsNotNull
-    ) {
-        bind_unary(function, data_type)
-    } else {
-        bind_binary(function, data_type, scalars[0], scalars[1])
-    }
-}
-
-fn bind_unary(function: ScalarFunction, data_type: &DataType) -> Result<ScalarFunction> {
+) -> Result<UnaryScalarKernel> {
     use ScalarFunction::*;
     Ok(match function {
-        IsNull => |arguments| Ok(Arc::new(is_null(arguments[0].as_ref())?)),
-        IsNotNull => |arguments| Ok(Arc::new(is_not_null(arguments[0].as_ref())?)),
+        IsNull => |value| Ok(Arc::new(is_null(value.as_ref())?)),
+        IsNotNull => |value| Ok(Arc::new(is_not_null(value.as_ref())?)),
         Negate => match data_type {
             DataType::Int8 => negate::<Int8Type, false>,
             DataType::Int16 => negate::<Int16Type, false>,
@@ -117,8 +105,8 @@ fn bind_unary(function: ScalarFunction, data_type: &DataType) -> Result<ScalarFu
     })
 }
 
-fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(arguments: &[ArrayRef]) -> Result<ArrayRef> {
-    let value = primitive::<T>(&arguments[0])?;
+fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(value: &ArrayRef) -> Result<ArrayRef> {
+    let value = primitive::<T>(value)?;
     let output: PrimitiveArray<T> = if FLOAT {
         value.unary(|v| v.neg_wrapping())
     } else {
@@ -127,12 +115,12 @@ fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(arguments: &[ArrayRef]) -> R
     Ok(Arc::new(output))
 }
 
-fn bind_binary(
+pub(super) fn bind_binary(
     function: ScalarFunction,
     data_type: &DataType,
     left_scalar: bool,
     right_scalar: bool,
-) -> Result<ScalarFunction> {
+) -> Result<BinaryScalarKernel> {
     match (left_scalar, right_scalar) {
         (false, false) => bind_binary_shape::<false, false>(function, data_type),
         (false, true) => bind_binary_shape::<false, true>(function, data_type),
@@ -144,7 +132,7 @@ fn bind_binary(
 fn bind_binary_shape<const L: bool, const R: bool>(
     function: ScalarFunction,
     data_type: &DataType,
-) -> Result<ScalarFunction> {
+) -> Result<BinaryScalarKernel> {
     use ScalarFunction::*;
     match function {
         Add => bind_arithmetic::<AddOp, L, R>(data_type),
@@ -204,7 +192,7 @@ impl ArithmeticOperation for RemainderOp {
 
 fn bind_arithmetic<O: ArithmeticOperation, const L: bool, const R: bool>(
     data_type: &DataType,
-) -> Result<ScalarFunction> {
+) -> Result<BinaryScalarKernel> {
     Ok(match data_type {
         DataType::Int8 => arithmetic::<Int8Type, O, L, R, false>,
         DataType::Int16 => arithmetic::<Int16Type, O, L, R, false>,
@@ -231,10 +219,11 @@ fn arithmetic<
     const R: bool,
     const FLOAT: bool,
 >(
-    arguments: &[ArrayRef],
+    left: &ArrayRef,
+    right: &ArrayRef,
 ) -> Result<ArrayRef> {
-    let left = primitive::<T>(&arguments[0])?;
-    let right = primitive::<T>(&arguments[1])?;
+    let left = primitive::<T>(left)?;
+    let right = primitive::<T>(right)?;
     let output: PrimitiveArray<T> = if L && !R {
         if left.is_null(0) {
             PrimitiveArray::new_null(right.len())
@@ -325,7 +314,7 @@ impl ComparisonOperation for NotDistinctOp {
 
 fn bind_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
     data_type: &DataType,
-) -> Result<ScalarFunction> {
+) -> Result<BinaryScalarKernel> {
     Ok(match data_type {
         DataType::Int8 => comparison::<Int8Type, O, L, R>,
         DataType::Int16 => comparison::<Int16Type, O, L, R>,
@@ -348,10 +337,11 @@ fn bind_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
 }
 
 fn comparison<T: ArrowPrimitiveType, O: ComparisonOperation, const L: bool, const R: bool>(
-    arguments: &[ArrayRef],
+    left: &ArrayRef,
+    right: &ArrayRef,
 ) -> Result<ArrayRef> {
-    let left = primitive::<T>(&arguments[0])?;
-    let right = primitive::<T>(&arguments[1])?;
+    let left = primitive::<T>(left)?;
+    let right = primitive::<T>(right)?;
     let len = if L && !R { right.len() } else { left.len() };
     let nulls = if O::NULL_SAFE {
         None
@@ -401,10 +391,11 @@ impl<const SCALAR: bool> Datum for ArrayDatum<'_, SCALAR> {
     }
 }
 fn arrow_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
-    arguments: &[ArrayRef],
+    left: &ArrayRef,
+    right: &ArrayRef,
 ) -> Result<ArrayRef> {
     Ok(Arc::new(O::arrow(
-        &ArrayDatum::<L>(&arguments[0]),
-        &ArrayDatum::<R>(&arguments[1]),
+        &ArrayDatum::<L>(left),
+        &ArrayDatum::<R>(right),
     )?))
 }

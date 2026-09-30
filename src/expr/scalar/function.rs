@@ -1,9 +1,9 @@
 use super::ScalarExprRef;
-use super::executor::ScalarFunction;
+use super::executor::{BinaryScalarKernel, UnaryScalarKernel};
 use super::{
     BindScalarExpression, ExpressionInput, ExpressionResult, ScalarExpressionExecutor, kernels,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 use arrow::{
     array::{ArrayRef, new_empty_array},
     datatypes::SchemaRef,
@@ -52,48 +52,48 @@ impl FunctionExpression {
         &self.arguments
     }
 
-    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<FunctionExpressionExecutor> {
-        FunctionExpressionExecutor::try_new(self, input_schema)
+    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<ScalarExpressionExecutor> {
+        match self.arguments.len() {
+            1 => Ok(UnaryFunctionExpressionExecutor::try_new(self, input_schema)?.into()),
+            2 => Ok(BinaryFunctionExpressionExecutor::try_new(self, input_schema)?.into()),
+            _ => Err(Error::InvalidPlan(format!(
+                "invalid argument count for {:?}",
+                self.function
+            ))),
+        }
     }
 }
 
 #[derive(Debug)]
-pub struct FunctionExpressionExecutor {
-    arguments: Vec<ScalarExpressionExecutor>,
-    kernel: ScalarFunction,
-    values: Vec<ArrayRef>,
+pub struct UnaryFunctionExpressionExecutor {
+    argument: Box<ScalarExpressionExecutor>,
+    kernel: UnaryScalarKernel,
     empty: ArrayRef,
 }
-impl BindScalarExpression for FunctionExpressionExecutor {
+impl BindScalarExpression for UnaryFunctionExpressionExecutor {
     type Expression = FunctionExpression;
     fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        let (arguments, results): (Vec<_>, Vec<_>) = expression
-            .arguments
-            .iter()
-            .map(|argument| ScalarExpressionExecutor::bind(argument.as_ref(), schema))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .unzip();
-        let result = kernels::prepare(expression.function, &results)?;
-        let scalars = arguments
-            .iter()
-            .map(|argument| argument.is_scalar())
-            .collect::<Vec<_>>();
-        let kernel = kernels::bind(expression.function, &results[0].data_type, &scalars)?;
-        let values = Vec::with_capacity(arguments.len());
+        if expression.arguments.len() != 1 {
+            return Err(Error::InvalidPlan(
+                "unary function requires one argument".into(),
+            ));
+        }
+        let (argument, argument_result) =
+            ScalarExpressionExecutor::bind(expression.arguments[0].as_ref(), schema)?;
+        let result = kernels::prepare(expression.function, std::slice::from_ref(&argument_result))?;
+        let kernel = kernels::bind_unary(expression.function, &argument_result.data_type)?;
         let empty = new_empty_array(&result.data_type);
         Ok((
             Self {
-                arguments,
+                argument: Box::new(argument),
                 kernel,
-                values,
                 empty,
             },
             result,
         ))
     }
 }
-impl FunctionExpressionExecutor {
+impl UnaryFunctionExpressionExecutor {
     pub fn try_new(expression: &FunctionExpression, input_schema: SchemaRef) -> Result<Self> {
         Self::bind(expression, &input_schema).map(|(executor, _)| executor)
     }
@@ -102,22 +102,72 @@ impl FunctionExpressionExecutor {
         super::materialize(value, self.is_scalar(), input.len())
     }
     pub fn is_scalar(&self) -> bool {
-        self.arguments.iter().all(|argument| argument.is_scalar())
+        self.argument.is_scalar()
     }
     pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
         if input.is_empty() {
             return Ok(self.empty.clone());
         }
-        self.values.clear();
-        let result = self.evaluate_arguments(input);
-        // Reuse the allocation, but release child results on success and error.
-        self.values.clear();
-        result
+        let argument = self.argument.evaluate(input)?;
+        (self.kernel)(&argument)
     }
-    fn evaluate_arguments(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        for argument in &mut self.arguments {
-            self.values.push(argument.evaluate(input)?);
+}
+
+#[derive(Debug)]
+pub struct BinaryFunctionExpressionExecutor {
+    left: Box<ScalarExpressionExecutor>,
+    right: Box<ScalarExpressionExecutor>,
+    kernel: BinaryScalarKernel,
+    empty: ArrayRef,
+}
+impl BindScalarExpression for BinaryFunctionExpressionExecutor {
+    type Expression = FunctionExpression;
+    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
+        if expression.arguments.len() != 2 {
+            return Err(Error::InvalidPlan(
+                "binary function requires two arguments".into(),
+            ));
         }
-        (self.kernel)(&self.values)
+        let (left, left_result) =
+            ScalarExpressionExecutor::bind(expression.arguments[0].as_ref(), schema)?;
+        let (right, right_result) =
+            ScalarExpressionExecutor::bind(expression.arguments[1].as_ref(), schema)?;
+        let result = kernels::prepare(expression.function, &[left_result.clone(), right_result])?;
+        let kernel = kernels::bind_binary(
+            expression.function,
+            &left_result.data_type,
+            left.is_scalar(),
+            right.is_scalar(),
+        )?;
+        let empty = new_empty_array(&result.data_type);
+        Ok((
+            Self {
+                left: Box::new(left),
+                right: Box::new(right),
+                kernel,
+                empty,
+            },
+            result,
+        ))
+    }
+}
+impl BinaryFunctionExpressionExecutor {
+    pub fn try_new(expression: &FunctionExpression, input_schema: SchemaRef) -> Result<Self> {
+        Self::bind(expression, &input_schema).map(|(executor, _)| executor)
+    }
+    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
+        let value = self.evaluate(input)?;
+        super::materialize(value, self.is_scalar(), input.len())
+    }
+    pub fn is_scalar(&self) -> bool {
+        self.left.is_scalar() && self.right.is_scalar()
+    }
+    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
+        if input.is_empty() {
+            return Ok(self.empty.clone());
+        }
+        let left = self.left.evaluate(input)?;
+        let right = self.right.evaluate(input)?;
+        (self.kernel)(&left, &right)
     }
 }

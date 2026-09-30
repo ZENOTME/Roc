@@ -24,7 +24,10 @@ pub use cast::{CastExpression, CastExpressionExecutor, CastMode};
 pub use coalesce::{CoalesceExpression, CoalesceExpressionExecutor};
 pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionExecutor};
 pub use constant::{ConstantExpression, ConstantExpressionExecutor};
-pub use function::{FunctionExpression, FunctionExpressionExecutor, ScalarFunction};
+pub use function::{
+    BinaryFunctionExpressionExecutor, FunctionExpression, ScalarFunction,
+    UnaryFunctionExpressionExecutor,
+};
 pub use not::{NotExpression, NotExpressionExecutor};
 pub use reference::{ReferenceExpression, ReferenceExpressionExecutor};
 
@@ -90,7 +93,8 @@ macro_rules! scalar_executor {
 scalar_executor! {
     Reference(ReferenceExpression, ReferenceExpressionExecutor),
     Constant(ConstantExpression, ConstantExpressionExecutor),
-    Function(FunctionExpression, FunctionExpressionExecutor),
+    UnaryFunction(FunctionExpression, UnaryFunctionExpressionExecutor),
+    BinaryFunction(FunctionExpression, BinaryFunctionExpressionExecutor),
     Cast(CastExpression, CastExpressionExecutor),
     Conjunction(ConjunctionExpression, ConjunctionExpressionExecutor),
     Not(NotExpression, NotExpressionExecutor),
