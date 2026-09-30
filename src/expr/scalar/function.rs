@@ -1,5 +1,5 @@
 use super::ScalarExprRef;
-use super::executor::{BinaryScalarKernel, UnaryScalarKernel};
+use super::executor::{BinaryEvalFn, UnaryEvalFn};
 use super::{
     BindScalarExpression, ExpressionInput, ExpressionResult, ScalarExpressionExecutor, kernels,
 };
@@ -11,7 +11,7 @@ use arrow::{
 
 /// An already selected built-in implementation; no name lookup or coercion occurs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScalarFunction {
+pub enum FunctionKind {
     Add,
     Subtract,
     Multiply,
@@ -32,19 +32,19 @@ pub enum ScalarFunction {
 
 #[derive(Clone, Debug)]
 pub struct FunctionExpression {
-    function: ScalarFunction,
+    function: FunctionKind,
     arguments: Vec<ScalarExprRef>,
 }
 
 impl FunctionExpression {
-    pub fn new(function: ScalarFunction, arguments: Vec<ScalarExprRef>) -> Self {
+    pub fn new(function: FunctionKind, arguments: Vec<ScalarExprRef>) -> Self {
         Self {
             function,
             arguments,
         }
     }
 
-    pub fn function(&self) -> ScalarFunction {
+    pub fn function(&self) -> FunctionKind {
         self.function
     }
 
@@ -67,7 +67,7 @@ impl FunctionExpression {
 #[derive(Debug)]
 pub struct UnaryFunctionExpressionExecutor {
     argument: Box<ScalarExpressionExecutor>,
-    kernel: UnaryScalarKernel,
+    eval_fn: UnaryEvalFn,
     empty: ArrayRef,
 }
 impl BindScalarExpression for UnaryFunctionExpressionExecutor {
@@ -81,12 +81,12 @@ impl BindScalarExpression for UnaryFunctionExpressionExecutor {
         let (argument, argument_result) =
             ScalarExpressionExecutor::bind(expression.arguments[0].as_ref(), schema)?;
         let result = kernels::prepare(expression.function, std::slice::from_ref(&argument_result))?;
-        let kernel = kernels::bind_unary(expression.function, &argument_result.data_type)?;
+        let eval_fn = kernels::bind_unary(expression.function, &argument_result.data_type)?;
         let empty = new_empty_array(&result.data_type);
         Ok((
             Self {
                 argument: Box::new(argument),
-                kernel,
+                eval_fn,
                 empty,
             },
             result,
@@ -109,7 +109,7 @@ impl UnaryFunctionExpressionExecutor {
             return Ok(self.empty.clone());
         }
         let argument = self.argument.evaluate(input)?;
-        (self.kernel)(&argument)
+        (self.eval_fn)(&argument)
     }
 }
 
@@ -117,7 +117,7 @@ impl UnaryFunctionExpressionExecutor {
 pub struct BinaryFunctionExpressionExecutor {
     left: Box<ScalarExpressionExecutor>,
     right: Box<ScalarExpressionExecutor>,
-    kernel: BinaryScalarKernel,
+    eval_fn: BinaryEvalFn,
     empty: ArrayRef,
 }
 impl BindScalarExpression for BinaryFunctionExpressionExecutor {
@@ -133,7 +133,7 @@ impl BindScalarExpression for BinaryFunctionExpressionExecutor {
         let (right, right_result) =
             ScalarExpressionExecutor::bind(expression.arguments[1].as_ref(), schema)?;
         let result = kernels::prepare(expression.function, &[left_result.clone(), right_result])?;
-        let kernel = kernels::bind_binary(
+        let eval_fn = kernels::bind_binary(
             expression.function,
             &left_result.data_type,
             left.is_scalar(),
@@ -144,7 +144,7 @@ impl BindScalarExpression for BinaryFunctionExpressionExecutor {
             Self {
                 left: Box::new(left),
                 right: Box::new(right),
-                kernel,
+                eval_fn,
                 empty,
             },
             result,
@@ -168,6 +168,6 @@ impl BinaryFunctionExpressionExecutor {
         }
         let left = self.left.evaluate(input)?;
         let right = self.right.evaluate(input)?;
-        (self.kernel)(&left, &right)
+        (self.eval_fn)(&left, &right)
     }
 }

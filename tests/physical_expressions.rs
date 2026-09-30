@@ -27,7 +27,7 @@ use roc::{
     expr::{
         agg::{AggregateExpression, AggregateFunction},
         scalar::{
-            ConstantExpression, FunctionExpression, ReferenceExpression, ScalarFunction as ExprOp,
+            ConstantExpression, FunctionExpression, FunctionKind as ExprOp, ReferenceExpression,
         },
     },
     operator::{Projection, ProjectionExpression as ProjectionExpr},

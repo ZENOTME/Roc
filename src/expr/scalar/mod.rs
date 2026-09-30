@@ -25,7 +25,7 @@ pub use coalesce::{CoalesceExpression, CoalesceExpressionExecutor};
 pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionExecutor};
 pub use constant::{ConstantExpression, ConstantExpressionExecutor};
 pub use function::{
-    BinaryFunctionExpressionExecutor, FunctionExpression, ScalarFunction,
+    BinaryFunctionExpressionExecutor, FunctionExpression, FunctionKind,
     UnaryFunctionExpressionExecutor,
 };
 pub use not::{NotExpression, NotExpressionExecutor};

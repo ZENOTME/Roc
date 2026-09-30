@@ -666,16 +666,16 @@ mod tests {
 
     #[test]
     fn aggregate_filter_runs_before_arguments_and_preserves_empty_groups() {
-        use crate::expr::scalar::{ConstantExpression, FunctionExpression, ScalarFunction};
+        use crate::expr::scalar::{ConstantExpression, FunctionExpression, FunctionKind};
         let input_schema = Arc::new(Schema::new(vec![
             Field::new("key", DataType::Utf8, false),
             Field::new("value", DataType::Int64, false),
         ]));
         let int = |v| ConstantExpression::int64(Some(v)).into_ref();
         let predicate =
-            FunctionExpression::new(ScalarFunction::NotEqual, vec![value(), int(0)]).into_ref();
+            FunctionExpression::new(FunctionKind::NotEqual, vec![value(), int(0)]).into_ref();
         let division =
-            FunctionExpression::new(ScalarFunction::Divide, vec![int(100), value()]).into_ref();
+            FunctionExpression::new(FunctionKind::Divide, vec![int(100), value()]).into_ref();
         let aggregates = vec![
             Arc::new(
                 AggregateExpression::new(AggregateFunction::Sum, vec![division])

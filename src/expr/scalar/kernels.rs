@@ -1,5 +1,5 @@
 //! Select operations, primitive types, and broadcasting during initialization.
-use super::{ScalarFunction, executor::ExpressionResult};
+use super::{FunctionKind, executor::ExpressionResult};
 use crate::error::{Error, Result};
 use arrow::{
     array::{
@@ -15,8 +15,8 @@ use arrow::{
 };
 use std::sync::Arc;
 
-pub type UnaryScalarKernel = fn(&ArrayRef) -> Result<ArrayRef>;
-pub type BinaryScalarKernel = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>;
+pub type UnaryEvalFn = fn(&ArrayRef) -> Result<ArrayRef>;
+pub type BinaryEvalFn = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>;
 
 pub fn is_number(t: &DataType) -> bool {
     matches!(
@@ -35,10 +35,10 @@ pub fn is_number(t: &DataType) -> bool {
 }
 
 pub(super) fn prepare(
-    function: ScalarFunction,
+    function: FunctionKind,
     args: &[ExpressionResult],
 ) -> Result<ExpressionResult> {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let arity = if matches!(function, Negate | IsNull | IsNotNull) {
         1
     } else {
@@ -80,11 +80,8 @@ pub(super) fn prepare(
     })
 }
 
-pub(super) fn bind_unary(
-    function: ScalarFunction,
-    data_type: &DataType,
-) -> Result<UnaryScalarKernel> {
-    use ScalarFunction::*;
+pub(super) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<UnaryEvalFn> {
+    use FunctionKind::*;
     Ok(match function {
         IsNull => |value| Ok(Arc::new(is_null(value.as_ref())?)),
         IsNotNull => |value| Ok(Arc::new(is_not_null(value.as_ref())?)),
@@ -116,11 +113,11 @@ fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(value: &ArrayRef) -> Result<
 }
 
 pub(super) fn bind_binary(
-    function: ScalarFunction,
+    function: FunctionKind,
     data_type: &DataType,
     left_scalar: bool,
     right_scalar: bool,
-) -> Result<BinaryScalarKernel> {
+) -> Result<BinaryEvalFn> {
     match (left_scalar, right_scalar) {
         (false, false) => bind_binary_shape::<false, false>(function, data_type),
         (false, true) => bind_binary_shape::<false, true>(function, data_type),
@@ -130,10 +127,10 @@ pub(super) fn bind_binary(
 }
 
 fn bind_binary_shape<const L: bool, const R: bool>(
-    function: ScalarFunction,
+    function: FunctionKind,
     data_type: &DataType,
-) -> Result<BinaryScalarKernel> {
-    use ScalarFunction::*;
+) -> Result<BinaryEvalFn> {
+    use FunctionKind::*;
     match function {
         Add => bind_arithmetic::<AddOp, L, R>(data_type),
         Subtract => bind_arithmetic::<SubtractOp, L, R>(data_type),
@@ -192,7 +189,7 @@ impl ArithmeticOperation for RemainderOp {
 
 fn bind_arithmetic<O: ArithmeticOperation, const L: bool, const R: bool>(
     data_type: &DataType,
-) -> Result<BinaryScalarKernel> {
+) -> Result<BinaryEvalFn> {
     Ok(match data_type {
         DataType::Int8 => arithmetic::<Int8Type, O, L, R, false>,
         DataType::Int16 => arithmetic::<Int16Type, O, L, R, false>,
@@ -314,7 +311,7 @@ impl ComparisonOperation for NotDistinctOp {
 
 fn bind_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
     data_type: &DataType,
-) -> Result<BinaryScalarKernel> {
+) -> Result<BinaryEvalFn> {
     Ok(match data_type {
         DataType::Int8 => comparison::<Int8Type, O, L, R>,
         DataType::Int16 => comparison::<Int16Type, O, L, R>,

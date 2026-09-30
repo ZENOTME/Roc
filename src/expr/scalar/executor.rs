@@ -1,5 +1,5 @@
 //! Dispatch independently constructed, worker-local scalar executors.
-pub use super::kernels::{BinaryScalarKernel, UnaryScalarKernel, is_number};
+pub use super::kernels::{BinaryEvalFn, UnaryEvalFn, is_number};
 use super::*;
 use super::{BindScalarExpression, SelectExpression, row_index};
 pub use super::{boolean, require_boolean};

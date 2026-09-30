@@ -29,8 +29,8 @@ the expression's `create_executor()`, and converted to the dispatch enum with
 `Into`. They own their kernels, child executors, and worker-local scratch space.
 Binding returns output metadata for the outer `ExpressionExecutor` collection;
 the dispatch enum stores no `ExpressionResult` or scalar flag.
-Function kernels use `UnaryScalarKernel = fn(&ArrayRef) -> Result<ArrayRef>` or
-`BinaryScalarKernel = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>`.
+Function evaluation uses `UnaryEvalFn = fn(&ArrayRef) -> Result<ArrayRef>` or
+`BinaryEvalFn = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>`.
 Initialization chooses a function pointer for the operation, primitive numeric
 type, and broadcast direction. Evaluation traverses the bound executor tree
 without interpreting the expression description. Function executors pass child
@@ -55,7 +55,7 @@ For example, a host can execute a binary function directly:
 
 ```rust
 let expression = FunctionExpression::new(
-    ScalarFunction::Add,
+    FunctionKind::Add,
     vec![
         ReferenceExpression::new(0).into_ref(),
         ConstantExpression::int64(Some(3)).into_ref(),
@@ -125,14 +125,14 @@ For example, a host can construct a projection over an existing child node:
 use arrow::datatypes::SchemaRef;
 use roc::{
     expr::scalar::{ReferenceExpression, ConstantExpression,
-                  FunctionExpression, ScalarFunction},
+                  FunctionExpression, FunctionKind},
     operator::{OperatorTreeNode, ProjectOperator, Projection, ProjectionExpression},
 };
 
 fn project_plus_one(child: OperatorTreeNode, input_schema: SchemaRef) -> OperatorTreeNode {
     // The host has established that input column 0 is Int64.
     let expression = FunctionExpression::new(
-        ScalarFunction::Add,
+        FunctionKind::Add,
         vec![
             ReferenceExpression::new(0).into_ref(),
             ConstantExpression::int64(Some(1)).into_ref(),

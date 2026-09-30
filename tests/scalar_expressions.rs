@@ -18,7 +18,7 @@ fn reference(i: usize) -> ScalarExprRef {
 fn int(i: i64) -> ScalarExprRef {
     ConstantExpression::int64(Some(i)).into_ref()
 }
-fn call(f: ScalarFunction, args: Vec<ScalarExprRef>) -> ScalarExprRef {
+fn call(f: FunctionKind, args: Vec<ScalarExprRef>) -> ScalarExprRef {
     FunctionExpression::new(f, args).into_ref()
 }
 fn integers(values: Vec<Option<i64>>) -> RecordBatch {
@@ -55,7 +55,7 @@ fn bools(array: &ArrayRef) -> Vec<Option<bool>> {
 // Compare bound kernels with Arrow's dynamic entry points, including broadcast
 // direction, scalar NULLs, and an array of length one that must remain an array.
 fn compare_bound_binary_kernels(left: ArrayRef, right: ArrayRef) {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let schema = Arc::new(Schema::new(vec![
         Field::new("left", left.data_type().clone(), true),
         Field::new("right", right.data_type().clone(), true),
@@ -200,7 +200,7 @@ fn all_bound_numeric_signatures_match_arrow() {
 
 #[test]
 fn nested_branches_and_predicates_preserve_selection_order_and_duplicates() {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let batch = integers(vec![Some(0), Some(4), None, Some(2)]);
     let rows = [3, 0, 2, 1, 3];
     let input = ExpressionInput::new(batch.columns(), batch.num_rows()).with_selection(&rows);
@@ -271,7 +271,7 @@ fn coalesce_reuses_branch_state_after_errors_with_selected_inputs() {
     ];
     let expr = CoalesceExpression::new(vec![
         reference(0),
-        call(ScalarFunction::Divide, vec![int(100), reference(1)]),
+        call(FunctionKind::Divide, vec![int(100), reference(1)]),
     ])
     .into_ref();
     let mut executor = ScalarExpressionExecutor::try_new(expr, schema).unwrap();
@@ -307,7 +307,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
         0
     );
     let mut addition = ScalarExpressionExecutor::try_new(
-        call(ScalarFunction::Add, vec![reference(0), int(1)]),
+        call(FunctionKind::Add, vec![reference(0), int(1)]),
         schema,
     )
     .unwrap();
@@ -337,7 +337,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
         vec![Some(3); 3]
     );
 
-    let add = FunctionExpression::new(ScalarFunction::Add, vec![reference(0), int(3)]);
+    let add = FunctionExpression::new(FunctionKind::Add, vec![reference(0), int(3)]);
     let mut binary = BinaryFunctionExpressionExecutor::try_new(&add, schema.clone()).unwrap();
     assert_eq!(
         ints(&binary.evaluate(&input).unwrap()),
@@ -350,7 +350,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
         vec![Some(5), None, Some(7)]
     );
 
-    let negate = FunctionExpression::new(ScalarFunction::Negate, vec![reference(0)]);
+    let negate = FunctionExpression::new(FunctionKind::Negate, vec![reference(0)]);
     let mut unary = UnaryFunctionExpressionExecutor::try_new(&negate, schema.clone()).unwrap();
     assert_eq!(
         ints(&unary.evaluate(&input).unwrap()),
@@ -371,7 +371,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
         vec![Some(2), None, Some(4)]
     );
 
-    let is_null = call(ScalarFunction::IsNull, vec![reference(0)]);
+    let is_null = call(FunctionKind::IsNull, vec![reference(0)]);
     let mut not = NotExpression::new(is_null.clone())
         .create_executor(schema.clone())
         .unwrap();
@@ -383,7 +383,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
         Conjunction::And,
         vec![
             NotExpression::new(is_null.clone()).into_ref(),
-            call(ScalarFunction::GreaterThan, vec![reference(0), int(2)]),
+            call(FunctionKind::GreaterThan, vec![reference(0), int(2)]),
         ],
     )
     .create_executor(schema.clone())
@@ -406,7 +406,7 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
     );
 
     // Standalone executors must retain the empty-input contract and skip kernels.
-    let error = call(ScalarFunction::Divide, vec![int(1), int(0)]);
+    let error = call(FunctionKind::Divide, vec![int(1), int(0)]);
     let mut case = CaseExpression::new(vec![], error.clone())
         .create_executor(schema.clone())
         .unwrap();
@@ -433,14 +433,14 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
     // Dividing a NULL row by zero must not invoke the checked operation.
     assert_eq!(
         ints(&evaluate(
-            call(ScalarFunction::Divide, vec![reference(0), int(0)]),
+            call(FunctionKind::Divide, vec![reference(0), int(0)]),
             &batch
         )),
         vec![None]
     );
     assert_eq!(
         ints(&evaluate(
-            call(ScalarFunction::Remainder, vec![int(i64::MIN), int(-1)]),
+            call(FunctionKind::Remainder, vec![int(i64::MIN), int(-1)]),
             &batch
         )),
         vec![Some(0)]
@@ -450,7 +450,7 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
         .into_ref();
     assert!(
         ScalarExpressionExecutor::try_new(
-            call(ScalarFunction::Negate, vec![unsigned]),
+            call(FunctionKind::Negate, vec![unsigned]),
             batch.schema()
         )
         .is_err()
@@ -459,7 +459,7 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
 
 #[test]
 fn numeric_kernels_broadcast_scalars_and_preserve_nulls() {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let batch = integers(vec![Some(6), None, Some(-3)]);
     for (function, expected) in [
         (Add, vec![Some(8), None, Some(-1)]),
@@ -502,7 +502,7 @@ fn numeric_kernels_broadcast_scalars_and_preserve_nulls() {
 
 #[test]
 fn comparisons_and_null_safe_comparisons() {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let schema = Arc::new(Schema::new(vec![
         Field::new("a", DataType::Int64, true),
         Field::new("b", DataType::Int64, true),
@@ -618,7 +618,7 @@ fn boolean_value_execution_preserves_three_valued_logic() {
 
 #[test]
 fn case_executes_only_matching_rows_in_original_order() {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let batch = integers(vec![Some(0), Some(4), None, Some(2), Some(0)]);
     let expr = CaseExpression::new(
         vec![
@@ -684,8 +684,8 @@ fn coalesce_selects_remaining_rows_and_skips_unused_errors() {
     .unwrap();
     let expr = CoalesceExpression::new(vec![
         reference(0),
-        call(ScalarFunction::Divide, vec![int(100), reference(1)]),
-        call(ScalarFunction::Divide, vec![int(1), int(0)]),
+        call(FunctionKind::Divide, vec![int(100), reference(1)]),
+        call(FunctionKind::Divide, vec![int(1), int(0)]),
     ])
     .into_ref();
     assert_eq!(
@@ -702,7 +702,7 @@ fn coalesce_selects_remaining_rows_and_skips_unused_errors() {
 
 #[test]
 fn filter_selection_short_circuits_but_value_evaluation_keeps_its_contract() {
-    use ScalarFunction::*;
+    use FunctionKind::*;
     let batch = integers(vec![Some(0), Some(4), None, Some(2)]);
     let expr = ConjunctionExpression::new(
         Conjunction::And,
@@ -759,7 +759,7 @@ fn cast_modes_result_metadata_and_empty_inputs() {
             .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
             .is_err()
     );
-    let error_expr = call(ScalarFunction::Divide, vec![int(1), int(0)]);
+    let error_expr = call(FunctionKind::Divide, vec![int(1), int(0)]);
     let empty = RecordBatch::new_empty(batch.schema());
     assert_eq!(evaluate(error_expr, &empty).len(), 0);
     // Zero-column batches still have an explicit cardinality.
@@ -780,8 +780,8 @@ fn invalid_descriptions_are_rejected_without_rebinding() {
         .into_ref();
     for expr in [
         reference(1),
-        call(ScalarFunction::Add, vec![reference(0)]),
-        call(ScalarFunction::Add, vec![reference(0), i32_constant]),
+        call(FunctionKind::Add, vec![reference(0)]),
+        call(FunctionKind::Add, vec![reference(0), i32_constant]),
         NotExpression::new(reference(0)).into_ref(),
         CoalesceExpression::new(vec![]).into_ref(),
         CaseExpression::new(vec![(int(1), int(2))], int(3)).into_ref(),
