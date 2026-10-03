@@ -10,7 +10,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct FilterOperator {
-    /// Bound to the child output. Filtering preserves the input batch schema.
+    /// Built from the declared types. Filtering preserves the input batch schema.
     predicate: ScalarExprRef,
 }
 

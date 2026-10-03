@@ -13,6 +13,13 @@ use arrow::{
 };
 use std::{collections::HashSet, sync::Arc};
 
+fn input_type(inputs: &[DataType]) -> Result<DataType> {
+    inputs
+        .first()
+        .cloned()
+        .ok_or_else(|| Error::InvalidPlan("aggregate requires an argument".into()))
+}
+
 pub(super) enum Accumulator {
     Count(Vec<i64>),
     Distinct {
@@ -101,10 +108,13 @@ impl Accumulator {
     ) -> Result<Self> {
         use AggregateFunction::*;
         Ok(match function {
-            Count if distinct => Self::Distinct {
-                groups: vec![],
-                converter: RowConverter::new(vec![SortField::new(inputs[0].clone())])?,
-            },
+            Count if distinct => {
+                let input = input_type(inputs)?;
+                Self::Distinct {
+                    groups: vec![],
+                    converter: RowConverter::new(vec![SortField::new(input)])?,
+                }
+            }
             Count => Self::Count(vec![]),
             Sum => Self::Sum {
                 groups: vec![],
@@ -112,12 +122,15 @@ impl Accumulator {
             },
             Avg => Self::Avg(vec![]),
             CovarPop => Self::Covar(vec![]),
-            Min | Max => Self::Extremum {
-                groups: vec![],
-                converter: RowConverter::new(vec![SortField::new(inputs[0].clone())])?,
-                data_type: output.clone(),
-                minimum: function == Min,
-            },
+            Min | Max => {
+                let input = input_type(inputs)?;
+                Self::Extremum {
+                    groups: vec![],
+                    converter: RowConverter::new(vec![SortField::new(input)])?,
+                    data_type: output.clone(),
+                    minimum: function == Min,
+                }
+            }
         })
     }
     pub fn resize(&mut self, count: usize) {
@@ -150,7 +163,10 @@ impl Accumulator {
                 }
             }
             Self::Sum { groups, data_type } => {
-                let values = cast(values[0].as_ref(), data_type)?;
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast(argument.as_ref(), data_type)?;
                 for (i, &id) in ids.iter().enumerate() {
                     if values.is_null(i) {
                         continue;
@@ -159,7 +175,7 @@ impl Accumulator {
                         DataType::Int64 => Number::Signed(as_i64(&values).value(i)),
                         DataType::UInt64 => Number::Unsigned(as_u64(&values).value(i)),
                         DataType::Float64 => Number::Float(as_f64(&values).value(i)),
-                        _ => unreachable!(),
+                        _ => return Err(unsupported_sum_type(data_type)),
                     };
                     groups[id] = Some(match groups[id] {
                         Some(old) => old.add(number)?,
@@ -168,7 +184,10 @@ impl Accumulator {
                 }
             }
             Self::Avg(groups) => {
-                let values = cast(values[0].as_ref(), &DataType::Float64)?;
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
+                let values = cast(argument.as_ref(), &DataType::Float64)?;
                 let values = as_f64(&values);
                 for (i, &id) in ids.iter().enumerate() {
                     if values.is_null(i) {
@@ -179,8 +198,12 @@ impl Accumulator {
                 }
             }
             Self::Covar(groups) => {
-                let x = cast(values[0].as_ref(), &DataType::Float64)?;
-                let y = cast(values[1].as_ref(), &DataType::Float64)?;
+                let (x, y) = values
+                    .split_first()
+                    .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
+                    .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
+                let x = cast(x.as_ref(), &DataType::Float64)?;
+                let y = cast(y.as_ref(), &DataType::Float64)?;
                 let (x, y) = (as_f64(&x), as_f64(&y));
                 for (i, &id) in ids.iter().enumerate() {
                     if x.is_valid(i) && y.is_valid(i) {
@@ -255,7 +278,7 @@ impl Accumulator {
                 }
                 vec![Arc::new(builder.finish())]
             }
-            Self::Sum { groups, data_type } => vec![number_array(groups, data_type)],
+            Self::Sum { groups, data_type } => vec![number_array(groups, data_type)?],
             Self::Avg(groups) => vec![
                 Arc::new(UInt64Array::from_iter_values(groups.iter().map(|g| g.0))),
                 Arc::new(Float64Array::from_iter_values(groups.iter().map(|g| g.1))),
@@ -377,8 +400,12 @@ fn as_u64(a: &ArrayRef) -> &UInt64Array {
 fn as_f64(a: &ArrayRef) -> &Float64Array {
     a.as_any().downcast_ref().unwrap()
 }
-fn number_array(groups: &[Option<Number>], data_type: &DataType) -> ArrayRef {
-    match data_type {
+fn unsupported_sum_type(data_type: &DataType) -> Error {
+    Error::Execution(format!("unsupported sum result type: {data_type}"))
+}
+
+fn number_array(groups: &[Option<Number>], data_type: &DataType) -> Result<ArrayRef> {
+    Ok(match data_type {
         DataType::Int64 => Arc::new(Int64Array::from(
             groups
                 .iter()
@@ -409,6 +436,6 @@ fn number_array(groups: &[Option<Number>], data_type: &DataType) -> ArrayRef {
                 })
                 .collect::<Vec<_>>(),
         )),
-        _ => unreachable!(),
-    }
+        _ => return Err(unsupported_sum_type(data_type)),
+    })
 }

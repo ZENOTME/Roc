@@ -1,216 +1,157 @@
-//! Dispatch independently constructed, worker-local scalar executors.
+//! Shared input and immutable scalar evaluations.
 pub use super::kernels::{BinaryEvalFn, UnaryEvalFn, is_number};
 use super::*;
-use super::{BindScalarExpression, SelectExpression, row_index};
-pub use super::{boolean, require_boolean};
 use crate::error::{Error, Result};
-use arrow::{
-    array::ArrayRef,
-    datatypes::{DataType, SchemaRef},
-};
+use arrow::array::ArrayRef;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExpressionResult {
-    pub data_type: DataType,
-    pub nullable: bool,
-}
-
-/// Selection entries index the original columns; output follows their order,
-/// including duplicates. The caller supplies the bound layout and valid indices.
-#[derive(Clone, Copy, Debug)]
-pub struct ExpressionInput<'a> {
-    columns: &'a [ArrayRef],
+/// The executor provides shared Arrow columns and an explicit input row count.
+/// It does not own evaluations or their outputs; results follow input row order.
+#[derive(Debug, Default)]
+pub struct ScalarExpressionExecutor {
+    columns: Option<Vec<ArrayRef>>,
     num_rows: usize,
-    selection: Option<&'a [usize]>,
-}
-impl<'a> ExpressionInput<'a> {
-    pub fn new(columns: &'a [ArrayRef], num_rows: usize) -> Self {
-        Self {
-            columns,
-            num_rows,
-            selection: None,
-        }
-    }
-    pub fn with_selection(mut self, selection: &'a [usize]) -> Self {
-        self.selection = Some(selection);
-        self
-    }
-    pub fn columns(&self) -> &'a [ArrayRef] {
-        self.columns
-    }
-    pub fn num_rows(&self) -> usize {
-        self.num_rows
-    }
-    pub fn selection(&self) -> Option<&'a [usize]> {
-        self.selection
-    }
-    pub fn len(&self) -> usize {
-        self.selection.map_or(self.num_rows, <[usize]>::len)
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// Output metadata belongs to this collection, not to the dispatch enum.
-#[derive(Debug)]
-pub struct ExpressionExecutor {
-    executors: Vec<ScalarExpressionExecutor>,
-    results: Vec<ExpressionResult>,
-}
-impl ExpressionExecutor {
-    pub fn try_new(expressions: Vec<ScalarExprRef>, input_schema: SchemaRef) -> Result<Self> {
-        let (executors, results) = expressions
-            .iter()
-            .map(|e| ScalarExpressionExecutor::bind(e.as_ref(), &input_schema))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .unzip();
-        Ok(Self { executors, results })
-    }
-    pub fn results(&self) -> impl ExactSizeIterator<Item = &ExpressionResult> {
-        self.results.iter()
-    }
-    pub fn executors(&self) -> &[ScalarExpressionExecutor] {
-        &self.executors
-    }
-    /// Scalars hold one value; arrays hold input.len() values. Empty inputs
-    /// always return empty arrays without invoking function kernels.
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<ArrayRef>> {
-        self.executors
-            .iter_mut()
-            .map(|e| e.evaluate(input))
-            .collect()
-    }
-    pub fn evaluate_arrays(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<ArrayRef>> {
-        self.executors
-            .iter_mut()
-            .map(|e| e.evaluate_array(input))
-            .collect()
-    }
-    /// Return original input row indices, in selection order. NULL never passes.
-    pub fn select(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>> {
-        if self.executors.len() != 1 {
-            return Err(Error::Execution("select requires one expression".into()));
-        }
-        self.executors[0].select(input)
-    }
-}
-
-/// Dispatch to the concrete executor for each expression.
-#[derive(Debug)]
-pub enum ScalarExpressionExecutor {
-    Reference(ReferenceExpressionExecutor),
-    Constant(ConstantExpressionExecutor),
-    UnaryFunction(UnaryFunctionExpressionExecutor),
-    BinaryFunction(BinaryFunctionExpressionExecutor),
-    Cast(CastExpressionExecutor),
-    Conjunction(ConjunctionExpressionExecutor),
-    Not(NotExpressionExecutor),
-    Case(CaseExpressionExecutor),
-    Coalesce(CoalesceExpressionExecutor),
 }
 impl ScalarExpressionExecutor {
-    pub fn try_new(expression: ScalarExprRef, input_schema: SchemaRef) -> Result<Self> {
-        expression.create_executor(input_schema)
-    }
-    pub fn is_scalar(&self) -> bool {
-        match self {
-            Self::Reference(e) => e.is_scalar(),
-            Self::Constant(e) => e.is_scalar(),
-            Self::UnaryFunction(e) => e.is_scalar(),
-            Self::BinaryFunction(e) => e.is_scalar(),
-            Self::Cast(e) => e.is_scalar(),
-            Self::Conjunction(e) => e.is_scalar(),
-            Self::Not(e) => e.is_scalar(),
-            Self::Case(e) => e.is_scalar(),
-            Self::Coalesce(e) => e.is_scalar(),
+    pub fn new(columns: &[ArrayRef], num_rows: usize) -> Self {
+        Self {
+            columns: Some(columns.to_vec()),
+            num_rows,
         }
     }
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        match self {
-            Self::Reference(e) => e.evaluate(input),
-            Self::Constant(e) => e.evaluate(input),
-            Self::UnaryFunction(e) => e.evaluate(input),
-            Self::BinaryFunction(e) => e.evaluate(input),
-            Self::Cast(e) => e.evaluate(input),
-            Self::Conjunction(e) => e.evaluate(input),
-            Self::Not(e) => e.evaluate(input),
-            Self::Case(e) => e.evaluate(input),
-            Self::Coalesce(e) => e.evaluate(input),
-        }
+    pub fn set_input(&mut self, columns: &[ArrayRef], num_rows: usize) {
+        self.columns = Some(columns.to_vec());
+        self.num_rows = num_rows;
     }
-    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        match self {
-            Self::Reference(e) => e.evaluate_array(input),
-            Self::Constant(e) => e.evaluate_array(input),
-            Self::UnaryFunction(e) => e.evaluate_array(input),
-            Self::BinaryFunction(e) => e.evaluate_array(input),
-            Self::Cast(e) => e.evaluate_array(input),
-            Self::Conjunction(e) => e.evaluate_array(input),
-            Self::Not(e) => e.evaluate_array(input),
-            Self::Case(e) => e.evaluate_array(input),
-            Self::Coalesce(e) => e.evaluate_array(input),
-        }
+    pub(super) fn columns(&self) -> Result<&[ArrayRef]> {
+        self.columns
+            .as_deref()
+            .ok_or_else(|| Error::Execution("input columns are not set".into()))
     }
-    pub fn select(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>> {
-        Ok(self
-            .select_positions(input)?
-            .into_iter()
-            .map(|i| row_index(input, i))
-            .collect())
+    pub fn num_rows(&self) -> Result<usize> {
+        self.columns()?;
+        Ok(self.num_rows)
     }
 }
-impl BindScalarExpression for ScalarExpressionExecutor {
-    type Expression = ScalarExpression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        macro_rules! bind {
-            ($expression:expr, $executor:ty, $variant:ident) => {{
-                let (executor, result) = <$executor>::bind($expression, schema)?;
-                Ok((Self::$variant(executor), result))
-            }};
-        }
-        match expression {
-            ScalarExpression::Reference(e) => bind!(e, ReferenceExpressionExecutor, Reference),
-            ScalarExpression::Constant(e) => bind!(e, ConstantExpressionExecutor, Constant),
-            ScalarExpression::Function(e) => match e.arguments().len() {
-                1 => bind!(e, UnaryFunctionExpressionExecutor, UnaryFunction),
-                2 => bind!(e, BinaryFunctionExpressionExecutor, BinaryFunction),
-                _ => Err(Error::InvalidPlan(format!(
-                    "invalid argument count for {:?}",
-                    e.function()
-                ))),
-            },
-            ScalarExpression::Cast(e) => bind!(e, CastExpressionExecutor, Cast),
-            ScalarExpression::Conjunction(e) => {
-                bind!(e, ConjunctionExpressionExecutor, Conjunction)
-            }
-            ScalarExpression::Not(e) => bind!(e, NotExpressionExecutor, Not),
-            ScalarExpression::Case(e) => bind!(e, CaseExpressionExecutor, Case),
-            ScalarExpression::Coalesce(e) => bind!(e, CoalesceExpressionExecutor, Coalesce),
+
+/// Dispatch to the concrete evaluation. Outputs are returned to the caller;
+/// results correspond to the executor's input rows.
+#[derive(Debug)]
+pub enum ScalarExpressionEvaluation {
+    Reference(ReferenceExpressionEvaluation),
+    Constant(ConstantExpressionEvaluation),
+    UnaryFunction(UnaryFunctionExpressionEvaluation),
+    BinaryFunction(BinaryFunctionExpressionEvaluation),
+    Cast(CastExpressionEvaluation),
+    Conjunction(ConjunctionExpressionEvaluation),
+    Not(NotExpressionEvaluation),
+    Case(CaseExpressionEvaluation),
+    Coalesce(CoalesceExpressionEvaluation),
+}
+impl ScalarExpressionEvaluation {
+    pub fn try_new(expression: ScalarExprRef) -> Result<Self> {
+        expression.to_evaluation()
+    }
+    /// Evaluate the expression tree; concrete nodes prepare their child inputs.
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+        match self {
+            Self::Reference(e) => e.evaluate(executor),
+            Self::Constant(e) => e.evaluate(executor),
+            Self::UnaryFunction(e) => e.evaluate(executor),
+            Self::BinaryFunction(e) => e.evaluate(executor),
+            Self::Cast(e) => e.evaluate(executor),
+            Self::Conjunction(e) => e.evaluate(executor),
+            Self::Not(e) => e.evaluate(executor),
+            Self::Case(e) => e.evaluate(executor),
+            Self::Coalesce(e) => e.evaluate(executor),
         }
     }
 }
-impl SelectExpression for ScalarExpressionExecutor {
-    fn select_positions(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>> {
-        if input.is_empty() {
-            return Ok(vec![]);
-        }
-        if let Self::Conjunction(e) = self {
-            return e.select_positions(input);
-        }
-        let scalar = self.is_scalar();
-        let value = self.evaluate(input)?;
-        let value = boolean(value.as_ref())?;
-        if scalar {
-            return Ok(if value.is_valid(0) && value.value(0) {
-                (0..input.len()).collect()
-            } else {
-                vec![]
-            });
-        }
-        Ok((0..value.len())
-            .filter(|&i| value.is_valid(i) && value.value(i))
-            .collect())
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::{
+        array::Int64Array,
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use std::sync::Arc;
+
+    fn batch() -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 0, 4]))],
+        )
+        .unwrap()
+    }
+    fn reference() -> ScalarExprRef {
+        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false)).into_ref()
+    }
+    fn int(value: i64) -> ScalarExprRef {
+        ConstantExpression::int64(Some(value)).into_ref()
+    }
+    fn binary(kind: FunctionKind, left: ScalarExprRef, right: ScalarExprRef) -> ScalarExprRef {
+        FunctionExpression::binary(kind, left, right, DataType::Int64, false).into_ref()
+    }
+    fn ints(array: &ArrayRef) -> Vec<i64> {
+        array
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn returned_results_are_owned_by_the_caller() {
+        let input = batch();
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        let selected_input =
+            RecordBatch::try_new(input.schema(), vec![Arc::new(Int64Array::from(vec![4, 2]))])
+                .unwrap();
+        let selected =
+            ScalarExpressionExecutor::new(selected_input.columns(), selected_input.num_rows());
+        let expression = binary(
+            FunctionKind::Add,
+            reference(),
+            binary(FunctionKind::Multiply, reference(), int(2)),
+        );
+        let evaluation = expression.to_evaluation().unwrap();
+        let output = evaluation.evaluate(&selected).unwrap();
+
+        assert_eq!(ints(&output), vec![12, 6]);
+        let stored = output.clone();
+        let previous = Arc::downgrade(&output);
+        drop(output);
+        assert!(previous.upgrade().is_some());
+
+        assert_eq!(
+            ints(&evaluation.evaluate(&executor).unwrap()),
+            vec![3, 6, 0, 12]
+        );
+        assert_eq!(ints(&stored), vec![12, 6]);
+        drop(stored);
+        assert!(previous.upgrade().is_none());
+    }
+
+    #[test]
+    fn failed_evaluation_does_not_affect_previous_outputs() {
+        let input = batch();
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        let expression = binary(FunctionKind::Divide, int(100), reference());
+        let evaluation = expression.to_evaluation().unwrap();
+        let valid_input = RecordBatch::try_new(
+            batch().schema(),
+            vec![Arc::new(Int64Array::from(vec![4, 2]))],
+        )
+        .unwrap();
+        let valid = ScalarExpressionExecutor::new(valid_input.columns(), valid_input.num_rows());
+        let saved = evaluation.evaluate(&valid).unwrap();
+        assert_eq!(ints(&saved), vec![25, 50]);
+        assert!(evaluation.evaluate(&executor).is_err());
+        let next_input = input.slice(0, 1);
+        let next = ScalarExpressionExecutor::new(next_input.columns(), next_input.num_rows());
+        assert_eq!(ints(&evaluation.evaluate(&next).unwrap()), vec![100]);
+        assert_eq!(ints(&saved), vec![25, 50]);
     }
 }

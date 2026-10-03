@@ -1,13 +1,8 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
-use crate::expr::scalar::executor::{ExpressionExecutor, ExpressionInput};
-use crate::{
-    error::{Error, Result},
-    expr::scalar::ScalarExprRef,
-};
-use arrow::{
-    array::BooleanArray, compute::filter_record_batch, datatypes::DataType,
-    record_batch::RecordBatch,
-};
+use crate::expr::predicate::select_true;
+use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use crate::{error::Result, expr::scalar::ScalarExprRef};
+use arrow::{array::BooleanArray, compute::filter_record_batch, record_batch::RecordBatch};
 use asyncband::shutdown::ShutdownGuard;
 use std::sync::Arc;
 
@@ -26,32 +21,19 @@ impl ProcessExec for FilterExec {
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
         Ok(Box::new(FilterExecutor {
-            predicate: self.predicate.clone(),
-            expressions: None,
+            predicate: self.predicate.to_evaluation()?,
         }))
     }
 }
 
-/// Initialized against the first input schema, then retained across batches.
+/// Built once from the description, then retained across batches.
 struct FilterExecutor {
-    predicate: ScalarExprRef,
-    expressions: Option<ExpressionExecutor>,
+    predicate: ScalarExpressionEvaluation,
 }
 impl ProcessExecutor for FilterExecutor {
     fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
-        if self.expressions.is_none() {
-            let executor =
-                ExpressionExecutor::try_new(vec![self.predicate.clone()], input.schema())?;
-            if executor.results().next().unwrap().data_type != DataType::Boolean {
-                return Err(Error::Execution("predicate must be Boolean".into()));
-            }
-            self.expressions = Some(executor);
-        }
-        let selected = self
-            .expressions
-            .as_mut()
-            .unwrap()
-            .select(&ExpressionInput::new(input.columns(), input.num_rows()))?;
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        let selected = select_true(self.predicate.evaluate(&executor)?)?;
         let output = if selected.len() == input.num_rows() {
             input.clone()
         } else if selected.is_empty() {

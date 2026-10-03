@@ -1,75 +1,55 @@
-use super::{BindScalarExpression, ExpressionInput, ExpressionResult};
+use super::ExpressionResultType;
+use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use crate::error::{Error, Result};
-use arrow::{
-    array::{ArrayRef, UInt64Array},
-    compute::take,
-    datatypes::SchemaRef,
-};
+use arrow::array::ArrayRef;
 
-/// A physical column position in the input batch, never a catalog identifier.
+/// An expression that reads one column of the input batch by index.
 #[derive(Clone, Debug)]
 pub struct ReferenceExpression {
     index: usize,
+    result_type: ExpressionResultType,
 }
 
-#[derive(Debug)]
-pub struct ReferenceExpressionExecutor {
-    index: usize,
-}
-impl BindScalarExpression for ReferenceExpressionExecutor {
-    type Expression = ReferenceExpression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        let field = schema.fields().get(expression.index()).ok_or_else(|| {
-            Error::InvalidPlan(format!("column index {} out of bounds", expression.index()))
-        })?;
-        Ok((
-            Self {
-                index: expression.index(),
-            },
-            ExpressionResult {
-                data_type: field.data_type().clone(),
-                nullable: field.is_nullable(),
-            },
-        ))
-    }
-}
-impl ReferenceExpressionExecutor {
-    pub fn try_new(expression: &ReferenceExpression, input_schema: SchemaRef) -> Result<Self> {
-        Self::bind(expression, &input_schema).map(|(executor, _)| executor)
-    }
-    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        let value = self.evaluate(input)?;
-        super::materialize(value, self.is_scalar(), input.len())
-    }
-
-    pub fn is_scalar(&self) -> bool {
-        false
-    }
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        let column = &input.columns()[self.index];
-        if input.is_empty() {
-            return Ok(column.slice(0, 0));
-        }
-        match input.selection() {
-            None => Ok(column.clone()),
-            Some(rows) => {
-                let indices = UInt64Array::from_iter_values(rows.iter().map(|&i| i as u64));
-                Ok(take(column.as_ref(), &indices, None)?)
-            }
-        }
-    }
-}
 impl ReferenceExpression {
-    pub fn new(index: usize) -> Self {
-        Self { index }
+    pub fn new(index: usize, result_type: ExpressionResultType) -> Self {
+        Self { index, result_type }
     }
+
     pub fn index(&self) -> usize {
         self.index
     }
+
+    pub fn result_type(&self) -> &ExpressionResultType {
+        &self.result_type
+    }
+
+    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+        Ok(ScalarExpressionEvaluation::Reference(self.bind()))
+    }
+
+    pub(super) fn bind(&self) -> ReferenceExpressionEvaluation {
+        ReferenceExpressionEvaluation { index: self.index }
+    }
 }
 
-impl ReferenceExpression {
-    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<ReferenceExpressionExecutor> {
-        ReferenceExpressionExecutor::try_new(self, input_schema)
+#[derive(Debug)]
+pub struct ReferenceExpressionEvaluation {
+    index: usize,
+}
+
+impl ReferenceExpressionEvaluation {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+        self.eval(executor, &[])
+    }
+    fn eval(&self, executor: &ScalarExpressionExecutor, _input: &[&ArrayRef]) -> Result<ArrayRef> {
+        let num_rows = executor.num_rows()?;
+        let col = executor.columns()?.get(self.index).ok_or_else(|| {
+            Error::Execution(format!("column index {} out of bounds", self.index))
+        })?;
+        Ok(if num_rows == 0 {
+            col.slice(0, 0)
+        } else {
+            col.clone()
+        })
     }
 }

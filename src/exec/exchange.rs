@@ -82,7 +82,7 @@ impl SourceExecutor for ExchangeSourceExecutor {
                 _ = cancelled => {
                     Err(Error::Cancelled)
                 },
-                batch = next => Ok(batch),
+                batch = next => batch,
             }
         })
     }

@@ -1,11 +1,7 @@
-//! Scalar expressions contain no inferred result metadata or execution state.
-use crate::error::{Error, Result};
-use arrow::{
-    array::{Array, ArrayRef, BooleanArray, UInt64Array, new_empty_array, new_null_array},
-    compute::{kernels::interleave::interleave, take},
-    datatypes::{DataType, SchemaRef},
-};
-use executor::{ExpressionInput, ExpressionResult, ScalarExpressionExecutor};
+//! Typed, stateless descriptions of scalar expressions.
+use crate::error::Result;
+use crate::expr::ExpressionResultType;
+pub use executor::ScalarExpressionEvaluation;
 use std::sync::Arc;
 
 mod case;
@@ -19,17 +15,17 @@ mod kernels;
 mod not;
 mod reference;
 
-pub use case::{CaseExpression, CaseExpressionExecutor};
-pub use cast::{CastExpression, CastExpressionExecutor, CastMode};
-pub use coalesce::{CoalesceExpression, CoalesceExpressionExecutor};
-pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionExecutor};
-pub use constant::{ConstantExpression, ConstantExpressionExecutor};
+pub use case::{CaseExpression, CaseExpressionEvaluation};
+pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};
+pub use coalesce::{CoalesceExpression, CoalesceExpressionEvaluation};
+pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionEvaluation};
+pub use constant::{ConstantExpression, ConstantExpressionEvaluation};
 pub use function::{
-    BinaryFunctionExpressionExecutor, FunctionExpression, FunctionKind,
-    UnaryFunctionExpressionExecutor,
+    BinaryFunctionExpressionEvaluation, FunctionExpression, FunctionKind,
+    UnaryFunctionExpressionEvaluation,
 };
-pub use not::{NotExpression, NotExpressionExecutor};
-pub use reference::{ReferenceExpression, ReferenceExpressionExecutor};
+pub use not::{NotExpression, NotExpressionEvaluation};
+pub use reference::{ReferenceExpression, ReferenceExpressionEvaluation};
 
 pub type ScalarExprRef = Arc<ScalarExpression>;
 
@@ -46,11 +42,31 @@ pub enum ScalarExpression {
 }
 
 impl ScalarExpression {
-    pub fn into_ref(self) -> ScalarExprRef {
-        Arc::new(self)
+    pub fn result_type(&self) -> &ExpressionResultType {
+        match self {
+            Self::Reference(e) => e.result_type(),
+            Self::Constant(e) => e.result_type(),
+            Self::Function(e) => e.result_type(),
+            Self::Cast(e) => e.result_type(),
+            Self::Conjunction(e) => e.result_type(),
+            Self::Not(e) => e.result_type(),
+            Self::Case(e) => e.result_type(),
+            Self::Coalesce(e) => e.result_type(),
+        }
     }
-    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<ScalarExpressionExecutor> {
-        ScalarExpressionExecutor::bind(self, &input_schema).map(|(executor, _)| executor)
+
+    /// Bind kernels and allocate this expression's worker-local evaluation.
+    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+        match self {
+            Self::Reference(e) => e.to_evaluation(),
+            Self::Constant(e) => e.to_evaluation(),
+            Self::Function(e) => e.to_evaluation(),
+            Self::Cast(e) => e.to_evaluation(),
+            Self::Conjunction(e) => e.to_evaluation(),
+            Self::Not(e) => e.to_evaluation(),
+            Self::Case(e) => e.to_evaluation(),
+            Self::Coalesce(e) => e.to_evaluation(),
+        }
     }
 }
 
@@ -73,115 +89,21 @@ scalar_node! {
     Case(CaseExpression), Coalesce(CoalesceExpression),
 }
 
-// Binding metadata is used during initialization and retained only for roots in
-// ExpressionExecutor. Concrete executors keep their own execution state.
-trait BindScalarExpression: Sized {
-    type Expression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)>;
-}
-trait SelectExpression {
-    fn select_positions(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>>;
-}
-
-macro_rules! scalar_executor {
-    ($($variant:ident($expression:ty, $executor:ty)),* $(,)?) => {$(
-        impl From<$executor> for ScalarExpressionExecutor {
-            fn from(executor: $executor) -> Self { Self::$variant(executor) }
+macro_rules! scalar_evaluation {
+    ($($variant:ident($evaluation:ty)),* $(,)?) => {$(
+        impl From<$evaluation> for ScalarExpressionEvaluation {
+            fn from(evaluation: $evaluation) -> Self { Self::$variant(evaluation) }
         }
     )*};
 }
-scalar_executor! {
-    Reference(ReferenceExpression, ReferenceExpressionExecutor),
-    Constant(ConstantExpression, ConstantExpressionExecutor),
-    UnaryFunction(FunctionExpression, UnaryFunctionExpressionExecutor),
-    BinaryFunction(FunctionExpression, BinaryFunctionExpressionExecutor),
-    Cast(CastExpression, CastExpressionExecutor),
-    Conjunction(ConjunctionExpression, ConjunctionExpressionExecutor),
-    Not(NotExpression, NotExpressionExecutor),
-    Case(CaseExpression, CaseExpressionExecutor),
-    Coalesce(CoalesceExpression, CoalesceExpressionExecutor),
-}
-
-fn row_index(input: &ExpressionInput<'_>, position: usize) -> usize {
-    input.selection().map_or(position, |rows| rows[position])
-}
-fn selected_input<'a>(input: &ExpressionInput<'a>, rows: &'a [usize]) -> ExpressionInput<'a> {
-    ExpressionInput::new(input.columns(), input.num_rows()).with_selection(rows)
-}
-
-#[derive(Debug, Default)]
-struct SelectionBuffers {
-    remaining: Vec<usize>,
-    next: Vec<usize>,
-    rows: Vec<usize>,
-}
-impl SelectionBuffers {
-    fn reset(&mut self, len: usize) {
-        self.remaining.clear();
-        self.remaining.extend(0..len);
-        self.next.clear();
-        self.rows.clear();
-    }
-    fn map_rows(&mut self, input: &ExpressionInput<'_>) {
-        self.rows.clear();
-        self.rows
-            .extend(self.remaining.iter().map(|&i| row_index(input, i)));
-    }
-}
-#[derive(Debug, Default)]
-struct BranchBuffers {
-    selection: SelectionBuffers,
-    matched: Vec<usize>,
-    pieces: Vec<ArrayRef>,
-    mapping: Vec<(usize, usize)>,
-}
-impl BranchBuffers {
-    fn reset(&mut self, len: usize) {
-        self.selection.reset(len);
-        self.matched.clear();
-        self.pieces.clear();
-        self.mapping.clear();
-        self.mapping.resize(len, (0, 0));
-    }
-    fn finish(&self) -> Result<ArrayRef> {
-        let refs = self.pieces.iter().map(|a| a.as_ref()).collect::<Vec<_>>();
-        Ok(interleave(&refs, &self.mapping)?)
-    }
-}
-
-fn materialize(value: ArrayRef, scalar: bool, rows: usize) -> Result<ArrayRef> {
-    if rows == 0 {
-        return Ok(new_empty_array(value.data_type()));
-    }
-    if !scalar || rows == 1 {
-        return Ok(value);
-    }
-    if value.logical_null_count() != 0 {
-        return Ok(new_null_array(value.data_type(), rows));
-    }
-    Ok(take(
-        value.as_ref(),
-        &UInt64Array::from(vec![0; rows]),
-        None,
-    )?)
-}
-pub fn boolean(array: &dyn Array) -> Result<&BooleanArray> {
-    array
-        .as_any()
-        .downcast_ref()
-        .ok_or_else(|| Error::Execution("expected Boolean expression".into()))
-}
-pub fn require_boolean(result: &ExpressionResult) -> Result<()> {
-    if result.data_type != DataType::Boolean {
-        return Err(Error::InvalidPlan("expected Boolean expression".into()));
-    }
-    Ok(())
-}
-fn require_same_type(a: &ExpressionResult, b: &ExpressionResult) -> Result<()> {
-    if a.data_type != b.data_type {
-        return Err(Error::InvalidPlan(
-            "branch types must match; supply explicit casts".into(),
-        ));
-    }
-    Ok(())
+scalar_evaluation! {
+    Reference(ReferenceExpressionEvaluation),
+    Constant(ConstantExpressionEvaluation),
+    UnaryFunction(UnaryFunctionExpressionEvaluation),
+    BinaryFunction(BinaryFunctionExpressionEvaluation),
+    Cast(CastExpressionEvaluation),
+    Conjunction(ConjunctionExpressionEvaluation),
+    Not(NotExpressionEvaluation),
+    Case(CaseExpressionEvaluation),
+    Coalesce(CoalesceExpressionEvaluation),
 }

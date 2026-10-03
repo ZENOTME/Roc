@@ -72,15 +72,12 @@ impl AggregateState {
         let mut fields = groups.output_schema().fields().to_vec();
         let mut accumulators = vec![];
         for aggregate in operator.aggregates() {
-            let mut executor = AggregateExpressionExecutor::try_new(
-                aggregate.clone(),
-                operator.groups().input_schema().clone(),
-            )?;
-            let result = executor.result();
+            let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())?;
+            let result_type = executor.result_type();
             fields.push(Arc::new(Field::new(
                 aggregate.output_name(),
-                result.data_type.clone(),
-                result.nullable,
+                result_type.data_type().clone(),
+                result_type.is_nullable(),
             )));
             if !grouped {
                 executor.resize(1);
@@ -139,14 +136,7 @@ impl AggregateState {
         let ids = self.group_ids(groups.columns(), batch.num_rows())?;
         let count = self.group_count();
         for accumulator in &mut self.accumulators {
-            accumulator.update(
-                &crate::expr::scalar::executor::ExpressionInput::new(
-                    batch.columns(),
-                    batch.num_rows(),
-                ),
-                &ids,
-                count,
-            )?;
+            accumulator.update(batch, &ids, count)?;
         }
         Ok(())
     }
@@ -382,6 +372,7 @@ impl SourceExecutor for AggregateSourceExecutor {
 mod tests {
     use super::*;
     use crate::{
+        expr::ExpressionResultType,
         expr::scalar::ScalarExprRef,
         expr::{
             agg::{AggregateExpression, AggregateFunction},
@@ -401,27 +392,44 @@ mod tests {
         ]))
     }
 
+    /// Column 1 (`value`) of `schema`.
     fn value() -> ScalarExprRef {
-        ReferenceExpression::new(1).into_ref()
+        ReferenceExpression::new(1, ExpressionResultType::new(DataType::Float64, true)).into_ref()
     }
     fn groups(grouped: bool) -> Projection {
         Projection::from_indices(schema(), if grouped { &[0] } else { &[] }).unwrap()
     }
+    /// Result types and nullability are host-supplied: SUM over Float64 is
+    /// Float64, AVG and COVAR_POP are Float64, and only COUNT is non-nullable.
     fn aggregates() -> Vec<Arc<AggregateExpression>> {
         use AggregateFunction::*;
         vec![
-            Arc::new(AggregateExpression::new(Sum, vec![value()])),
-            Arc::new(AggregateExpression::new(Avg, vec![value()]).with_alias("avg")),
-            Arc::new(AggregateExpression::new(Count, vec![value()]).with_alias("count")),
+            Arc::new(AggregateExpression::new(
+                Sum,
+                vec![value()],
+                DataType::Float64,
+                true,
+            )),
             Arc::new(
-                AggregateExpression::new(Count, vec![value()])
+                AggregateExpression::new(Avg, vec![value()], DataType::Float64, true)
+                    .with_alias("avg"),
+            ),
+            Arc::new(
+                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
+                    .with_alias("count"),
+            ),
+            Arc::new(
+                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
                     .with_distinct()
                     .with_alias("distinct"),
             ),
             Arc::new(
-                AggregateExpression::new(CovarPop, vec![value(), value()]).with_alias("covar"),
+                AggregateExpression::new(CovarPop, vec![value(), value()], DataType::Float64, true)
+                    .with_alias("covar"),
             ),
-            Arc::new(AggregateExpression::new(Count, vec![]).with_alias("rows")),
+            Arc::new(
+                AggregateExpression::new(Count, vec![], DataType::Int64, false).with_alias("rows"),
+            ),
         ]
     }
 
@@ -458,16 +466,13 @@ mod tests {
                 worker.update(&batch.slice(row, 1)).unwrap();
             }
             let partial = worker.finish_partial().unwrap();
-            assert_eq!(
-                partial.groups.schema(),
-                operator.groups().output_schema().unwrap()
-            );
+            assert_eq!(partial.groups.schema(), operator.groups().output_schema());
             for row in 0..partial.num_rows() {
                 merged.merge(&partial.slice(row, 1)).unwrap();
             }
         }
         let result = merged.finish().unwrap();
-        assert_eq!(result.schema(), operator.output_schema().unwrap());
+        assert_eq!(result.schema(), operator.output_schema());
         assert_eq!(result.num_rows(), 3);
         let keys = result
             .column(0)
@@ -626,12 +631,9 @@ mod tests {
             state.update(&RecordBatch::new_empty(schema())).unwrap();
             let partial = state.finish_partial().unwrap();
             assert_eq!(partial.num_rows(), 0);
-            assert_eq!(
-                partial.groups.schema(),
-                operator.groups().output_schema().unwrap()
-            );
+            assert_eq!(partial.groups.schema(), operator.groups().output_schema());
             for (arrays, aggregate) in partial.states.iter().zip(operator.aggregates()) {
-                let fields = AggregateExpressionExecutor::try_new(aggregate.clone(), schema())
+                let fields = AggregateExpressionExecutor::try_new(aggregate.clone())
                     .unwrap()
                     .state_types();
                 assert_eq!(arrays.len(), fields.len());
@@ -644,7 +646,7 @@ mod tests {
             merged.merge(&partial).unwrap();
             let result = merged.finish().unwrap();
             assert_eq!(result.num_rows(), 0);
-            assert_eq!(result.schema(), operator.output_schema().unwrap());
+            assert_eq!(result.schema(), operator.output_schema());
         }
 
         let operator = Arc::new(AggregateOperator::try_new(groups(true), vec![]).unwrap());
@@ -671,22 +673,51 @@ mod tests {
             Field::new("key", DataType::Utf8, false),
             Field::new("value", DataType::Int64, false),
         ]));
+        // Column 1 of this input is Int64, unlike the Float64 column of `schema`.
+        let value = || {
+            ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, false))
+                .into_ref()
+        };
         let int = |v| ConstantExpression::int64(Some(v)).into_ref();
-        let predicate =
-            FunctionExpression::new(FunctionKind::NotEqual, vec![value(), int(0)]).into_ref();
-        let division =
-            FunctionExpression::new(FunctionKind::Divide, vec![int(100), value()]).into_ref();
+        // A comparison declares its Boolean result; arithmetic declares the
+        // numeric type its kernel is bound against.
+        let predicate = FunctionExpression::binary(
+            FunctionKind::NotEqual,
+            value(),
+            int(0),
+            DataType::Boolean,
+            false,
+        )
+        .into_ref();
+        let division = FunctionExpression::binary(
+            FunctionKind::Divide,
+            int(100),
+            value(),
+            DataType::Int64,
+            true,
+        )
+        .into_ref();
         let aggregates = vec![
             Arc::new(
-                AggregateExpression::new(AggregateFunction::Sum, vec![division])
-                    .with_filter(predicate.clone())
-                    .with_alias("sum"),
+                AggregateExpression::new(
+                    AggregateFunction::Sum,
+                    vec![division],
+                    DataType::Int64,
+                    true,
+                )
+                .with_filter(predicate.clone())
+                .with_alias("sum"),
             ),
             Arc::new(
-                AggregateExpression::new(AggregateFunction::Count, vec![value()])
-                    .with_distinct()
-                    .with_filter(predicate)
-                    .with_alias("distinct"),
+                AggregateExpression::new(
+                    AggregateFunction::Count,
+                    vec![value()],
+                    DataType::Int64,
+                    false,
+                )
+                .with_distinct()
+                .with_filter(predicate)
+                .with_alias("distinct"),
             ),
         ];
         let operator = Arc::new(
@@ -736,19 +767,19 @@ mod tests {
     #[test]
     fn extrema_merge_values_and_keep_string_null_semantics() {
         let input_schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
-        let expr = ReferenceExpression::new(0).into_ref();
+        let expr =
+            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Utf8, true)).into_ref();
         let aggregates = [AggregateFunction::Min, AggregateFunction::Max]
             .into_iter()
             .map(|f| {
                 Arc::new(
-                    AggregateExpression::new(f, vec![expr.clone()]).with_alias(format!("{f:?}")),
+                    AggregateExpression::new(f, vec![expr.clone()], DataType::Utf8, true)
+                        .with_alias(format!("{f:?}")),
                 )
             })
             .collect();
-        let operator = Arc::new(
-            AggregateOperator::try_new(Projection::new(input_schema.clone(), vec![]), aggregates)
-                .unwrap(),
-        );
+        let operator =
+            Arc::new(AggregateOperator::try_new(Projection::new(vec![]), aggregates).unwrap());
         let mut merged = AggregateState::new(operator.clone()).unwrap();
         for values in [vec![Some("z"), None], vec![None, Some("a")], vec![None]] {
             let input = RecordBatch::try_new(
@@ -805,11 +836,19 @@ mod tests {
                 Arc::new(Schema::new(vec![Field::new("v", data_type.clone(), true)]));
             let operator = Arc::new(
                 AggregateOperator::try_new(
-                    Projection::new(input_schema.clone(), vec![]),
+                    Projection::new(vec![]),
                     vec![Arc::new(
                         AggregateExpression::new(
                             AggregateFunction::Sum,
-                            vec![ReferenceExpression::new(0).into_ref()],
+                            vec![
+                                ReferenceExpression::new(
+                                    0,
+                                    ExpressionResultType::new(data_type.clone(), true),
+                                )
+                                .into_ref(),
+                            ],
+                            data_type.clone(),
+                            true,
                         )
                         .with_alias("sum"),
                     )],
@@ -847,16 +886,19 @@ mod tests {
             .into_iter()
             .map(|v| {
                 Arc::new(
-                    AggregateExpression::new(AggregateFunction::Count, vec![])
-                        .with_filter(ConstantExpression::boolean(Some(v)).into_ref())
-                        .with_alias(format!("count_{v}")),
+                    AggregateExpression::new(
+                        AggregateFunction::Count,
+                        vec![],
+                        DataType::Int64,
+                        false,
+                    )
+                    .with_filter(ConstantExpression::boolean(Some(v)).into_ref())
+                    .with_alias(format!("count_{v}")),
                 )
             })
             .collect();
-        let operator = Arc::new(
-            AggregateOperator::try_new(Projection::new(input_schema.clone(), vec![]), expressions)
-                .unwrap(),
-        );
+        let operator =
+            Arc::new(AggregateOperator::try_new(Projection::new(vec![]), expressions).unwrap());
         let mut state = AggregateState::new(operator).unwrap();
         let batch = RecordBatch::try_new_with_options(
             input_schema,
@@ -887,27 +929,164 @@ mod tests {
     }
 
     #[test]
-    fn invalid_aggregate_signatures_are_plan_errors() {
-        use crate::expr::scalar::ConstantExpression;
+    fn aggregate_signatures_without_usable_kernels_are_plan_errors() {
+        // DISTINCT and MIN/MAX derive their state key type from an argument, so
+        // a missing argument has no kernel to build. The operator itself only
+        // assembles descriptions; executor construction is the first point that
+        // builds an accumulator.
         for expr in [
-            AggregateExpression::new(AggregateFunction::Sum, vec![]),
-            AggregateExpression::new(AggregateFunction::Sum, vec![value()]).with_distinct(),
-            AggregateExpression::new(AggregateFunction::Count, vec![]).with_distinct(),
-            AggregateExpression::new(AggregateFunction::Count, vec![value(), value()]),
-            AggregateExpression::new(AggregateFunction::CovarPop, vec![value()]),
+            AggregateExpression::new(AggregateFunction::Count, vec![], DataType::Int64, false)
+                .with_distinct(),
+            AggregateExpression::new(AggregateFunction::Min, vec![], DataType::Utf8, true),
+            AggregateExpression::new(AggregateFunction::Max, vec![], DataType::Utf8, true),
+            // Only COUNT keeps a DISTINCT set; the others would silently drop it.
             AggregateExpression::new(
                 AggregateFunction::Sum,
-                vec![ConstantExpression::string(Some("x")).into_ref()],
-            ),
-            AggregateExpression::new(AggregateFunction::Count, vec![]).with_filter(value()),
+                vec![value()],
+                DataType::Float64,
+                true,
+            )
+            .with_distinct(),
         ] {
+            let operator = AggregateOperator::try_new(
+                groups(false),
+                vec![Arc::new(expr.with_alias("invalid"))],
+            )
+            .expect("operator construction does not validate aggregates");
             assert!(matches!(
-                AggregateOperator::try_new(
-                    groups(false),
-                    vec![Arc::new(expr.with_alias("invalid"))]
-                ),
+                AggregateState::new(Arc::new(operator)),
                 Err(Error::InvalidPlan(_))
             ));
         }
+    }
+
+    #[test]
+    fn aggregate_executor_defers_other_signature_checks_to_runtime() {
+        // Arity and argument types are host responsibilities now. COUNT simply
+        // ignores arguments beyond the first; SUM, AVG, and COVAR_POP build
+        // argument-independent state and reject a missing argument once values
+        // arrive, because their arity is not checked while constructing.
+        let count_two = AggregateExpression::new(
+            AggregateFunction::Count,
+            vec![value(), value()],
+            DataType::Int64,
+            false,
+        );
+        let operator = AggregateOperator::try_new(
+            groups(false),
+            vec![Arc::new(count_two.with_alias("count_two"))],
+        )
+        .unwrap();
+        let mut state = AggregateState::new(Arc::new(operator)).unwrap();
+        state
+            .update(&batch(vec![Some("a")], vec![None]))
+            .expect("extra COUNT arguments are accepted");
+        assert_eq!(
+            state
+                .finish()
+                .unwrap()
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            0
+        );
+
+        for expr in [
+            AggregateExpression::new(AggregateFunction::Sum, vec![], DataType::Float64, true),
+            AggregateExpression::new(AggregateFunction::Avg, vec![], DataType::Float64, true),
+            AggregateExpression::new(
+                AggregateFunction::CovarPop,
+                vec![value()],
+                DataType::Float64,
+                true,
+            ),
+        ] {
+            let operator = AggregateOperator::try_new(
+                groups(false),
+                vec![Arc::new(expr.with_alias("missing_argument"))],
+            )
+            .unwrap();
+            let mut state = AggregateState::new(Arc::new(operator)).unwrap();
+            assert!(
+                state
+                    .update(&batch(vec![Some("a")], vec![Some(1.)]))
+                    .is_err()
+            );
+        }
+
+        use crate::expr::scalar::ConstantExpression;
+        // SUM does not validate that its argument is numeric: Arrow's safe cast
+        // turns an unparseable text value into NULL, and the row is skipped.
+        let operator = Arc::new(
+            AggregateOperator::try_new(
+                groups(false),
+                vec![Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Sum,
+                        vec![ConstantExpression::string(Some("x")).into_ref()],
+                        DataType::Int64,
+                        true,
+                    )
+                    .with_alias("sum"),
+                )],
+            )
+            .unwrap(),
+        );
+        let mut state = AggregateState::new(operator).unwrap();
+        state
+            .update(&batch(vec![Some("a")], vec![Some(1.)]))
+            .expect("an unparseable value is skipped, not rejected");
+        assert!(state.finish().unwrap().column(0).is_null(0));
+
+        // A filter must evaluate to Boolean before rows can be selected.
+        let operator = Arc::new(
+            AggregateOperator::try_new(
+                groups(false),
+                vec![Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Count,
+                        vec![],
+                        DataType::Int64,
+                        false,
+                    )
+                    .with_filter(value())
+                    .with_alias("rows"),
+                )],
+            )
+            .unwrap(),
+        );
+        let mut state = AggregateState::new(operator).unwrap();
+        assert!(
+            state
+                .update(&batch(vec![Some("a")], vec![Some(1.)]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unsupported_sum_result_type_is_an_execution_error() {
+        // The host declares the SUM result type; an unusable one must not panic.
+        let operator = Arc::new(
+            AggregateOperator::try_new(
+                groups(false),
+                vec![Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Sum,
+                        vec![value()],
+                        DataType::Utf8,
+                        true,
+                    )
+                    .with_alias("sum"),
+                )],
+            )
+            .unwrap(),
+        );
+        let mut state = AggregateState::new(operator).unwrap();
+        assert!(matches!(
+            state.update(&batch(vec![Some("a")], vec![Some(1.)])),
+            Err(Error::Execution(_))
+        ));
     }
 }

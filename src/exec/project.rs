@@ -1,8 +1,8 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
-use crate::expr::scalar::executor::{ExpressionExecutor, ExpressionInput};
+use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use crate::{error::Result, operator::Projection};
 use arrow::{
-    datatypes::{Field, Schema, SchemaRef},
+    datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use asyncband::shutdown::ShutdownGuard;
@@ -30,40 +30,31 @@ impl ProcessExec for ProjectExec {
 
 #[derive(Debug)]
 pub struct ProjectionExecutor {
-    expressions: ExpressionExecutor,
+    expressions: Vec<ScalarExpressionEvaluation>,
     output_schema: SchemaRef,
 }
 impl ProjectionExecutor {
     pub fn try_new(projection: Projection) -> Result<Self> {
-        let expressions = ExpressionExecutor::try_new(
-            projection
-                .expressions()
-                .iter()
-                .map(|e| e.expression().clone())
-                .collect(),
-            projection.input_schema().clone(),
-        )?;
-        let fields = expressions
-            .results()
-            .zip(projection.expressions())
-            .map(|(result, e)| Field::new(e.name(), result.data_type.clone(), result.nullable))
-            .collect::<Vec<_>>();
-        let output_schema = Arc::new(Schema::new_with_metadata(
-            fields,
-            projection.input_schema().metadata().clone(),
-        ));
+        let expressions = projection
+            .expressions()
+            .iter()
+            .map(|e| e.expression().to_evaluation())
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             expressions,
-            output_schema,
+            output_schema: projection.output_schema(),
         })
     }
     pub fn output_schema(&self) -> &SchemaRef {
         &self.output_schema
     }
     pub fn project_batch(&mut self, input: &RecordBatch) -> Result<RecordBatch> {
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
         let columns = self
             .expressions
-            .evaluate_arrays(&ExpressionInput::new(input.columns(), input.num_rows()))?;
+            .iter()
+            .map(|e| e.evaluate(&executor))
+            .collect::<Result<Vec<_>>>()?;
         Ok(RecordBatch::try_new_with_options(
             self.output_schema.clone(),
             columns,

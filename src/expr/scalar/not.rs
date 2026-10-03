@@ -1,68 +1,74 @@
+use super::ExpressionResultType;
 use super::ScalarExprRef;
-use super::{
-    BindScalarExpression, ExpressionInput, ExpressionResult, ScalarExpressionExecutor, boolean,
-    require_boolean,
-};
-use crate::error::Result;
+use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use crate::error::{Error, Result};
 use arrow::{
-    array::{ArrayRef, BooleanArray},
+    array::{ArrayRef, AsArray, new_empty_array},
     compute::not,
-    datatypes::SchemaRef,
+    datatypes::DataType,
 };
 use std::sync::Arc;
+
+/// An expression that negates a Boolean input.
 #[derive(Clone, Debug)]
 pub struct NotExpression {
     input: ScalarExprRef,
+    result_type: ExpressionResultType,
 }
 
 #[derive(Debug)]
-pub struct NotExpressionExecutor {
-    argument: Box<ScalarExpressionExecutor>,
+pub struct NotExpressionEvaluation {
+    argument: Box<ScalarExpressionEvaluation>,
 }
-impl BindScalarExpression for NotExpressionExecutor {
-    type Expression = NotExpression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        let (argument, result) = ScalarExpressionExecutor::bind(expression.input.as_ref(), schema)?;
-        require_boolean(&result)?;
-        Ok((
-            Self {
-                argument: Box::new(argument),
-            },
-            result,
-        ))
-    }
-}
-impl NotExpressionExecutor {
-    pub fn try_new(expression: &NotExpression, input_schema: SchemaRef) -> Result<Self> {
-        Self::bind(expression, &input_schema).map(|(executor, _)| executor)
-    }
-    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        let value = self.evaluate(input)?;
-        super::materialize(value, self.is_scalar(), input.len())
-    }
 
-    pub fn is_scalar(&self) -> bool {
-        self.argument.is_scalar()
-    }
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        if input.is_empty() {
-            return Ok(Arc::new(BooleanArray::from(Vec::<bool>::new())));
-        }
-        let argument = self.argument.evaluate(input)?;
-        Ok(Arc::new(not(boolean(argument.as_ref())?)?))
-    }
-}
 impl NotExpression {
-    pub fn new(input: ScalarExprRef) -> Self {
-        Self { input }
+    pub fn new(input: ScalarExprRef, nullable: bool) -> Self {
+        Self {
+            input,
+            result_type: ExpressionResultType {
+                data_type: DataType::Boolean,
+                nullable,
+            },
+        }
     }
     pub fn input(&self) -> &ScalarExprRef {
         &self.input
     }
+    pub fn result_type(&self) -> &ExpressionResultType {
+        &self.result_type
+    }
+
+    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+        Ok(ScalarExpressionEvaluation::Not(self.bind()?))
+    }
+
+    pub(super) fn bind(&self) -> Result<NotExpressionEvaluation> {
+        Ok(NotExpressionEvaluation {
+            argument: Box::new(self.input.to_evaluation()?),
+        })
+    }
 }
 
-impl NotExpression {
-    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<NotExpressionExecutor> {
-        NotExpressionExecutor::try_new(self, input_schema)
+impl NotExpressionEvaluation {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+        if executor.num_rows()? == 0 {
+            return self.eval(executor, &[]);
+        }
+        let argument = self.argument.evaluate(executor)?;
+        self.eval(executor, &[&argument])
+    }
+    fn eval(&self, executor: &ScalarExpressionExecutor, input: &[&ArrayRef]) -> Result<ArrayRef> {
+        Ok(if executor.num_rows()? == 0 {
+            new_empty_array(&DataType::Boolean)
+        } else {
+            let [argument] = input else {
+                return Err(Error::Execution("not requires one input result".into()));
+            };
+
+            let argument = argument
+                .as_boolean_opt()
+                .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+            Arc::new(not(argument)?)
+        })
     }
 }

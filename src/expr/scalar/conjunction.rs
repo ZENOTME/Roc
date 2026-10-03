@@ -1,32 +1,43 @@
-use super::{
-    BindScalarExpression, ExpressionInput, ExpressionResult, ScalarExpressionExecutor,
-    SelectExpression, SelectionBuffers, boolean, materialize, require_boolean, row_index,
-    selected_input,
-};
-use crate::error::Result;
+use super::ExpressionResultType;
+use super::ScalarExprRef;
+use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use crate::error::{Error, Result};
 use arrow::{
-    array::{ArrayRef, BooleanArray},
+    array::{ArrayRef, AsArray, BooleanArray, new_empty_array},
     compute::{and_kleene, or_kleene},
-    datatypes::{DataType, SchemaRef},
+    datatypes::DataType,
 };
 use std::sync::Arc;
 type BooleanKernel = fn(&BooleanArray, &BooleanArray) -> Result<BooleanArray>;
-use super::ScalarExprRef;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conjunction {
     And,
     Or,
 }
+/// A variadic Boolean AND or OR over its arguments.
 #[derive(Clone, Debug)]
 pub struct ConjunctionExpression {
     conjunction: Conjunction,
     arguments: Vec<ScalarExprRef>,
+    result_type: ExpressionResultType,
 }
+
+#[derive(Debug)]
+pub struct ConjunctionExpressionEvaluation {
+    arguments: Vec<ScalarExpressionEvaluation>,
+    and: bool,
+    kernel: BooleanKernel,
+}
+
 impl ConjunctionExpression {
-    pub fn new(conjunction: Conjunction, arguments: Vec<ScalarExprRef>) -> Self {
+    pub fn new(conjunction: Conjunction, arguments: Vec<ScalarExprRef>, nullable: bool) -> Self {
         Self {
             conjunction,
             arguments,
+            result_type: ExpressionResultType {
+                data_type: DataType::Boolean,
+                nullable,
+            },
         }
     }
     pub fn conjunction(&self) -> Conjunction {
@@ -35,129 +46,56 @@ impl ConjunctionExpression {
     pub fn arguments(&self) -> &[ScalarExprRef] {
         &self.arguments
     }
-}
-
-#[derive(Debug)]
-pub struct ConjunctionExpressionExecutor {
-    arguments: Vec<ScalarExpressionExecutor>,
-    and: bool,
-    kernel: BooleanKernel,
-    selection: SelectionBuffers,
-    accepted: Vec<bool>,
-}
-impl BindScalarExpression for ConjunctionExpressionExecutor {
-    type Expression = ConjunctionExpression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        let mut arguments = Vec::with_capacity(expression.arguments.len());
-        let mut nullable = false;
-        for expression in &expression.arguments {
-            let (argument, result) = ScalarExpressionExecutor::bind(expression.as_ref(), schema)?;
-            require_boolean(&result)?;
-            nullable |= result.nullable;
-            arguments.push(argument);
-        }
-        let and = expression.conjunction == Conjunction::And;
-        Ok((
-            Self {
-                arguments,
-                and,
-                kernel: if and {
-                    |a, b| Ok(and_kleene(a, b)?)
-                } else {
-                    |a, b| Ok(or_kleene(a, b)?)
-                },
-                selection: SelectionBuffers::default(),
-                accepted: vec![],
-            },
-            ExpressionResult {
-                data_type: DataType::Boolean,
-                nullable,
-            },
-        ))
-    }
-}
-impl ConjunctionExpressionExecutor {
-    pub fn try_new(expression: &ConjunctionExpression, input_schema: SchemaRef) -> Result<Self> {
-        Self::bind(expression, &input_schema).map(|(executor, _)| executor)
-    }
-    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        let value = self.evaluate(input)?;
-        super::materialize(value, self.is_scalar(), input.len())
+    pub fn result_type(&self) -> &ExpressionResultType {
+        &self.result_type
     }
 
-    pub fn is_scalar(&self) -> bool {
-        self.arguments.iter().all(|a| a.is_scalar())
+    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+        Ok(ScalarExpressionEvaluation::Conjunction(self.bind()?))
     }
-    pub fn select(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>> {
-        Ok(self
-            .select_positions(input)?
-            .into_iter()
-            .map(|i| row_index(input, i))
-            .collect())
-    }
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        if input.is_empty() {
-            return Ok(Arc::new(BooleanArray::from(Vec::<bool>::new())));
+
+    pub(super) fn bind(&self) -> Result<ConjunctionExpressionEvaluation> {
+        let mut arguments = Vec::with_capacity(self.arguments.len());
+        for argument in &self.arguments {
+            arguments.push(argument.to_evaluation()?);
         }
-        let len = if self.is_scalar() { 1 } else { input.len() };
-        let mut result = BooleanArray::from(vec![self.and; len]);
-        for argument in &mut self.arguments {
-            let value = argument.evaluate(input)?;
-            let value = materialize(value, argument.is_scalar(), len)?;
-            result = (self.kernel)(&result, boolean(value.as_ref())?)?;
-        }
-        Ok(Arc::new(result))
+        let and = self.conjunction == Conjunction::And;
+        Ok(ConjunctionExpressionEvaluation {
+            arguments,
+            and,
+            kernel: if and {
+                |a, b| Ok(and_kleene(a, b)?)
+            } else {
+                |a, b| Ok(or_kleene(a, b)?)
+            },
+        })
     }
 }
-impl SelectExpression for ConjunctionExpressionExecutor {
-    fn select_positions(&mut self, input: &ExpressionInput<'_>) -> Result<Vec<usize>> {
-        self.selection.reset(input.len());
-        self.accepted.clear();
-        self.accepted.resize(input.len(), false);
-        for argument in &mut self.arguments {
-            if self.selection.remaining.is_empty() {
-                break;
-            }
-            self.selection.map_rows(input);
-            let selected =
-                argument.select_positions(&selected_input(input, &self.selection.rows))?;
-            let mut selected = selected.into_iter().peekable();
-            self.selection.next.clear();
-            for (i, position) in self.selection.remaining.drain(..).enumerate() {
-                let matches = selected.peek() == Some(&i);
-                if matches {
-                    selected.next();
-                }
-                if self.and {
-                    if matches {
-                        self.selection.next.push(position);
-                    }
-                } else if matches {
-                    self.accepted[position] = true;
-                } else {
-                    self.selection.next.push(position);
-                }
-            }
-            std::mem::swap(&mut self.selection.remaining, &mut self.selection.next);
+
+impl ConjunctionExpressionEvaluation {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+        if executor.num_rows()? == 0 {
+            return self.eval(executor, &[]);
         }
-        if self.and {
-            Ok(self.selection.remaining.clone())
+        let values = self
+            .arguments
+            .iter()
+            .map(|argument| argument.evaluate(executor))
+            .collect::<Result<Vec<_>>>()?;
+        self.eval(executor, &values.iter().collect::<Vec<_>>())
+    }
+    fn eval(&self, executor: &ScalarExpressionExecutor, input: &[&ArrayRef]) -> Result<ArrayRef> {
+        Ok(if executor.num_rows()? == 0 {
+            new_empty_array(&DataType::Boolean)
         } else {
-            Ok(self
-                .accepted
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &v)| v.then_some(i))
-                .collect())
-        }
-    }
-}
-
-impl ConjunctionExpression {
-    pub fn create_executor(
-        &self,
-        input_schema: SchemaRef,
-    ) -> Result<ConjunctionExpressionExecutor> {
-        ConjunctionExpressionExecutor::try_new(self, input_schema)
+            let mut col = BooleanArray::from(vec![self.and; executor.num_rows()?]);
+            for value in input {
+                let value = value
+                    .as_boolean_opt()
+                    .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+                col = (self.kernel)(&col, value)?;
+            }
+            Arc::new(col)
+        })
     }
 }

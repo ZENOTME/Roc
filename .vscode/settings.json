@@ -1,11 +1,9 @@
 {
-  "rust-analyzer.server.path": "/Users/dongzejiong/.rustup/toolchains/1.95.0-aarch64-apple-darwin/bin/rust-analyzer",
   "rust-analyzer.server.extraEnv": {
-    "PATH": "/Users/dongzejiong/.cargo/bin:${env:PATH}",
-    "RUSTUP_TOOLCHAIN": "1.95.0"
+    "PATH": "${env:HOME}/.cargo/bin:${env:PATH}"
   },
   "rust-analyzer.cargo.extraEnv": {
-    "PATH": "/Users/dongzejiong/.cargo/bin:${env:PATH}"
+    "PATH": "${env:HOME}/.cargo/bin:${env:PATH}"
   },
   "rust-analyzer.check.command": "check",
   "[rust]": {

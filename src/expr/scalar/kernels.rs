@@ -1,5 +1,5 @@
-//! Select operations, primitive types, and broadcasting during initialization.
-use super::{FunctionKind, executor::ExpressionResult};
+//! Select operations and primitive types during initialization.
+use super::FunctionKind;
 use crate::error::{Error, Result};
 use arrow::{
     array::{
@@ -34,52 +34,6 @@ pub fn is_number(t: &DataType) -> bool {
     )
 }
 
-pub(super) fn prepare(
-    function: FunctionKind,
-    args: &[ExpressionResult],
-) -> Result<ExpressionResult> {
-    use FunctionKind::*;
-    let arity = if matches!(function, Negate | IsNull | IsNotNull) {
-        1
-    } else {
-        2
-    };
-    if args.len() != arity {
-        return Err(Error::InvalidPlan(format!(
-            "{function:?} requires {arity} arguments"
-        )));
-    }
-    if arity == 2 && args[0].data_type != args[1].data_type {
-        return Err(Error::InvalidPlan(format!(
-            "{function:?} requires matching types; supply explicit casts"
-        )));
-    }
-    if matches!(
-        function,
-        Add | Subtract | Multiply | Divide | Remainder | Negate
-    ) && !is_number(&args[0].data_type)
-    {
-        return Err(Error::InvalidPlan(format!(
-            "unsupported numeric type: {}",
-            args[0].data_type
-        )));
-    }
-    Ok(ExpressionResult {
-        data_type: if matches!(
-            function,
-            Add | Subtract | Multiply | Divide | Remainder | Negate
-        ) {
-            args[0].data_type.clone()
-        } else {
-            DataType::Boolean
-        },
-        nullable: !matches!(
-            function,
-            IsNull | IsNotNull | IsDistinctFrom | IsNotDistinctFrom
-        ) && args.iter().any(|a| a.nullable),
-    })
-}
-
 pub(super) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<UnaryEvalFn> {
     use FunctionKind::*;
     Ok(match function {
@@ -112,39 +66,22 @@ fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(value: &ArrayRef) -> Result<
     Ok(Arc::new(output))
 }
 
-pub(super) fn bind_binary(
-    function: FunctionKind,
-    data_type: &DataType,
-    left_scalar: bool,
-    right_scalar: bool,
-) -> Result<BinaryEvalFn> {
-    match (left_scalar, right_scalar) {
-        (false, false) => bind_binary_shape::<false, false>(function, data_type),
-        (false, true) => bind_binary_shape::<false, true>(function, data_type),
-        (true, false) => bind_binary_shape::<true, false>(function, data_type),
-        (true, true) => bind_binary_shape::<true, true>(function, data_type),
-    }
-}
-
-fn bind_binary_shape<const L: bool, const R: bool>(
-    function: FunctionKind,
-    data_type: &DataType,
-) -> Result<BinaryEvalFn> {
+pub(super) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Result<BinaryEvalFn> {
     use FunctionKind::*;
     match function {
-        Add => bind_arithmetic::<AddOp, L, R>(data_type),
-        Subtract => bind_arithmetic::<SubtractOp, L, R>(data_type),
-        Multiply => bind_arithmetic::<MultiplyOp, L, R>(data_type),
-        Divide => bind_arithmetic::<DivideOp, L, R>(data_type),
-        Remainder => bind_arithmetic::<RemainderOp, L, R>(data_type),
-        Equal => bind_comparison::<EqualOp, L, R>(data_type),
-        NotEqual => bind_comparison::<NotEqualOp, L, R>(data_type),
-        LessThan => bind_comparison::<LessOp, L, R>(data_type),
-        LessThanOrEqual => bind_comparison::<LessEqualOp, L, R>(data_type),
-        GreaterThan => bind_comparison::<GreaterOp, L, R>(data_type),
-        GreaterThanOrEqual => bind_comparison::<GreaterEqualOp, L, R>(data_type),
-        IsDistinctFrom => bind_comparison::<DistinctOp, L, R>(data_type),
-        IsNotDistinctFrom => bind_comparison::<NotDistinctOp, L, R>(data_type),
+        Add => bind_arithmetic::<AddOp>(data_type),
+        Subtract => bind_arithmetic::<SubtractOp>(data_type),
+        Multiply => bind_arithmetic::<MultiplyOp>(data_type),
+        Divide => bind_arithmetic::<DivideOp>(data_type),
+        Remainder => bind_arithmetic::<RemainderOp>(data_type),
+        Equal => bind_comparison::<EqualOp>(data_type),
+        NotEqual => bind_comparison::<NotEqualOp>(data_type),
+        LessThan => bind_comparison::<LessOp>(data_type),
+        LessThanOrEqual => bind_comparison::<LessEqualOp>(data_type),
+        GreaterThan => bind_comparison::<GreaterOp>(data_type),
+        GreaterThanOrEqual => bind_comparison::<GreaterEqualOp>(data_type),
+        IsDistinctFrom => bind_comparison::<DistinctOp>(data_type),
+        IsNotDistinctFrom => bind_comparison::<NotDistinctOp>(data_type),
         _ => Err(Error::InvalidPlan(format!("{function:?} is not binary"))),
     }
 }
@@ -187,20 +124,18 @@ impl ArithmeticOperation for RemainderOp {
     }
 }
 
-fn bind_arithmetic<O: ArithmeticOperation, const L: bool, const R: bool>(
-    data_type: &DataType,
-) -> Result<BinaryEvalFn> {
+fn bind_arithmetic<O: ArithmeticOperation>(data_type: &DataType) -> Result<BinaryEvalFn> {
     Ok(match data_type {
-        DataType::Int8 => arithmetic::<Int8Type, O, L, R, false>,
-        DataType::Int16 => arithmetic::<Int16Type, O, L, R, false>,
-        DataType::Int32 => arithmetic::<Int32Type, O, L, R, false>,
-        DataType::Int64 => arithmetic::<Int64Type, O, L, R, false>,
-        DataType::UInt8 => arithmetic::<UInt8Type, O, L, R, false>,
-        DataType::UInt16 => arithmetic::<UInt16Type, O, L, R, false>,
-        DataType::UInt32 => arithmetic::<UInt32Type, O, L, R, false>,
-        DataType::UInt64 => arithmetic::<UInt64Type, O, L, R, false>,
-        DataType::Float32 => arithmetic::<Float32Type, O, L, R, true>,
-        DataType::Float64 => arithmetic::<Float64Type, O, L, R, true>,
+        DataType::Int8 => arithmetic::<Int8Type, O, false>,
+        DataType::Int16 => arithmetic::<Int16Type, O, false>,
+        DataType::Int32 => arithmetic::<Int32Type, O, false>,
+        DataType::Int64 => arithmetic::<Int64Type, O, false>,
+        DataType::UInt8 => arithmetic::<UInt8Type, O, false>,
+        DataType::UInt16 => arithmetic::<UInt16Type, O, false>,
+        DataType::UInt32 => arithmetic::<UInt32Type, O, false>,
+        DataType::UInt64 => arithmetic::<UInt64Type, O, false>,
+        DataType::Float32 => arithmetic::<Float32Type, O, true>,
+        DataType::Float64 => arithmetic::<Float64Type, O, true>,
         _ => {
             return Err(Error::InvalidPlan(format!(
                 "unsupported numeric type: {data_type}"
@@ -209,35 +144,13 @@ fn bind_arithmetic<O: ArithmeticOperation, const L: bool, const R: bool>(
     })
 }
 
-fn arithmetic<
-    T: ArrowPrimitiveType,
-    O: ArithmeticOperation,
-    const L: bool,
-    const R: bool,
-    const FLOAT: bool,
->(
+fn arithmetic<T: ArrowPrimitiveType, O: ArithmeticOperation, const FLOAT: bool>(
     left: &ArrayRef,
     right: &ArrayRef,
 ) -> Result<ArrayRef> {
     let left = primitive::<T>(left)?;
     let right = primitive::<T>(right)?;
-    let output: PrimitiveArray<T> = if L && !R {
-        if left.is_null(0) {
-            PrimitiveArray::new_null(right.len())
-        } else if FLOAT {
-            right.unary(|r| O::float(left.value(0), r))
-        } else {
-            right.try_unary(|r| O::checked(left.value(0), r))?
-        }
-    } else if !L && R {
-        if right.is_null(0) {
-            PrimitiveArray::new_null(left.len())
-        } else if FLOAT {
-            left.unary(|l| O::float(l, right.value(0)))
-        } else {
-            left.try_unary(|l| O::checked(l, right.value(0)))?
-        }
-    } else if FLOAT {
+    let output: PrimitiveArray<T> = if FLOAT {
         binary(left, right, O::float)?
     } else {
         try_binary(left, right, O::checked)?
@@ -309,90 +222,58 @@ impl ComparisonOperation for NotDistinctOp {
     }
 }
 
-fn bind_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
-    data_type: &DataType,
-) -> Result<BinaryEvalFn> {
+fn bind_comparison<O: ComparisonOperation>(data_type: &DataType) -> Result<BinaryEvalFn> {
     Ok(match data_type {
-        DataType::Int8 => comparison::<Int8Type, O, L, R>,
-        DataType::Int16 => comparison::<Int16Type, O, L, R>,
-        DataType::Int32 => comparison::<Int32Type, O, L, R>,
-        DataType::Int64 => comparison::<Int64Type, O, L, R>,
-        DataType::UInt8 => comparison::<UInt8Type, O, L, R>,
-        DataType::UInt16 => comparison::<UInt16Type, O, L, R>,
-        DataType::UInt32 => comparison::<UInt32Type, O, L, R>,
-        DataType::UInt64 => comparison::<UInt64Type, O, L, R>,
-        DataType::Float32 => comparison::<Float32Type, O, L, R>,
-        DataType::Float64 => comparison::<Float64Type, O, L, R>,
+        DataType::Int8 => comparison::<Int8Type, O>,
+        DataType::Int16 => comparison::<Int16Type, O>,
+        DataType::Int32 => comparison::<Int32Type, O>,
+        DataType::Int64 => comparison::<Int64Type, O>,
+        DataType::UInt8 => comparison::<UInt8Type, O>,
+        DataType::UInt16 => comparison::<UInt16Type, O>,
+        DataType::UInt32 => comparison::<UInt32Type, O>,
+        DataType::UInt64 => comparison::<UInt64Type, O>,
+        DataType::Float32 => comparison::<Float32Type, O>,
+        DataType::Float64 => comparison::<Float64Type, O>,
         _ => {
             // Preserve Arrow's other comparison signatures. This fallback still
             // dispatches types inside Arrow; primitive numeric kernels do not.
             let empty = new_empty_array(data_type);
             O::arrow(&empty, &empty).map_err(|e| Error::InvalidPlan(e.to_string()))?;
-            arrow_comparison::<O, L, R>
+            arrow_comparison::<O>
         }
     })
 }
 
-fn comparison<T: ArrowPrimitiveType, O: ComparisonOperation, const L: bool, const R: bool>(
+fn comparison<T: ArrowPrimitiveType, O: ComparisonOperation>(
     left: &ArrayRef,
     right: &ArrayRef,
 ) -> Result<ArrayRef> {
     let left = primitive::<T>(left)?;
     let right = primitive::<T>(right)?;
-    let len = if L && !R { right.len() } else { left.len() };
+    let len = left.len();
     let nulls = if O::NULL_SAFE {
         None
-    } else if L && !R {
-        if left.is_null(0) {
-            return Ok(Arc::new(BooleanArray::new_null(len)));
-        }
-        right.nulls().cloned()
-    } else if !L && R {
-        if right.is_null(0) {
-            return Ok(Arc::new(BooleanArray::new_null(len)));
-        }
-        left.nulls().cloned()
     } else {
         NullBuffer::union(left.nulls(), right.nulls())
     };
     let values = if !O::NULL_SAFE || (left.null_count() == 0 && right.null_count() == 0) {
         // Ordinary comparison validity comes from the output bitmap; comparison
         // itself cannot fail, so NULL slots need no per-row validity branch.
-        BooleanBuffer::collect_bool(len, |i| {
-            O::compare(
-                left.value(if L { 0 } else { i }),
-                right.value(if R { 0 } else { i }),
-            )
-        })
+        BooleanBuffer::collect_bool(len, |i| O::compare(left.value(i), right.value(i)))
     } else {
         BooleanBuffer::collect_bool(len, |i| {
-            let li = if L { 0 } else { i };
-            let ri = if R { 0 } else { i };
-            let lv = left.is_valid(li);
-            let rv = right.is_valid(ri);
+            let lv = left.is_valid(i);
+            let rv = right.is_valid(i);
             if !lv || !rv {
                 O::null_result(lv, rv)
             } else {
-                O::compare(left.value(li), right.value(ri))
+                O::compare(left.value(i), right.value(i))
             }
         })
     };
     Ok(Arc::new(BooleanArray::new(values, nulls)))
 }
 
-// A borrowed Datum adapter carries statically bound shape flags, without Arc clones.
-struct ArrayDatum<'a, const SCALAR: bool>(&'a ArrayRef);
-impl<const SCALAR: bool> Datum for ArrayDatum<'_, SCALAR> {
-    fn get(&self) -> (&dyn Array, bool) {
-        (self.0.as_ref(), SCALAR)
-    }
-}
-fn arrow_comparison<O: ComparisonOperation, const L: bool, const R: bool>(
-    left: &ArrayRef,
-    right: &ArrayRef,
-) -> Result<ArrayRef> {
-    Ok(Arc::new(O::arrow(
-        &ArrayDatum::<L>(left),
-        &ArrayDatum::<R>(right),
-    )?))
+fn arrow_comparison<O: ComparisonOperation>(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
+    Ok(Arc::new(O::arrow(left, right)?))
 }

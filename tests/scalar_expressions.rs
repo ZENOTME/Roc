@@ -1,25 +1,52 @@
 use arrow::{
     array::{Array, ArrayRef, BooleanArray, Datum, Int32Array, Int64Array, Scalar, StringArray},
-    compute::kernels::{cmp, numeric},
+    compute::{
+        concat,
+        kernels::{cmp, numeric},
+    },
     datatypes::{DataType, Field, Schema},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use roc::{
-    error::Error,
-    expr::scalar::ScalarExprRef,
-    expr::scalar::executor::{ExpressionExecutor, ExpressionInput, ScalarExpressionExecutor},
-    expr::scalar::*,
+    error::Error, expr::ExpressionResultType, expr::predicate::select_true,
+    expr::scalar::ScalarExprRef, expr::scalar::executor::ScalarExpressionExecutor, expr::scalar::*,
 };
 use std::sync::Arc;
 
+/// The nullable Int64 column used by most single-column tests.
 fn reference(i: usize) -> ScalarExprRef {
-    ReferenceExpression::new(i).into_ref()
+    column(i, DataType::Int64, true)
+}
+/// A column reference carrying the type and nullability the host resolved from
+/// its batch schema.
+fn column(i: usize, data_type: DataType, nullable: bool) -> ScalarExprRef {
+    ReferenceExpression::new(i, ExpressionResultType::new(data_type, nullable)).into_ref()
 }
 fn int(i: i64) -> ScalarExprRef {
     ConstantExpression::int64(Some(i)).into_ref()
 }
-fn call(f: FunctionKind, args: Vec<ScalarExprRef>) -> ScalarExprRef {
-    FunctionExpression::new(f, args).into_ref()
+/// A unary or binary built-in. The host declares the result type the kernel is
+/// selected against: the operand type for arithmetic, Boolean for predicates.
+fn call(
+    f: FunctionKind,
+    args: Vec<ScalarExprRef>,
+    data_type: DataType,
+    nullable: bool,
+) -> ScalarExprRef {
+    match args.as_slice() {
+        [argument] => {
+            FunctionExpression::unary(f, argument.clone(), data_type, nullable).into_ref()
+        }
+        [left, right] => {
+            FunctionExpression::binary(f, left.clone(), right.clone(), data_type, nullable)
+                .into_ref()
+        }
+        _ => panic!("function expressions take one or two arguments"),
+    }
+}
+/// Comparisons and IS [NOT] NULL always produce Boolean.
+fn predicate(f: FunctionKind, args: Vec<ScalarExprRef>, nullable: bool) -> ScalarExprRef {
+    call(f, args, DataType::Boolean, nullable)
 }
 fn integers(values: Vec<Option<i64>>) -> RecordBatch {
     RecordBatch::try_new(
@@ -28,13 +55,17 @@ fn integers(values: Vec<Option<i64>>) -> RecordBatch {
     )
     .unwrap()
 }
+
 fn evaluate(expr: ScalarExprRef, batch: &RecordBatch) -> ArrayRef {
-    ExpressionExecutor::try_new(vec![expr], batch.schema())
+    let executor = expr.to_evaluation().unwrap();
+    executor
+        .evaluate(&ScalarExpressionExecutor::new(
+            batch.columns(),
+            batch.num_rows(),
+        ))
         .unwrap()
-        .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
-        .unwrap()
-        .remove(0)
 }
+
 fn ints(array: &ArrayRef) -> Vec<Option<i64>> {
     array
         .as_any()
@@ -52,14 +83,136 @@ fn bools(array: &ArrayRef) -> Vec<Option<bool>> {
         .collect()
 }
 
-// Compare bound kernels with Arrow's dynamic entry points, including broadcast
-// direction, scalar NULLs, and an array of length one that must remain an array.
+#[test]
+fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
+    let evaluation = reference(0).to_evaluation().unwrap();
+    let mut executor = ScalarExpressionExecutor::default();
+    assert!(
+        matches!(evaluation.evaluate(&executor), Err(Error::Execution(message)) if message.contains("input"))
+    );
+    assert!(
+        matches!(evaluation.evaluate(&executor).and_then(select_true), Err(Error::Execution(message)) if message.contains("input"))
+    );
+
+    let (first_result, first_input) = {
+        let batch = integers(vec![Some(2), None, Some(4)]);
+        let input = Arc::downgrade(batch.column(0));
+        executor.set_input(batch.columns(), batch.num_rows());
+        let view = evaluation.evaluate(&executor).unwrap();
+
+        assert!(Arc::ptr_eq(&view, batch.column(0)));
+        (view, input)
+    };
+    assert_eq!(
+        ints(&evaluation.evaluate(&executor).unwrap()),
+        vec![Some(2), None, Some(4)]
+    );
+    let next = integers(vec![Some(7)]);
+    executor.set_input(next.columns(), next.num_rows());
+    assert_eq!(
+        ints(&evaluation.evaluate(&executor).unwrap()),
+        vec![Some(7)]
+    );
+    assert_eq!(ints(&first_result), vec![Some(2), None, Some(4)]);
+    drop(first_result);
+    assert!(first_input.upgrade().is_none());
+}
+
+#[test]
+fn multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors() {
+    let evaluations = vec![
+        reference(0),
+        call(
+            FunctionKind::Add,
+            vec![reference(0), int(3)],
+            DataType::Int64,
+            true,
+        ),
+    ]
+    .iter()
+    .map(|e| e.to_evaluation().unwrap())
+    .collect::<Vec<_>>();
+    let mut executor = ScalarExpressionExecutor::default();
+    assert!(evaluations.iter().all(|e| e.evaluate(&executor).is_err()));
+    let batch = integers(vec![Some(2), None, Some(4)]);
+    executor.set_input(batch.columns(), batch.num_rows());
+    let values = evaluations
+        .iter()
+        .map(|e| e.evaluate(&executor).unwrap())
+        .collect::<Vec<_>>();
+    assert!(Arc::ptr_eq(&values[0], batch.column(0)));
+    assert_eq!(ints(&values[1]), vec![Some(5), None, Some(7)]);
+    executor.set_input(&[batch.column(0).slice(0, 0)], 0);
+    assert!(
+        evaluations
+            .iter()
+            .all(|e| e.evaluate(&executor).unwrap().is_empty())
+    );
+
+    let guarded = ConjunctionExpression::new(
+        Conjunction::And,
+        vec![
+            predicate(FunctionKind::NotEqual, vec![reference(0), int(0)], true),
+            predicate(
+                FunctionKind::GreaterThan,
+                vec![
+                    call(
+                        FunctionKind::Divide,
+                        vec![int(100), reference(0)],
+                        DataType::Int64,
+                        true,
+                    ),
+                    int(30),
+                ],
+                true,
+            ),
+        ],
+        true,
+    )
+    .into_ref();
+    let evaluation = guarded.to_evaluation().unwrap();
+    executor.set_input(
+        &[Arc::new(Int64Array::from(vec![
+            Some(2),
+            Some(0),
+            None,
+            Some(4),
+        ]))],
+        4,
+    );
+    // AND evaluates both children on the same batch, including x=0.
+    assert!(
+        evaluation
+            .evaluate(&executor)
+            .and_then(select_true)
+            .is_err()
+    );
+    assert!(evaluation.evaluate(&executor).is_err());
+    executor.set_input(
+        &[Arc::new(Int64Array::from(vec![Some(2), None, Some(4)]))],
+        3,
+    );
+    assert_eq!(
+        evaluation
+            .evaluate(&executor)
+            .and_then(select_true)
+            .unwrap(),
+        vec![0]
+    );
+    assert_eq!(
+        evaluation
+            .evaluate(&executor)
+            .and_then(select_true)
+            .unwrap(),
+        vec![0]
+    );
+}
+
+// Compare selected kernels with Arrow's dynamic entry points, including
+// constants on either side, NULLs, and one-row inputs. Arrow may return a
+// single value for two scalar operands; Roc always returns the batch row count.
 fn compare_bound_binary_kernels(left: ArrayRef, right: ArrayRef) {
     use FunctionKind::*;
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("left", left.data_type().clone(), true),
-        Field::new("right", right.data_type().clone(), true),
-    ]));
     let rows = left.len();
     let columns = [left, right];
     for left_scalar in [false, true] {
@@ -112,29 +265,44 @@ fn compare_bound_binary_kernels(left: ArrayRef, right: ArrayRef) {
                         }
                         _ => unreachable!(),
                     };
+                    // Arithmetic keeps the operand type; comparisons produce
+                    // Boolean, and the NULL-safe ones can never produce NULL.
+                    let (result_type, nullable) = match function {
+                        Add | Subtract | Multiply | Divide | Remainder => {
+                            (l.data_type().clone(), true)
+                        }
+                        IsDistinctFrom | IsNotDistinctFrom => (DataType::Boolean, false),
+                        _ => (DataType::Boolean, true),
+                    };
                     let argument = |value: &ArrayRef, scalar, index| {
                         if scalar {
                             ConstantExpression::try_new(value.clone())
                                 .unwrap()
                                 .into_ref()
                         } else {
-                            reference(index)
+                            column(index, value.data_type().clone(), true)
                         }
                     };
                     let expr = call(
                         function,
                         vec![argument(&l, left_scalar, 0), argument(&r, right_scalar, 1)],
+                        result_type,
+                        nullable,
                     );
-                    let mut executor =
-                        ScalarExpressionExecutor::try_new(expr, schema.clone()).unwrap();
-                    assert_eq!(executor.is_scalar(), left_scalar && right_scalar);
-                    let actual = executor.evaluate(&ExpressionInput::new(&columns, rows));
+                    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+                    let actual = executor.evaluate(&ScalarExpressionExecutor::new(&columns, rows));
                     let context = format!(
                         "{:?} {function:?}, scalar=({left_scalar},{right_scalar}), index={scalar_index}",
                         l.data_type()
                     );
                     match (actual, expected) {
                         (Ok(actual), Ok(expected)) => {
+                            let expected = if left_scalar && right_scalar {
+                                concat(&vec![expected.as_ref(); rows]).unwrap()
+                            } else {
+                                expected
+                            };
+                            assert_eq!(actual.len(), rows, "{context}");
                             assert_eq!(actual.to_data(), expected.to_data(), "{context}");
                         }
                         (Err(_), Err(_)) => {}
@@ -199,168 +367,476 @@ fn all_bound_numeric_signatures_match_arrow() {
 }
 
 #[test]
-fn nested_branches_and_predicates_preserve_selection_order_and_duplicates() {
+fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
     use FunctionKind::*;
-    let batch = integers(vec![Some(0), Some(4), None, Some(2)]);
-    let rows = [3, 0, 2, 1, 3];
-    let input = ExpressionInput::new(batch.columns(), batch.num_rows()).with_selection(&rows);
+    let batch = integers(vec![Some(2), Some(0), None, Some(4), Some(2)]);
+    let columns = batch.columns();
+    let num_rows = batch.num_rows();
     let guarded = ConjunctionExpression::new(
         Conjunction::And,
         vec![
-            call(NotEqual, vec![reference(0), int(0)]),
-            call(
+            predicate(NotEqual, vec![reference(0), int(0)], true),
+            predicate(
                 GreaterThan,
-                vec![call(Divide, vec![int(100), reference(0)]), int(30)],
+                vec![
+                    CaseExpression::new(
+                        vec![(
+                            predicate(NotEqual, vec![reference(0), int(0)], true),
+                            call(Divide, vec![int(100), reference(0)], DataType::Int64, true),
+                        )],
+                        int(0),
+                        DataType::Int64,
+                        true,
+                    )
+                    .into_ref(),
+                    int(30),
+                ],
+                true,
             ),
         ],
+        true,
     )
     .into_ref();
-    let predicate = ConjunctionExpression::new(
+    let filter_predicate = ConjunctionExpression::new(
         Conjunction::Or,
-        vec![call(Equal, vec![reference(0), int(0)]), guarded.clone()],
+        vec![
+            predicate(Equal, vec![reference(0), int(0)], true),
+            guarded.clone(),
+        ],
+        true,
     )
     .into_ref();
-    let mut filter = ScalarExpressionExecutor::try_new(predicate, batch.schema()).unwrap();
-    assert_eq!(filter.select(&input).unwrap(), vec![3, 0, 3]);
-
-    let expr = CaseExpression::new(vec![(guarded, int(1))], int(0)).into_ref();
-    let mut executor = ScalarExpressionExecutor::try_new(expr, batch.schema()).unwrap();
-    assert!(!executor.is_scalar());
+    let filter = ScalarExpressionEvaluation::try_new(filter_predicate).unwrap();
     assert_eq!(
-        ints(&executor.evaluate(&input).unwrap()),
+        filter
+            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .and_then(select_true)
+            .unwrap(),
+        vec![0, 1, 4]
+    );
+
+    let expr =
+        CaseExpression::new(vec![(guarded, int(1))], int(0), DataType::Int64, false).into_ref();
+    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+    assert_eq!(
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(1), Some(0), Some(0), Some(0), Some(1)]
     );
 
-    let coalesce = CoalesceExpression::new(vec![reference(0), int(-1)]).into_ref();
+    let coalesce =
+        CoalesceExpression::new(vec![reference(0), int(-1)], DataType::Int64, false).into_ref();
     let case = CaseExpression::new(
         vec![
-            (call(Equal, vec![reference(0), int(0)]), int(0)),
+            (predicate(Equal, vec![reference(0), int(0)], true), int(0)),
             (
-                call(IsNotNull, vec![reference(0)]),
-                call(Divide, vec![int(100), reference(0)]),
+                predicate(IsNotNull, vec![reference(0)], false),
+                call(Divide, vec![int(100), reference(0)], DataType::Int64, true),
             ),
         ],
         coalesce,
+        DataType::Int64,
+        true,
     )
     .into_ref();
-    let mut executor =
-        ScalarExpressionExecutor::try_new(call(Add, vec![case, int(3)]), batch.schema()).unwrap();
-    let first = executor.evaluate(&input).unwrap();
+    let executor =
+        ScalarExpressionEvaluation::try_new(call(Add, vec![case, int(3)], DataType::Int64, true))
+            .unwrap();
+    let first = executor
+        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .unwrap()
+        .clone();
     assert_eq!(
         ints(&first),
         vec![Some(53), Some(3), Some(2), Some(28), Some(53)]
     );
-    let one = [1];
+    let one = batch.slice(3, 1);
     assert_eq!(
-        ints(&executor.evaluate(&input.with_selection(&one)).unwrap()),
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(
+                    one.columns(),
+                    one.num_rows()
+                ))
+                .unwrap()
+        ),
         vec![Some(28)]
     );
-    assert!(!executor.is_scalar());
-    assert_eq!(ints(&executor.evaluate(&input).unwrap()), ints(&first));
+    assert_eq!(
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
+        ints(&first)
+    );
 }
 
 #[test]
-fn coalesce_reuses_branch_state_after_errors_with_selected_inputs() {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", DataType::Int64, true),
-        Field::new("divisor", DataType::Int64, false),
-    ]));
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(Int64Array::from(vec![Some(7), None, Some(9), None, None])),
-        Arc::new(Int64Array::from(vec![0, 2, 0, 4, 0])),
-    ];
-    let expr = CoalesceExpression::new(vec![
-        reference(0),
-        call(FunctionKind::Divide, vec![int(100), reference(1)]),
-    ])
+fn nested_case_selects_original_rows_and_recovers_after_branch_errors() {
+    use FunctionKind::*;
+    // x is column 1 and y is column 2. Nested branch batches must address the
+    // original chunk and keep both columns aligned, including duplicate values.
+    let x = column(1, DataType::Int64, true);
+    let y = column(2, DataType::Int64, false);
+    let nested = CaseExpression::new(
+        vec![(
+            predicate(NotEqual, vec![y.clone(), int(0)], false),
+            call(Divide, vec![y, x.clone()], DataType::Int64, true),
+        )],
+        int(0),
+        DataType::Int64,
+        true,
+    )
     .into_ref();
-    let mut executor = ScalarExpressionExecutor::try_new(expr, schema).unwrap();
-    let rows = [3, 0, 1, 2, 1];
-    let input = ExpressionInput::new(&columns, 5).with_selection(&rows);
-    let result = executor.evaluate(&input).unwrap();
+    let expr = CaseExpression::new(
+        vec![(predicate(NotEqual, vec![x, int(0)], true), nested)],
+        int(0),
+        DataType::Int64,
+        true,
+    )
+    .into_ref();
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec!["unused"; 6])),
+        Arc::new(Int64Array::from(vec![
+            Some(0),
+            Some(2),
+            None,
+            Some(-2),
+            Some(4),
+            Some(2),
+        ])),
+        Arc::new(Int64Array::from(vec![100, 10, 100, 6, 0, 10])),
+    ];
+    let executor = expr.to_evaluation().unwrap();
+    let result = executor
+        .evaluate(&ScalarExpressionExecutor::new(&columns, 6))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        ints(&result),
+        vec![Some(0), Some(5), Some(0), Some(-3), Some(0), Some(5)]
+    );
+
+    // This passes the zero guard but overflows inside the nested division.
+    let bad_columns: Vec<ArrayRef> = vec![
+        Arc::new(StringArray::from(vec!["unused"; 2])),
+        Arc::new(Int64Array::from(vec![0, -1])),
+        Arc::new(Int64Array::from(vec![100, i64::MIN])),
+    ];
+    assert!(
+        executor
+            .evaluate(&ScalarExpressionExecutor::new(&bad_columns, 2))
+            .is_err()
+    );
+    assert_eq!(
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(&columns, 6))
+                .unwrap()
+        ),
+        ints(&result)
+    );
+    assert_eq!(
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+                .unwrap()
+        ),
+        vec![]
+    );
+}
+
+#[test]
+fn zero_column_inputs_keep_row_counts_through_branches_and_predicates() {
+    let error = call(
+        FunctionKind::Divide,
+        vec![int(1), int(0)],
+        DataType::Int64,
+        false,
+    );
+    let case = CaseExpression::new(
+        vec![(ConstantExpression::boolean(Some(true)).into_ref(), int(5))],
+        error.clone(),
+        DataType::Int64,
+        false,
+    )
+    .into_ref();
+    let coalesce = CoalesceExpression::new(
+        vec![
+            ConstantExpression::null(&DataType::Int64).into_ref(),
+            int(7),
+            error,
+        ],
+        DataType::Int64,
+        false,
+    )
+    .into_ref();
+    let executors = vec![case, coalesce]
+        .iter()
+        .map(|e| e.to_evaluation().unwrap())
+        .collect::<Vec<_>>();
+    let input = ScalarExpressionExecutor::new(&[], 3);
+    let values = executors
+        .iter()
+        .map(|e| e.evaluate(&input).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(ints(&values[0]), vec![Some(5); 3]);
+    assert_eq!(ints(&values[1]), vec![Some(7); 3]);
+    assert!(executors.iter().all(|e| {
+        e.evaluate(&ScalarExpressionExecutor::new(&[], 0))
+            .unwrap()
+            .is_empty()
+    }));
+
+    let predicate = ConjunctionExpression::new(
+        Conjunction::Or,
+        vec![
+            ConstantExpression::boolean(None).into_ref(),
+            ConstantExpression::boolean(Some(true)).into_ref(),
+        ],
+        true,
+    )
+    .into_ref();
+    let predicate = predicate.to_evaluation().unwrap();
+    assert_eq!(
+        predicate
+            .evaluate(&ScalarExpressionExecutor::new(&[], 3))
+            .and_then(select_true)
+            .unwrap(),
+        vec![0, 1, 2]
+    );
+    assert!(
+        predicate
+            .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+            .and_then(select_true)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn coalesce_reuses_branch_state_after_errors_with_selected_rows() {
+    // `value` is nullable and `divisor` is not, per the batch layout below.
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![None, Some(7), None, Some(9), None])),
+        Arc::new(Int64Array::from(vec![4, 0, 2, 0, 2])),
+    ];
+    let expr = CoalesceExpression::new(
+        vec![
+            column(0, DataType::Int64, true),
+            call(
+                FunctionKind::Divide,
+                vec![int(100), column(1, DataType::Int64, false)],
+                DataType::Int64,
+                true,
+            ),
+        ],
+        DataType::Int64,
+        true,
+    )
+    .into_ref();
+    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+    let columns = columns.as_slice();
+    let num_rows = 5;
+    let result = executor
+        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .unwrap()
+        .clone();
     assert_eq!(
         ints(&result),
         vec![Some(25), Some(7), Some(50), Some(9), Some(50)]
     );
-    assert!(executor.evaluate(&input.with_selection(&[3, 4])).is_err());
-    assert_eq!(ints(&executor.evaluate(&input).unwrap()), ints(&result));
+    let error_columns: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![None, None])),
+        Arc::new(Int64Array::from(vec![4, 0])),
+    ];
+    assert!(
+        executor
+            .evaluate(&ScalarExpressionExecutor::new(&error_columns, 2))
+            .is_err()
+    );
+    assert_eq!(
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
+        ints(&result)
+    );
     assert_eq!(
         ints(&result),
         vec![Some(25), Some(7), Some(50), Some(9), Some(50)]
     );
+}
+
+#[test]
+fn constant_only_expressions_return_full_columns_for_each_batch_size() {
+    let expressions = vec![
+        int(5),
+        call(
+            FunctionKind::Add,
+            vec![int(2), int(3)],
+            DataType::Int64,
+            false,
+        ),
+        CastExpression::new(
+            ConstantExpression::string(Some("7")).into_ref(),
+            DataType::Int64,
+            CastMode::Strict,
+            false,
+        )
+        .into_ref(),
+        NotExpression::new(ConstantExpression::boolean(Some(true)).into_ref(), false).into_ref(),
+        ConjunctionExpression::new(
+            Conjunction::And,
+            vec![
+                ConstantExpression::boolean(Some(true)).into_ref(),
+                ConstantExpression::boolean(None).into_ref(),
+            ],
+            true,
+        )
+        .into_ref(),
+        ConstantExpression::string(Some("value")).into_ref(),
+        ConstantExpression::null(&DataType::Utf8).into_ref(),
+    ];
+    let executors = expressions
+        .iter()
+        .map(|e| e.to_evaluation().unwrap())
+        .collect::<Vec<_>>();
+    // Reuse the same evaluations across changing row counts with no input columns.
+    for num_rows in [3, 0, 1, 3] {
+        let input = ScalarExpressionExecutor::new(&[], num_rows);
+        let values = executors
+            .iter()
+            .map(|e| e.evaluate(&input).unwrap())
+            .collect::<Vec<_>>();
+        assert!(values.iter().all(|value| value.len() == num_rows));
+        assert_eq!(ints(&values[0]), vec![Some(5); num_rows]);
+        assert_eq!(ints(&values[1]), vec![Some(5); num_rows]);
+        assert_eq!(ints(&values[2]), vec![Some(7); num_rows]);
+        assert_eq!(bools(&values[3]), vec![Some(false); num_rows]);
+        assert_eq!(bools(&values[4]), vec![None; num_rows]);
+        let strings = |index: usize| {
+            values[index]
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strings(5), vec![Some("value"); num_rows]);
+        assert_eq!(strings(6), vec![None; num_rows]);
+    }
 }
 
 #[test]
 fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
-    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
-    let mut executor = ScalarExpressionExecutor::try_new(int(3), schema.clone()).unwrap();
+    let executor = ScalarExpressionEvaluation::try_new(int(3)).unwrap();
     let wrong_type: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![1, 2]))];
-    // Constants do not inspect unrelated columns or retain the bound schema.
-    let input = ExpressionInput::new(&wrong_type, 2);
-    assert_eq!(ints(&executor.evaluate(&input).unwrap()), vec![Some(3)]);
+    // Constants do not inspect unrelated columns.
+    let columns = wrong_type.as_slice();
+    let num_rows = 2;
     assert_eq!(
-        ints(&executor.evaluate_array(&input).unwrap()),
+        ints(
+            &executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(3); 2]
     );
     assert_eq!(
-        executor.evaluate(&input.with_selection(&[])).unwrap().len(),
+        executor
+            .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+            .unwrap()
+            .len(),
         0
     );
-    let mut addition = ScalarExpressionExecutor::try_new(
-        call(FunctionKind::Add, vec![reference(0), int(1)]),
-        schema,
-    )
+    // The host declared column 0 as Int64 (the real schema), but the input
+    // carries Int32; the typed kernel reports the mismatch at run time.
+    let addition = ScalarExpressionEvaluation::try_new(call(
+        FunctionKind::Add,
+        vec![column(0, DataType::Int64, false), int(1)],
+        DataType::Int64,
+        true,
+    ))
     .unwrap();
     assert!(
-        matches!(addition.evaluate(&input), Err(Error::Execution(message)) if message == "expected Int64 array")
+        matches!(addition.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)), Err(Error::Execution(message)) if message == "expected Int64 array")
     );
 }
 
 #[test]
-fn concrete_executors_work_independently_and_convert_to_dispatch() {
+fn each_description_builds_an_evaluation() {
     let batch = integers(vec![Some(2), None, Some(4)]);
-    let schema = batch.schema();
-    let input = ExpressionInput::new(batch.columns(), batch.num_rows());
-    let mut column = ReferenceExpression::new(0)
-        .create_executor(schema.clone())
-        .unwrap();
+    let columns = batch.columns();
+    let num_rows = batch.num_rows();
+    let column_executor =
+        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
+            .to_evaluation()
+            .unwrap();
     assert_eq!(
-        ints(&column.evaluate(&input).unwrap()),
+        ints(
+            &column_executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(2), None, Some(4)]
     );
-    let mut constant = ConstantExpression::int64(Some(3))
-        .create_executor(schema.clone())
-        .unwrap();
-    assert_eq!(ints(&constant.evaluate(&input).unwrap()), vec![Some(3)]);
+    let constant_executor = ConstantExpression::int64(Some(3)).to_evaluation().unwrap();
     assert_eq!(
-        ints(&constant.evaluate_array(&input).unwrap()),
+        ints(
+            &constant_executor
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(3); 3]
     );
 
-    let add = FunctionExpression::new(FunctionKind::Add, vec![reference(0), int(3)]);
-    let mut binary = BinaryFunctionExpressionExecutor::try_new(&add, schema.clone()).unwrap();
+    let add = FunctionExpression::binary(
+        FunctionKind::Add,
+        reference(0),
+        int(3),
+        DataType::Int64,
+        true,
+    );
+    let binary = add.to_evaluation().unwrap();
     assert_eq!(
-        ints(&binary.evaluate(&input).unwrap()),
+        ints(
+            &binary
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(5), None, Some(7)]
     );
-    assert!(UnaryFunctionExpressionExecutor::try_new(&add, schema.clone()).is_err());
-    let mut wrapped: ScalarExpressionExecutor = binary.into();
-    assert_eq!(
-        ints(&wrapped.evaluate(&input).unwrap()),
-        vec![Some(5), None, Some(7)]
+    // Binding a unary Add still rejects the unsupported function arity.
+    assert!(
+        FunctionExpression::unary(FunctionKind::Add, reference(0), DataType::Int64, true,)
+            .to_evaluation()
+            .is_err()
     );
 
-    let negate = FunctionExpression::new(FunctionKind::Negate, vec![reference(0)]);
-    let mut unary = UnaryFunctionExpressionExecutor::try_new(&negate, schema.clone()).unwrap();
+    let negate =
+        FunctionExpression::unary(FunctionKind::Negate, reference(0), DataType::Int64, true);
+    let unary = negate.to_evaluation().unwrap();
     assert_eq!(
-        ints(&unary.evaluate(&input).unwrap()),
+        ints(
+            &unary
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(-2), None, Some(-4)]
     );
 
-    let mut cast = CastExpression::new(reference(0), DataType::Int32, CastMode::Strict)
-        .create_executor(schema.clone())
+    let cast = CastExpression::new(reference(0), DataType::Int32, CastMode::Strict, true)
+        .to_evaluation()
         .unwrap();
-    let cast_output = cast.evaluate(&input).unwrap();
+    let cast_output = cast
+        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .unwrap();
     assert_eq!(
         cast_output
             .as_any()
@@ -371,51 +847,91 @@ fn concrete_executors_work_independently_and_convert_to_dispatch() {
         vec![Some(2), None, Some(4)]
     );
 
-    let is_null = call(FunctionKind::IsNull, vec![reference(0)]);
-    let mut not = NotExpression::new(is_null.clone())
-        .create_executor(schema.clone())
+    let is_null = predicate(FunctionKind::IsNull, vec![reference(0)], false);
+    let not = NotExpression::new(is_null.clone(), true)
+        .to_evaluation()
         .unwrap();
     assert_eq!(
-        bools(&not.evaluate(&input).unwrap()),
+        bools(
+            &not.evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(true), Some(false), Some(true)]
     );
-    let mut conjunction = ConjunctionExpression::new(
+    let conjunction = ConjunctionExpression::new(
         Conjunction::And,
         vec![
-            NotExpression::new(is_null.clone()).into_ref(),
-            call(FunctionKind::GreaterThan, vec![reference(0), int(2)]),
+            NotExpression::new(is_null.clone(), true).into_ref(),
+            predicate(FunctionKind::GreaterThan, vec![reference(0), int(2)], true),
         ],
+        true,
     )
-    .create_executor(schema.clone())
+    .to_evaluation()
     .unwrap();
-    assert_eq!(conjunction.select(&input).unwrap(), vec![2]);
+    assert_eq!(
+        conjunction
+            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .and_then(select_true)
+            .unwrap(),
+        vec![2]
+    );
 
-    let mut case = CaseExpression::new(vec![(is_null, int(7))], reference(0))
-        .create_executor(schema.clone())
+    let case = CaseExpression::new(vec![(is_null, int(7))], reference(0), DataType::Int64, true)
+        .to_evaluation()
         .unwrap();
     assert_eq!(
-        ints(&case.evaluate(&input).unwrap()),
+        ints(
+            &case
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(2), Some(7), Some(4)]
     );
-    let mut coalesce = CoalesceExpression::new(vec![reference(0), int(7)])
-        .create_executor(schema.clone())
+    let coalesce = CoalesceExpression::new(vec![reference(0), int(7)], DataType::Int64, true)
+        .to_evaluation()
         .unwrap();
     assert_eq!(
-        ints(&coalesce.evaluate(&input).unwrap()),
+        ints(
+            &coalesce
+                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .unwrap()
+        ),
         vec![Some(2), Some(7), Some(4)]
     );
 
     // Standalone executors must retain the empty-input contract and skip kernels.
-    let error = call(FunctionKind::Divide, vec![int(1), int(0)]);
-    let mut case = CaseExpression::new(vec![], error.clone())
-        .create_executor(schema.clone())
+    let error = call(
+        FunctionKind::Divide,
+        vec![int(1), int(0)],
+        DataType::Int64,
+        false,
+    );
+    let case = CaseExpression::new(vec![], error.clone(), DataType::Int64, false)
+        .to_evaluation()
         .unwrap();
-    let mut coalesce = CoalesceExpression::new(vec![error])
-        .create_executor(schema)
+    let coalesce = CoalesceExpression::new(vec![error], DataType::Int64, false)
+        .to_evaluation()
         .unwrap();
-    let empty = input.with_selection(&[]);
-    assert_eq!(case.evaluate(&empty).unwrap().len(), 0);
-    assert_eq!(coalesce.evaluate(&empty).unwrap().len(), 0);
+    let empty = batch.slice(0, 0);
+    assert_eq!(
+        case.evaluate(&ScalarExpressionExecutor::new(
+            empty.columns(),
+            empty.num_rows()
+        ))
+        .unwrap()
+        .len(),
+        0
+    );
+    assert_eq!(
+        coalesce
+            .evaluate(&ScalarExpressionExecutor::new(
+                empty.columns(),
+                empty.num_rows()
+            ))
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -433,14 +949,24 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
     // Dividing a NULL row by zero must not invoke the checked operation.
     assert_eq!(
         ints(&evaluate(
-            call(FunctionKind::Divide, vec![reference(0), int(0)]),
+            call(
+                FunctionKind::Divide,
+                vec![reference(0), int(0)],
+                DataType::Int64,
+                true
+            ),
             &batch
         )),
         vec![None]
     );
     assert_eq!(
         ints(&evaluate(
-            call(FunctionKind::Remainder, vec![int(i64::MIN), int(-1)]),
+            call(
+                FunctionKind::Remainder,
+                vec![int(i64::MIN), int(-1)],
+                DataType::Int64,
+                false
+            ),
             &batch
         )),
         vec![Some(0)]
@@ -448,17 +974,20 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
     let unsigned = ConstantExpression::try_new(Arc::new(arrow::array::UInt64Array::from(vec![1])))
         .unwrap()
         .into_ref();
+    // The host declared the operand type UInt64, which has no negation kernel.
     assert!(
-        ScalarExpressionExecutor::try_new(
-            call(FunctionKind::Negate, vec![unsigned]),
-            batch.schema()
-        )
+        ScalarExpressionEvaluation::try_new(call(
+            FunctionKind::Negate,
+            vec![unsigned],
+            DataType::UInt64,
+            false
+        ))
         .is_err()
     );
 }
 
 #[test]
-fn numeric_kernels_broadcast_scalars_and_preserve_nulls() {
+fn numeric_kernels_evaluate_constants_per_row_and_preserve_nulls() {
     use FunctionKind::*;
     let batch = integers(vec![Some(6), None, Some(-3)]);
     for (function, expected) in [
@@ -470,32 +999,45 @@ fn numeric_kernels_broadcast_scalars_and_preserve_nulls() {
     ] {
         assert_eq!(
             ints(&evaluate(
-                call(function, vec![reference(0), int(2)]),
+                call(function, vec![reference(0), int(2)], DataType::Int64, true),
                 &batch
             )),
             expected
         );
     }
     assert_eq!(
-        ints(&evaluate(call(Negate, vec![reference(0)]), &batch)),
+        ints(&evaluate(
+            call(Negate, vec![reference(0)], DataType::Int64, true),
+            &batch
+        )),
         vec![Some(-6), None, Some(3)]
     );
-    let mut executor =
-        ExpressionExecutor::try_new(vec![call(Add, vec![int(2), int(3)])], batch.schema()).unwrap();
-    assert!(executor.executors()[0].is_scalar());
+    let executor = ScalarExpressionEvaluation::try_new(call(
+        Add,
+        vec![int(2), int(3)],
+        DataType::Int64,
+        false,
+    ))
+    .unwrap();
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ExpressionInput::new(batch.columns(), batch.num_rows()))
-                .unwrap()[0]
+                .evaluate(&ScalarExpressionExecutor::new(
+                    batch.columns(),
+                    batch.num_rows()
+                ))
+                .unwrap()
         ),
-        vec![Some(5)]
+        vec![Some(5); batch.num_rows()]
     );
-    let overflow = call(Add, vec![int(i64::MAX), int(1)]);
+    let overflow = call(Add, vec![int(i64::MAX), int(1)], DataType::Int64, false);
     assert!(
-        ExpressionExecutor::try_new(vec![overflow], batch.schema())
+        ScalarExpressionEvaluation::try_new(overflow)
             .unwrap()
-            .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
+            .evaluate(&ScalarExpressionExecutor::new(
+                batch.columns(),
+                batch.num_rows()
+            ))
             .is_err()
     );
 }
@@ -534,20 +1076,28 @@ fn comparisons_and_null_safe_comparisons() {
             vec![Some(true), Some(false), Some(true), Some(false)],
         ),
     ] {
+        // The NULL-safe comparisons never produce NULL results.
+        let nullable = !matches!(function, IsDistinctFrom | IsNotDistinctFrom);
         assert_eq!(
             bools(&evaluate(
-                call(function, vec![reference(0), reference(1)]),
+                predicate(function, vec![reference(0), reference(1)], nullable),
                 &batch
             )),
             expected
         );
     }
     assert_eq!(
-        bools(&evaluate(call(IsNull, vec![reference(0)]), &batch)),
+        bools(&evaluate(
+            predicate(IsNull, vec![reference(0)], false),
+            &batch
+        )),
         vec![Some(false), Some(false), Some(true), Some(true)]
     );
     assert_eq!(
-        bools(&evaluate(call(IsNotNull, vec![reference(0)]), &batch)),
+        bools(&evaluate(
+            predicate(IsNotNull, vec![reference(0)], false),
+            &batch
+        )),
         vec![Some(true), Some(true), Some(false), Some(false)]
     );
 }
@@ -569,10 +1119,24 @@ fn boolean_value_execution_preserves_three_valued_logic() {
         ],
     )
     .unwrap();
-    let and =
-        ConjunctionExpression::new(Conjunction::And, vec![reference(0), reference(1)]).into_ref();
-    let or =
-        ConjunctionExpression::new(Conjunction::Or, vec![reference(0), reference(1)]).into_ref();
+    let and = ConjunctionExpression::new(
+        Conjunction::And,
+        vec![
+            column(0, DataType::Boolean, true),
+            column(1, DataType::Boolean, true),
+        ],
+        true,
+    )
+    .into_ref();
+    let or = ConjunctionExpression::new(
+        Conjunction::Or,
+        vec![
+            column(0, DataType::Boolean, true),
+            column(1, DataType::Boolean, true),
+        ],
+        true,
+    )
+    .into_ref();
     let expected_and = a
         .iter()
         .zip(&b)
@@ -595,15 +1159,19 @@ fn boolean_value_execution_preserves_three_valued_logic() {
     assert_eq!(bools(&evaluate(or.clone(), &batch)), expected_or);
     assert_eq!(
         bools(&evaluate(
-            NotExpression::new(reference(0)).into_ref(),
+            NotExpression::new(column(0, DataType::Boolean, true), true).into_ref(),
             &batch
         )),
         a.iter().map(|v| v.map(|v| !v)).collect::<Vec<_>>()
     );
     for (expr, expected) in [(and, expected_and), (or, expected_or)] {
-        let mask = ExpressionExecutor::try_new(vec![expr], batch.schema())
-            .unwrap()
-            .select(&ExpressionInput::new(batch.columns(), batch.num_rows()))
+        let evaluation = expr.to_evaluation().unwrap();
+        let mask = evaluation
+            .evaluate(&ScalarExpressionExecutor::new(
+                batch.columns(),
+                batch.num_rows(),
+            ))
+            .and_then(select_true)
             .unwrap();
         assert_eq!(
             mask,
@@ -622,20 +1190,25 @@ fn case_executes_only_matching_rows_in_original_order() {
     let batch = integers(vec![Some(0), Some(4), None, Some(2), Some(0)]);
     let expr = CaseExpression::new(
         vec![
-            (call(IsNull, vec![reference(0)]), int(-1)),
+            (predicate(IsNull, vec![reference(0)], false), int(-1)),
             (
-                call(NotEqual, vec![reference(0), int(0)]),
-                call(Divide, vec![int(100), reference(0)]),
+                predicate(NotEqual, vec![reference(0), int(0)], true),
+                call(Divide, vec![int(100), reference(0)], DataType::Int64, true),
             ),
         ],
         int(0),
+        DataType::Int64,
+        true,
     )
     .into_ref();
-    let mut executor = ExpressionExecutor::try_new(vec![expr.clone()], batch.schema()).unwrap();
+    let executor = ScalarExpressionEvaluation::try_new(expr.clone()).unwrap();
     let result = executor
-        .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
+        .evaluate(&ScalarExpressionExecutor::new(
+            batch.columns(),
+            batch.num_rows(),
+        ))
         .unwrap()
-        .remove(0);
+        .clone();
     assert_eq!(
         ints(&result),
         vec![Some(0), Some(25), Some(-1), Some(50), Some(0)]
@@ -646,9 +1219,11 @@ fn case_executes_only_matching_rows_in_original_order() {
     assert_eq!(
         ints(
             &executor
-                .evaluate_arrays(&ExpressionInput::new(next.columns(), next.num_rows()))
+                .evaluate(&ScalarExpressionExecutor::new(
+                    next.columns(),
+                    next.num_rows()
+                ))
                 .unwrap()
-                .remove(0)
         ),
         vec![Some(20), Some(0)]
     );
@@ -660,9 +1235,11 @@ fn case_executes_only_matching_rows_in_original_order() {
     let expr = CaseExpression::new(
         vec![(
             ConstantExpression::boolean(Some(false)).into_ref(),
-            call(Divide, vec![int(1), int(0)]),
+            call(Divide, vec![int(1), int(0)], DataType::Int64, false),
         )],
         int(7),
+        DataType::Int64,
+        false,
     )
     .into_ref();
     assert_eq!(ints(&evaluate(expr, &batch)), vec![Some(7); 5]);
@@ -670,67 +1247,87 @@ fn case_executes_only_matching_rows_in_original_order() {
 
 #[test]
 fn coalesce_selects_remaining_rows_and_skips_unused_errors() {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("value", DataType::Int64, true),
-        Field::new("divisor", DataType::Int64, false),
-    ]));
     let batch = RecordBatch::try_new(
-        schema,
+        Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int64, true),
+            Field::new("divisor", DataType::Int64, false),
+        ])),
         vec![
             Arc::new(Int64Array::from(vec![Some(7), None, Some(9), None])),
             Arc::new(Int64Array::from(vec![0, 2, 0, 4])),
         ],
     )
     .unwrap();
-    let expr = CoalesceExpression::new(vec![
-        reference(0),
-        call(FunctionKind::Divide, vec![int(100), reference(1)]),
-        call(FunctionKind::Divide, vec![int(1), int(0)]),
-    ])
+    let expr = CoalesceExpression::new(
+        vec![
+            column(0, DataType::Int64, true),
+            call(
+                FunctionKind::Divide,
+                vec![int(100), column(1, DataType::Int64, false)],
+                DataType::Int64,
+                true,
+            ),
+            call(
+                FunctionKind::Divide,
+                vec![int(1), int(0)],
+                DataType::Int64,
+                false,
+            ),
+        ],
+        DataType::Int64,
+        true,
+    )
     .into_ref();
     assert_eq!(
         ints(&evaluate(expr, &batch)),
         vec![Some(7), Some(50), Some(9), Some(25)]
     );
-    let all_null = CoalesceExpression::new(vec![
-        ConstantExpression::int64(None).into_ref(),
-        ConstantExpression::int64(None).into_ref(),
-    ])
+    let all_null = CoalesceExpression::new(
+        vec![
+            ConstantExpression::int64(None).into_ref(),
+            ConstantExpression::int64(None).into_ref(),
+        ],
+        DataType::Int64,
+        true,
+    )
     .into_ref();
     assert_eq!(ints(&evaluate(all_null, &batch)), vec![None; 4]);
 }
 
 #[test]
-fn filter_selection_short_circuits_but_value_evaluation_keeps_its_contract() {
+fn filter_selection_uses_the_boolean_value_result() {
     use FunctionKind::*;
     let batch = integers(vec![Some(0), Some(4), None, Some(2)]);
+    // CASE protects the division; AND itself evaluates both Boolean inputs.
+    let division = CaseExpression::new(
+        vec![(
+            predicate(NotEqual, vec![reference(0), int(0)], true),
+            call(Divide, vec![int(100), reference(0)], DataType::Int64, true),
+        )],
+        ConstantExpression::int64(None).into_ref(),
+        DataType::Int64,
+        true,
+    )
+    .into_ref();
     let expr = ConjunctionExpression::new(
         Conjunction::And,
         vec![
-            call(NotEqual, vec![reference(0), int(0)]),
-            call(
-                GreaterThan,
-                vec![call(Divide, vec![int(100), reference(0)]), int(30)],
-            ),
+            predicate(NotEqual, vec![reference(0), int(0)], true),
+            predicate(GreaterThan, vec![division, int(30)], true),
         ],
+        true,
     )
     .into_ref();
-    let mut executor = ExpressionExecutor::try_new(vec![expr], batch.schema()).unwrap();
+    let evaluation = expr.to_evaluation().unwrap();
+    let executor = ScalarExpressionExecutor::new(batch.columns(), batch.num_rows());
+    let result = evaluation.evaluate(&executor).unwrap();
     assert_eq!(
-        executor
-            .select(&ExpressionInput::new(batch.columns(), batch.num_rows()))
-            .unwrap(),
-        vec![3]
+        bools(&result),
+        vec![Some(false), Some(false), None, Some(true)]
     );
-    assert!(
-        executor
-            .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
-            .is_err()
-    );
+    assert_eq!(select_true(result).unwrap(), vec![3]);
     assert_eq!(
-        executor
-            .select(&ExpressionInput::new(batch.columns(), batch.num_rows()))
-            .unwrap(),
+        select_true(evaluation.evaluate(&executor).unwrap()).unwrap(),
         vec![3]
     );
 }
@@ -740,26 +1337,50 @@ fn cast_modes_result_metadata_and_empty_inputs() {
     let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
     let batch =
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["42", "bad"]))]).unwrap();
-    let strict = CastExpression::new(reference(0), DataType::Int64, CastMode::Strict).into_ref();
-    let try_cast = CastExpression::new(reference(0), DataType::Int64, CastMode::Try).into_ref();
-    let mut executor = ExpressionExecutor::try_new(vec![try_cast], batch.schema()).unwrap();
-    assert!(executor.results().next().unwrap().nullable);
+    // The declaring host says a TRY cast may introduce NULLs; a strict cast of a
+    // non-nullable column does not.
+    let strict = CastExpression::new(
+        column(0, DataType::Utf8, false),
+        DataType::Int64,
+        CastMode::Strict,
+        false,
+    )
+    .into_ref();
+    let try_cast = CastExpression::new(
+        column(0, DataType::Utf8, false),
+        DataType::Int64,
+        CastMode::Try,
+        true,
+    )
+    .into_ref();
+    assert!(try_cast.result_type().is_nullable());
+    let executor = ScalarExpressionEvaluation::try_new(try_cast).unwrap();
     assert_eq!(
         ints(
             &executor
-                .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
+                .evaluate(&ScalarExpressionExecutor::new(
+                    batch.columns(),
+                    batch.num_rows()
+                ))
                 .unwrap()
-                .remove(0)
         ),
         vec![Some(42), None]
     );
     assert!(
-        ExpressionExecutor::try_new(vec![strict], batch.schema())
+        ScalarExpressionEvaluation::try_new(strict)
             .unwrap()
-            .evaluate_arrays(&ExpressionInput::new(batch.columns(), batch.num_rows()))
+            .evaluate(&ScalarExpressionExecutor::new(
+                batch.columns(),
+                batch.num_rows()
+            ))
             .is_err()
     );
-    let error_expr = call(FunctionKind::Divide, vec![int(1), int(0)]);
+    let error_expr = call(
+        FunctionKind::Divide,
+        vec![int(1), int(0)],
+        DataType::Int64,
+        false,
+    );
     let empty = RecordBatch::new_empty(batch.schema());
     assert_eq!(evaluate(error_expr, &empty).len(), 0);
     // Zero-column batches still have an explicit cardinality.
@@ -772,29 +1393,101 @@ fn cast_modes_result_metadata_and_empty_inputs() {
     assert_eq!(ints(&evaluate(int(5), &input)), vec![Some(5); 3]);
 }
 
+// The descriptions carry host-supplied metadata, so the library performs no
+// type inference and no plan-time validation of its own. Only kernel selection
+// and executor construction can still reject a description here; every other
+// host mistake is deferred to execution.
 #[test]
-fn invalid_descriptions_are_rejected_without_rebinding() {
-    let batch = integers(vec![Some(1)]);
+fn plan_time_validation_is_limited_to_kernel_selection() {
+    let batch = integers(vec![Some(1), None]);
+    let columns = batch.columns();
+    let num_rows = batch.num_rows();
     let i32_constant = ConstantExpression::try_new(Arc::new(Int32Array::from(vec![1])))
         .unwrap()
         .into_ref();
-    for expr in [
-        reference(1),
-        call(FunctionKind::Add, vec![reference(0)]),
-        call(FunctionKind::Add, vec![reference(0), i32_constant]),
-        NotExpression::new(reference(0)).into_ref(),
-        CoalesceExpression::new(vec![]).into_ref(),
-        CaseExpression::new(vec![(int(1), int(2))], int(3)).into_ref(),
-        CaseExpression::new(
-            vec![(ConstantExpression::boolean(Some(true)).into_ref(), int(2))],
-            ConstantExpression::string(Some("bad")).into_ref(),
-        )
-        .into_ref(),
-    ] {
-        assert!(matches!(
-            ExpressionExecutor::try_new(vec![expr], batch.schema()),
-            Err(Error::InvalidPlan(_))
-        ));
-    }
+
+    // `Add` has no unary kernel, so the unary entry point rejects the
+    // description while selecting a kernel.
+    assert!(matches!(
+        call(FunctionKind::Add, vec![reference(0)], DataType::Int64, true).to_evaluation(),
+        Err(Error::InvalidPlan(_))
+    ));
+    // The binary entry point likewise rejects a unary-only kind.
+    let binary_is_null = FunctionExpression::binary(
+        FunctionKind::IsNull,
+        reference(0),
+        reference(0),
+        DataType::Boolean,
+        false,
+    );
+    assert!(matches!(
+        binary_is_null.to_evaluation(),
+        Err(Error::InvalidPlan(_))
+    ));
+
+    // COALESCE has no value without at least one argument.
+    assert!(matches!(
+        CoalesceExpression::new(vec![], DataType::Int64, true).to_evaluation(),
+        Err(Error::InvalidPlan(message)) if message.contains("coalesce")
+    ));
+
+    // A constant still has to hold exactly one value.
     assert!(ConstantExpression::try_new(Arc::new(Int64Array::from(vec![1, 2]))).is_err());
+
+    // An out-of-range column index is not checked while binding; the library
+    // only reads the column when the executor runs.
+    let out_of_range =
+        ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, true)).into_ref();
+    assert!(ScalarExpressionEvaluation::try_new(out_of_range).is_ok());
+
+    // NOT of a non-Boolean argument is accepted at plan time and fails when the
+    // executor downcasts the value.
+    let not_integer = NotExpression::new(reference(0), true).into_ref();
+    let executor = ScalarExpressionEvaluation::try_new(not_integer).unwrap();
+    assert!(matches!(
+        executor.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)),
+        Err(Error::Execution(_))
+    ));
+
+    // Mismatched operand types are accepted at plan time; the typed kernel
+    // reports the mismatch when it downcasts.
+    let mismatched_operands = call(
+        FunctionKind::Add,
+        vec![reference(0), i32_constant],
+        DataType::Int64,
+        true,
+    );
+    let executor = ScalarExpressionEvaluation::try_new(mismatched_operands).unwrap();
+    assert!(matches!(
+        executor.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)),
+        Err(Error::Execution(_))
+    ));
+
+    // A non-Boolean CASE condition is likewise not validated up front.
+    let non_boolean_condition =
+        CaseExpression::new(vec![(int(1), int(2))], int(3), DataType::Int64, false).into_ref();
+    let executor = ScalarExpressionEvaluation::try_new(non_boolean_condition).unwrap();
+    assert!(matches!(
+        executor.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)),
+        Err(Error::Execution(_))
+    ));
+
+    // A branch whose type disagrees with the declared result type only fails
+    // when both pieces are actually interleaved.
+    let mixed_branches = CaseExpression::new(
+        vec![(
+            predicate(FunctionKind::IsNotNull, vec![reference(0)], false),
+            int(2),
+        )],
+        ConstantExpression::string(Some("bad")).into_ref(),
+        DataType::Int64,
+        true,
+    )
+    .into_ref();
+    let executor = ScalarExpressionEvaluation::try_new(mixed_branches).unwrap();
+    assert!(
+        executor
+            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .is_err()
+    );
 }

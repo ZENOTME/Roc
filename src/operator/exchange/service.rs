@@ -30,7 +30,8 @@ pub trait ExchangeHandle: Send + Sync + 'static {
 }
 
 pub trait ExchangeConsumer: Send + 'static {
-    fn next(&mut self) -> BoxFuture<'_, Option<RecordBatch>>;
+    /// Returns the next batch, normal end of input, or a read failure.
+    fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>>;
 }
 
 pub trait ExchangeSink: Send + 'static {

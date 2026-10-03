@@ -13,102 +13,139 @@ a Project that multiplies the aggregate's output column by three.
 
 `expr/scalar/` contains `ScalarExpression` and one file per node: reference,
 constant, function, cast, conjunction, not, case, and coalesce. Nodes are static
-descriptions with private fields and public constructors/accessors. They carry no
-inferred result metadata or mutable evaluation state. Constants carry their own
-value type and casts carry their target type as part of the operation itself.
-`expr/agg/` separately describes bound aggregate calls. There is no umbrella
-expression type combining scalar and aggregate expressions.
+descriptions with private fields and public constructors/accessors. Every node
+carries the result type its host resolved: `data_type` and `nullable` are
+constructor arguments. Constants carry the type of their literal and a cast's
+target type is its result type. The library performs no type inference, name
+resolution, coercion, or plan validation: the host has already derived types in
+its own logical bind step. Descriptions hold no mutable evaluation state.
+`expr/agg/` separately describes bound aggregate calls with the same convention.
+There is no umbrella expression type combining scalar and aggregate expressions.
 
-`expr::scalar::executor::ScalarExpressionExecutor` binds one expression against a
-host-supplied Arrow schema; `ExpressionExecutor` binds a list of expressions.
-`ScalarExpressionExecutor` is a dispatch enum. Each expression file implements
-its concrete executor: Reference, Constant, Cast, Conjunction, Not, Case, and
-Coalesce. Function expressions choose UnaryFunction or BinaryFunction executors.
-Concrete executors can be created and used independently through `try_new()` or
-the expression's `create_executor()`, and converted to the dispatch enum with
-`Into`. They own their kernels, child executors, and worker-local scratch space.
-Binding returns output metadata for the outer `ExpressionExecutor` collection;
-the dispatch enum stores no `ExpressionResult` or scalar flag.
-Function evaluation uses `UnaryEvalFn = fn(&ArrayRef) -> Result<ArrayRef>` or
-`BinaryEvalFn = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>`.
-Initialization chooses a function pointer for the operation, primitive numeric
-type, and broadcast direction. Evaluation traverses the bound executor tree
-without interpreting the expression description. Function executors pass child
-results directly to the kernel, without an argument vector or intermediate buffer.
-Expression Arcs can be shared, while each worker has its own executor.
+`ScalarExpressionExecutor` provides shared Arrow columns and an explicit row
+count. Create it with `ScalarExpressionExecutor::new(columns, num_rows)`, or
+replace its input with `set_input(columns, num_rows)`. It clones only ArrayRef
+handles and needs no RecordBatch schema. The row count is separate because
+zero-column inputs can still contain rows, such as constant-only projections.
+Callers provide columns with lengths matching the row count; physical operators
+obtain both from their Arrow RecordBatch.
 
-Evaluation accepts `ExpressionInput::new(&columns, num_rows)`, without a
-RecordBatch. Optional `with_selection(&rows)` addresses the original columns;
-array outputs follow selection order and preserve duplicates. The caller supplies
-columns matching the bound layout, consistent row counts, and valid selection
-indices. Evaluation performs no input or output validation; typed kernels
-downcast their arguments directly. `evaluate()`
-returns `ArrayRef`: scalar nodes hold one value, array nodes hold the selected row
-count. The executor's `is_scalar()` determines broadcast semantics; an array of
-length one remains an array. CASE and COALESCE conservatively always return
-arrays. `evaluate_array()` on a single executor or `evaluate_arrays()` on a list
-materializes scalar results when an operator needs full columns. Empty inputs
-always return empty arrays and skip kernels, including constant expressions that
-would otherwise fail. Zero-column inputs retain their explicit row counts.
-
-For example, a host can execute a binary function directly:
+`expression.to_evaluation()` builds an immutable `ScalarExpressionEvaluation`.
+The enum dispatches to concrete evaluations containing bound operations, child
+expressions, and the static type needed for empty results. They retain no output
+arrays. Every output has one entry per input row, in the same order.
+`evaluate` is public; each concrete evaluation has a private `eval`:
 
 ```rust
-let expression = FunctionExpression::new(
+pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef>;
+fn eval(&self, executor: &ScalarExpressionExecutor,
+    input: &[&ArrayRef]) -> Result<ArrayRef>;
+```
+
+`evaluate` recursively obtains child arrays and calls `eval` with references to
+those arrays. Unary nodes consume one result and binary nodes consume two.
+Reference and Constant have no child inputs. CASE and COALESCE additionally pass
+their local row mapping to `eval` to restore the original order.
+Reference clones the shared input column handle; computed arrays are returned
+by value without copying their buffers. Callers own outputs independently of
+later evaluations or the evaluation's lifetime. There is no `result()` accessor.
+Every call recomputes the tree. Once a parent consumes its child arrays, those
+intermediates are released unless another owner retains them. CASE and COALESCE
+keep temporary branch arrays and row mappings within that call. Their scratch
+vectors are allocated per call; the existing Arrow kernels allocate output
+buffers rather than reusing previously returned arrays.
+
+Filters retain one predicate evaluation. Projection expressions and aggregate
+arguments use `Vec<ScalarExpressionEvaluation>`, sharing one input executor per
+batch. Result types come from the static descriptions. Descriptions and immutable
+evaluations can be shared across workers. Kernel binding uses the host-declared
+operand types without an input schema or type inference.
+Empty inputs return empty arrays and skip unused children and function kernels.
+Constants expand to the current logical row count. Evaluating against an unbound
+executor returns an execution error. Arrow validates the batch's internal shape;
+expression layout and operand types remain the host's responsibility.
+
+For example:
+
+```rust
+let expression = FunctionExpression::binary(
     FunctionKind::Add,
-    vec![
-        ReferenceExpression::new(0).into_ref(),
-        ConstantExpression::int64(Some(3)).into_ref(),
-    ],
+    ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true)).into_ref(),
+    ConstantExpression::int64(Some(3)).into_ref(),
+    DataType::Int64,
+    true,
 );
-let mut executor = BinaryFunctionExpressionExecutor::try_new(&expression, schema)?;
-let output = executor.evaluate(&ExpressionInput::new(&columns, num_rows))?;
+let executor = ScalarExpressionExecutor::new(batch.columns(), batch.num_rows());
+let evaluation = expression.to_evaluation()?;
+let output = evaluation.evaluate(&executor)?;
 ```
 
 Scalar built-ins include arithmetic, comparisons, null tests, null-safe
 comparisons, strict/try casts, Boolean operations, CASE, and COALESCE. Numeric
 arithmetic initially supports Arrow integer types up to 64 bits and Float32/64,
-with matching argument types and checked integer overflow. Other type signatures
-are rejected during executor initialization. Comparison semantics follow the
-corresponding Arrow kernels, including floating-point ordering. Explicit casts
+with matching argument types and checked integer overflow. Which signatures are
+admissible is the host's decision; a declared type or operation pair without a
+kernel fails evaluation construction, and everything else is host error. Comparison
+semantics follow the corresponding Arrow kernels, including floating-point
+ordering. Explicit casts
 use Arrow's conversion behavior; TRY_CAST returns NULL for supported value
-conversion failures, but unsupported type conversions remain errors.
+conversion failures, while unsupported type conversions surface as execution
+errors, because a cast description already names its target type.
 
-Boolean value evaluation uses three-valued logic. Predicate selection accepts
-only TRUE; AND/OR predicates evaluate children in supplied order on remaining
-candidate rows. Value evaluation of AND/OR evaluates all children. CASE and
-COALESCE evaluate only the required rows, then restore the original order.
-`select()` returns original row indices in selection order. Selected references
-use Arrow take on the referenced columns and may allocate; executor state does
-not imply reusable output buffers for every Arrow kernel. Casts and comparisons
-for non-numeric types currently retain Arrow's internal type dispatch. The
+Boolean evaluation uses three-valued logic. AND/OR evaluate all children and
+produce a Boolean array aligned with the input batch. Evaluations have no
+`select` method, and the executor has no selection state or row-selection API.
+Filters and aggregate filters use the separate `expr::predicate::select_true`
+to convert that result to row positions, accepting only valid TRUE.
+CASE and COALESCE evaluate only required branches: they gather branch columns
+with Arrow `take`, pass the branch row count explicitly, and
+restore the original row order with Arrow `interleave`. Their private `eval`
+merges the prepared branch arrays. These conditional expressions protect unused
+operations such as division by zero; AND/OR do not provide that protection.
+Aggregate filters use Arrow `filter_record_batch` and keep group IDs in matching
+order, including zero-column batches. Gather and kernel results may allocate;
+executor state does not imply reusable output buffers for every Arrow kernel.
+Casts and comparisons for non-numeric types currently retain Arrow's internal
+type dispatch. The
 current built-ins are deterministic and need no function-local mutable state;
 volatile functions and user-defined function state are not exposed yet.
 
 ## Operator parameters
 
-- `FilterOperator::new(predicate)` accepts a `ScalarExprRef`. Its worker
-  initializes the expression executor against the first batch schema, requires a
-  Boolean result, and preserves the input schema.
-- `ProjectOperator::new(projection)` accepts a `Projection`: a host-supplied input
-  schema and named scalar expressions. Its worker owns `ProjectionExecutor`,
-  including the derived output schema. `Projection::output_schema()` resolves
-  metadata through executor initialization without storing it in expressions.
+- `FilterOperator::new(predicate)` accepts a `ScalarExprRef`. Its worker builds the
+  predicate evaluation once in `new_executor()` from the description, without
+  consulting any batch schema, and preserves the input schema. The host must
+  declare a Boolean predicate.
+- `ProjectOperator::new(projection)` accepts a `Projection`: named scalar
+  expressions whose descriptions already carry their result type. Its worker owns
+  `ProjectionExecutor`, including the derived output schema.
+  `Projection::output_schema()` assembles fields from the descriptions, with no
+  executor and no fallible step. `Projection::from_indices(schema, indices)` is a
+  convenience that reads column types, nullability, names, and metadata from the
+  schema; `Projection::new(expressions)` leaves metadata empty unless
+  `with_metadata(...)` supplies it.
 - `AggregateOperator::try_new(groups, aggregates)` accepts a grouping `Projection`
-  and `Arc<AggregateExpression>` values, all bound to the same input layout.
-  An optional `with_alias(...)` names each output field; otherwise its aggregate
-  function name is used.
+  and `Arc<AggregateExpression>` values whose descriptions carry their own result
+  metadata. An optional `with_alias(...)` names each output field; otherwise its
+  aggregate function name is used.
   Workers evaluate group keys and aggregate arguments with scalar executors and
   maintain separate aggregate states. Output consists of group fields followed by
-  aggregate fields; input schema metadata is retained. `output_schema()` returns
-  a fallible, executor-derived schema.
+  aggregate fields; grouping metadata is retained. `output_schema()` reads the
+  descriptions and is infallible.
 
 Built-in aggregates are COUNT(*), COUNT(expr), COUNT(DISTINCT expr), SUM, AVG,
 MIN, MAX, and COVAR_POP. FILTER runs before argument evaluation. DISTINCT is
-currently supported only for COUNT(expr). Aggregate ORDER BY is not exposed.
-Signed integer SUM returns Int64, unsigned SUM returns UInt64, and floating SUM
-returns Float64. AVG and COVAR_POP return Float64; MIN/MAX preserve the input type.
-Numeric SUM/AVG/COVAR_POP accept the same integer/float types listed above.
+currently supported only for COUNT(expr); other DISTINCT aggregates are rejected
+when the executor is built rather than silently evaluated without it. Aggregate
+ORDER BY is not exposed. Signed integer SUM returns Int64, unsigned SUM returns
+UInt64, and floating SUM returns Float64. AVG and COVAR_POP return Float64;
+MIN/MAX preserve the input type. Those result types are declared by the host, which
+is also responsible for supplying numeric SUM/AVG/COVAR_POP arguments and the
+argument counts the accumulators consume; nothing is checked up front. A missing
+argument surfaces as an execution error when data flows through the accumulator,
+and a non-numeric SUM argument follows Arrow's safe-cast rules, so unparseable
+values become NULL. MIN/MAX and COUNT(DISTINCT) need an argument type to build
+their row encoder, so those two reject a description without arguments.
 MIN/MAX and DISTINCT use Arrow row encoding for supported input types. Integer
 sum/count overflow is an error. Floating accumulation uses ordinary floating-point
 arithmetic; merge order can affect rounding.
@@ -122,7 +159,7 @@ returns no rows. Grouping without aggregate functions is supported.
 For example, a host can construct a projection over an existing child node:
 
 ```rust
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, SchemaRef};
 use roc::{
     expr::scalar::{ReferenceExpression, ConstantExpression,
                   FunctionExpression, FunctionKind},
@@ -130,17 +167,18 @@ use roc::{
 };
 
 fn project_plus_one(child: OperatorTreeNode, input_schema: SchemaRef) -> OperatorTreeNode {
-    // The host has established that input column 0 is Int64.
-    let expression = FunctionExpression::new(
+    // The host resolves column 0 from its own schema, as its logical bind step did.
+    let field = input_schema.field(0);
+    let expression = FunctionExpression::binary(
         FunctionKind::Add,
-        vec![
-            ReferenceExpression::new(0).into_ref(),
-            ConstantExpression::int64(Some(1)).into_ref(),
-        ],
+        ReferenceExpression::new(0, field.data_type().clone(), field.is_nullable()).into_ref(),
+        ConstantExpression::int64(Some(1)).into_ref(),
+        DataType::Int64,
+        true,
     ).into_ref();
-    let projection = Projection::new(input_schema, vec![
+    let projection = Projection::new(vec![
         ProjectionExpression::new(expression, "incremented"),
-    ]);
+    ]).with_metadata(input_schema.metadata().clone());
     OperatorTreeNode::new(ProjectOperator::new(projection), vec![child])
 }
 ```
@@ -161,6 +199,8 @@ senders to let receivers drain and finish; drop all receivers to reject sends.
 Channel endpoints do not expose an explicit `close()` method.
 `ExchangeSourceOperator` holds an exchange ID and service; the sink retains a
 schema because endpoints must also be initialized for empty input.
+`ExchangeConsumer::next()` returns `Result<Option<RecordBatch>>`: `Ok(None)` ends
+the input normally, and read errors propagate to the execution caller.
 
 `PipelineGraphExecutor` creates a `(Shutdown, ShutdownGuard)` pair.
 Call `executor.shutdown()` before starting execution to obtain the caller's

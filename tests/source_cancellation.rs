@@ -104,7 +104,7 @@ impl ScanConsumer for Consumer {
 }
 
 impl ExchangeConsumer for Consumer {
-    fn next(&mut self) -> BoxFuture<'_, Option<RecordBatch>> {
+    fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
         Box::pin(std::future::pending())
     }
 }

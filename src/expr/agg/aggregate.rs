@@ -1,4 +1,6 @@
+use crate::expr::ExpressionResultType;
 use crate::expr::scalar::ScalarExprRef;
+use arrow::datatypes::DataType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateFunction {
@@ -23,24 +25,38 @@ impl AggregateFunction {
     }
 }
 
-/// Static aggregate call. COUNT with no arguments means COUNT(*).
+/// An aggregate call such as COUNT, SUM, or MIN, with optional DISTINCT and
+/// FILTER. COUNT without arguments is COUNT(*).
 #[derive(Clone, Debug)]
 pub struct AggregateExpression {
     alias: Option<String>,
     function: AggregateFunction,
     arguments: Vec<ScalarExprRef>,
+    result_type: ExpressionResultType,
     distinct: bool,
     filter: Option<ScalarExprRef>,
 }
 impl AggregateExpression {
-    pub fn new(function: AggregateFunction, arguments: Vec<ScalarExprRef>) -> Self {
+    pub fn new(
+        function: AggregateFunction,
+        arguments: Vec<ScalarExprRef>,
+        data_type: DataType,
+        nullable: bool,
+    ) -> Self {
         Self {
             alias: None,
             function,
             arguments,
+            result_type: ExpressionResultType {
+                data_type,
+                nullable,
+            },
             distinct: false,
             filter: None,
         }
+    }
+    pub fn result_type(&self) -> &ExpressionResultType {
+        &self.result_type
     }
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
         self.alias = Some(alias.into());

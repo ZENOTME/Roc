@@ -25,6 +25,7 @@ use roc::{
 };
 use roc::{
     expr::{
+        ExpressionResultType,
         agg::{AggregateExpression, AggregateFunction},
         scalar::{
             ConstantExpression, FunctionExpression, FunctionKind as ExprOp, ReferenceExpression,
@@ -33,15 +34,26 @@ use roc::{
     operator::{Projection, ProjectionExpression as ProjectionExpr},
 };
 
-fn column(index: usize) -> ScalarExprRef {
-    ReferenceExpression::new(index).into_ref()
+fn reference(index: usize, data_type: DataType, nullable: bool) -> ScalarExprRef {
+    ReferenceExpression::new(index, ExpressionResultType::new(data_type, nullable)).into_ref()
 }
+/// Input columns in this file are Int64 and nullable unless a test needs an
+/// explicitly non-nullable batch.
+fn column(index: usize) -> ScalarExprRef {
+    reference(index, DataType::Int64, true)
+}
+/// Comparisons yield Boolean; arithmetic yields the left operand's type. The
+/// result is nullable whenever either operand is.
 fn binary(left: ScalarExprRef, op: ExprOp, right: i64) -> ScalarExprRef {
-    FunctionExpression::new(
-        op,
-        vec![left, ConstantExpression::int64(Some(right)).into_ref()],
-    )
-    .into_ref()
+    let right = ConstantExpression::int64(Some(right)).into_ref();
+    let nullable = left.result_type().is_nullable() || right.result_type().is_nullable();
+    let data_type = match op {
+        ExprOp::Add | ExprOp::Subtract | ExprOp::Multiply | ExprOp::Divide | ExprOp::Remainder => {
+            left.result_type().data_type().clone()
+        }
+        _ => DataType::Boolean,
+    };
+    FunctionExpression::binary(op, left, right, data_type, nullable).into_ref()
 }
 fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
     let exec = FilterExec::new(predicate);
@@ -203,17 +215,15 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         FilterOperator::new(binary(column(1), ExprOp::LessThan, 5)),
         vec![reordered],
     );
-    let projector = Projection::new(
-        scan_output.clone(),
-        vec![
-            ProjectionExpr::new(
-                ConstantExpression::string(Some("constant")).into_ref(),
-                "label",
-            ),
-            ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
-        ],
-    );
-    let projected_schema = projector.output_schema().unwrap();
+    let projector = Projection::new(vec![
+        ProjectionExpr::new(
+            ConstantExpression::string(Some("constant")).into_ref(),
+            "label",
+        ),
+        ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
+    ])
+    .with_metadata(scan_output.metadata().clone());
+    let projected_schema = projector.output_schema();
     let project = OperatorTreeNode::new(ProjectOperator::new(projector), vec![filter]);
     let output_schema = Arc::new(
         Schema::new(vec![
@@ -224,18 +234,18 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         ])
         .with_metadata([("owner".to_owned(), "host".to_owned())].into()),
     );
-    let groups = Projection::new(
-        projected_schema.clone(),
-        vec![ProjectionExpr::new(
-            ConstantExpression::string(Some("all")).into_ref(),
-            "category",
-        )],
-    );
+    let groups = Projection::new(vec![ProjectionExpr::new(
+        ConstantExpression::string(Some("all")).into_ref(),
+        "category",
+    )])
+    .with_metadata(projected_schema.metadata().clone());
     let aggregates = vec![
         Arc::new(
             AggregateExpression::new(
                 AggregateFunction::Sum,
                 vec![binary(column(1), ExprOp::Add, 1)],
+                DataType::Int64,
+                true,
             )
             .with_alias("total"),
         ),
@@ -243,6 +253,8 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
             AggregateExpression::new(
                 AggregateFunction::Count,
                 vec![ConstantExpression::int64(Some(1)).into_ref()],
+                DataType::Int64,
+                false,
             )
             .with_alias("rows"),
         ),
@@ -250,6 +262,8 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
             AggregateExpression::new(
                 AggregateFunction::Count,
                 vec![ConstantExpression::int64(None).into_ref()],
+                DataType::Int64,
+                false,
             )
             .with_alias("null_count"),
         ),
@@ -309,14 +323,11 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         assert_eq!(result.num_rows(), rows);
         assert_eq!(result.schema(), input);
     }
-    let projector = Projection::new(
-        input.clone(),
-        vec![
-            ProjectionExpr::new(column(0), "renamed"),
-            ProjectionExpr::new(ConstantExpression::int64(Some(7)).into_ref(), "constant"),
-            ProjectionExpr::new(ConstantExpression::int64(None).into_ref(), "null"),
-        ],
-    );
+    let projector = Projection::new(vec![
+        ProjectionExpr::new(column(0), "renamed"),
+        ProjectionExpr::new(ConstantExpression::int64(Some(7)).into_ref(), "constant"),
+        ProjectionExpr::new(ConstantExpression::int64(None).into_ref(), "null"),
+    ]);
     let output = Arc::new(Schema::new(vec![
         Field::new("renamed", DataType::Int64, true),
         Field::new("constant", DataType::Int64, false),
@@ -341,7 +352,7 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         completed_batch(executor.execute(&batch.slice(0, 0)).unwrap()).num_rows(),
         0
     );
-    let empty = Projection::new(input.clone(), Vec::<ProjectionExpr>::new());
+    let empty = Projection::new(Vec::<ProjectionExpr>::new());
     let zero_columns = completed_batch(project_executor(empty).execute(&batch).unwrap());
     assert_eq!(
         (zero_columns.num_rows(), zero_columns.num_columns()),
@@ -354,13 +365,10 @@ fn preserves_arrow_kernel_errors() {
     let input = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
     let batch =
         RecordBatch::try_new(Arc::new(input), vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    let projector = Projection::new(
-        batch.schema().clone(),
-        vec![ProjectionExpr::new(
-            binary(column(0), ExprOp::Divide, 0),
-            "x",
-        )],
-    );
+    let projector = Projection::new(vec![ProjectionExpr::new(
+        binary(column(0), ExprOp::Divide, 0),
+        "x",
+    )]);
     let error = project_executor(projector).execute(&batch).unwrap_err();
     assert!(matches!(error, roc::error::Error::Arrow(_)));
 }
@@ -369,7 +377,10 @@ fn preserves_arrow_kernel_errors() {
 fn filter_rejects_non_boolean_results_without_an_input_schema() {
     let input = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
     let batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    for predicate in [column(0), ConstantExpression::int64(Some(1)).into_ref()] {
+    for predicate in [
+        reference(0, DataType::Int64, false),
+        ConstantExpression::int64(Some(1)).into_ref(),
+    ] {
         assert!(matches!(
             filter_executor(predicate).execute(&batch),
             Err(roc::error::Error::Execution(_))
@@ -418,7 +429,7 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
 }
 
 struct MemoryExchange {
-    input: Option<RecordBatch>,
+    input: Result<Option<RecordBatch>>,
     output: Collector,
     schema: arrow::datatypes::SchemaRef,
     created_sinks: std::sync::atomic::AtomicUsize,
@@ -431,7 +442,7 @@ impl roc::operator::ExchangeService for MemoryExchange {
         _shutdown_guard: &ShutdownGuard,
     ) -> Result<Arc<dyn roc::operator::ExchangeHandle>> {
         assert_eq!(exchange, 7);
-        Ok(Arc::new(MemoryScan(Arc::new(Mutex::new(
+        Ok(Arc::new(MemoryExchangeInput(Arc::new(Mutex::new(
             self.input.clone(),
         )))))
     }
@@ -449,7 +460,9 @@ impl roc::operator::ExchangeService for MemoryExchange {
     }
 }
 
-impl roc::operator::ExchangeHandle for MemoryScan {
+struct MemoryExchangeInput(Arc<Mutex<Result<Option<RecordBatch>>>>);
+
+impl roc::operator::ExchangeHandle for MemoryExchangeInput {
     fn consumer(&self) -> Box<dyn roc::operator::ExchangeConsumer> {
         Box::new(Self(self.0.clone()))
     }
@@ -458,9 +471,14 @@ impl roc::operator::ExchangeHandle for MemoryScan {
     }
 }
 
-impl roc::operator::ExchangeConsumer for MemoryScan {
-    fn next(&mut self) -> BoxFuture<'_, Option<RecordBatch>> {
-        Box::pin(async { self.0.lock().unwrap().take() })
+impl roc::operator::ExchangeConsumer for MemoryExchangeInput {
+    fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
+        Box::pin(async {
+            match &mut *self.0.lock().unwrap() {
+                Ok(batch) => Ok(batch.take()),
+                Err(error) => Err(error.clone()),
+            }
+        })
     }
 }
 
@@ -485,7 +503,7 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
         RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
     for input in [Some(batch), None] {
         let service = Arc::new(MemoryExchange {
-            input: input.clone(),
+            input: Ok(input.clone()),
             output: Collector::default(),
             schema: schema.clone(),
             created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -512,4 +530,31 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
             input.into_iter().collect::<Vec<_>>()
         );
     }
+}
+
+#[tokio::test]
+async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
+    let read_error = Arc::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionReset,
+        "exchange connection reset",
+    ));
+    let collector = Collector::default();
+    let service = Arc::new(MemoryExchange {
+        input: Err(roc::error::Error::Io(read_error.clone())),
+        output: collector.clone(),
+        schema: Arc::new(Schema::empty()),
+        created_sinks: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let source = OperatorTreeNode::new(
+        roc::operator::ExchangeSourceOperator::new(7, service),
+        vec![],
+    );
+    let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![source]));
+    let error = PipelineGraphExecutor::new(build_pipeline_graph(tree).unwrap())
+        .with_task_executor(TestExecutor)
+        .execute()
+        .await
+        .unwrap_err();
+    assert!(matches!(error, roc::error::Error::Io(actual) if Arc::ptr_eq(&actual, &read_error)));
+    assert!(collector.0.lock().unwrap().is_empty());
 }

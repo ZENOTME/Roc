@@ -1,5 +1,6 @@
 //! Projection operator descriptor.
 use super::Operator;
+use crate::expr::ExpressionResultType;
 use crate::expr::scalar::{ReferenceExpression, ScalarExprRef};
 use crate::{
     error::{Error, Result},
@@ -7,7 +8,8 @@ use crate::{
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Field, Schema, SchemaRef};
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub struct ProjectionExpression {
@@ -30,17 +32,23 @@ impl ProjectionExpression {
     }
 }
 
+/// Fully specified projection. Expression descriptions carry their own result
+/// metadata, so no input schema is retained; the host supplies output metadata.
 #[derive(Clone, Debug)]
 pub struct Projection {
-    input_schema: SchemaRef,
     expressions: Vec<ProjectionExpression>,
+    metadata: HashMap<String, String>,
 }
 impl Projection {
-    pub fn new(input_schema: SchemaRef, expressions: Vec<ProjectionExpression>) -> Self {
+    pub fn new(expressions: Vec<ProjectionExpression>) -> Self {
         Self {
-            input_schema,
             expressions,
+            metadata: HashMap::new(),
         }
+    }
+    pub fn with_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
     }
     pub fn from_indices(input_schema: SchemaRef, indices: &[usize]) -> Result<Self> {
         let expressions = indices
@@ -50,24 +58,37 @@ impl Projection {
                     Error::InvalidPlan(format!("column index {index} out of bounds"))
                 })?;
                 Ok(ProjectionExpression::new(
-                    ReferenceExpression::new(index).into_ref(),
+                    ReferenceExpression::new(
+                        index,
+                        ExpressionResultType::new(field.data_type().clone(), field.is_nullable()),
+                    )
+                    .into_ref(),
                     field.name(),
                 ))
             })
             .collect::<Result<_>>()?;
-        Ok(Self::new(input_schema, expressions))
-    }
-    pub fn input_schema(&self) -> &SchemaRef {
-        &self.input_schema
+        Ok(Self {
+            expressions,
+            metadata: input_schema.metadata().clone(),
+        })
     }
     pub fn expressions(&self) -> &[ProjectionExpression] {
         &self.expressions
     }
-    /// Resolve result metadata through the executor; it is not stored in the description.
-    pub fn output_schema(&self) -> Result<SchemaRef> {
-        Ok(crate::exec::ProjectionExecutor::try_new(self.clone())?
-            .output_schema()
-            .clone())
+    pub fn output_schema(&self) -> SchemaRef {
+        let fields = self
+            .expressions
+            .iter()
+            .map(|e| {
+                let result_type = e.expression().result_type();
+                Field::new(
+                    e.name(),
+                    result_type.data_type().clone(),
+                    result_type.is_nullable(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new_with_metadata(fields, self.metadata.clone()))
     }
 }
 

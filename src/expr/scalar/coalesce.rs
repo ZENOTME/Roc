@@ -1,107 +1,157 @@
+use super::ExpressionResultType;
 use super::ScalarExprRef;
-use super::{
-    BindScalarExpression, BranchBuffers, ExpressionInput, ExpressionResult,
-    ScalarExpressionExecutor, materialize, require_same_type, selected_input,
-};
+use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use crate::error::{Error, Result};
-use arrow::{array::ArrayRef, datatypes::SchemaRef};
+use arrow::{
+    array::{ArrayRef, UInt64Array, new_empty_array},
+    compute::{kernels::interleave::interleave, take},
+    datatypes::DataType,
+};
+
+/// An expression that returns the first non-NULL argument.
 #[derive(Clone, Debug)]
 pub struct CoalesceExpression {
     arguments: Vec<ScalarExprRef>,
+    result_type: ExpressionResultType,
 }
+
+#[derive(Debug)]
+pub struct CoalesceExpressionEvaluation {
+    data_type: DataType,
+    arguments: Vec<ScalarExpressionEvaluation>,
+}
+
 impl CoalesceExpression {
-    pub fn new(arguments: Vec<ScalarExprRef>) -> Self {
-        Self { arguments }
+    pub fn new(arguments: Vec<ScalarExprRef>, data_type: DataType, nullable: bool) -> Self {
+        Self {
+            arguments,
+            result_type: ExpressionResultType {
+                data_type,
+                nullable,
+            },
+        }
     }
     pub fn arguments(&self) -> &[ScalarExprRef] {
         &self.arguments
     }
-}
-
-#[derive(Debug)]
-pub struct CoalesceExpressionExecutor {
-    arguments: Vec<ScalarExpressionExecutor>,
-    buffers: BranchBuffers,
-}
-impl BindScalarExpression for CoalesceExpressionExecutor {
-    type Expression = CoalesceExpression;
-    fn bind(expression: &Self::Expression, schema: &SchemaRef) -> Result<(Self, ExpressionResult)> {
-        let mut arguments = Vec::with_capacity(expression.arguments.len());
-        let mut results = Vec::with_capacity(expression.arguments.len());
-        for expression in &expression.arguments {
-            let (argument, result) = ScalarExpressionExecutor::bind(expression.as_ref(), schema)?;
-            arguments.push(argument);
-            results.push(result);
-        }
-        let mut result = results
-            .first()
-            .ok_or_else(|| Error::InvalidPlan("coalesce requires at least one argument".into()))?
-            .clone();
-        for argument in &results {
-            require_same_type(&result, argument)?;
-        }
-        result.nullable = results.iter().all(|r| r.nullable);
-        Ok((
-            Self {
-                arguments,
-                buffers: BranchBuffers::default(),
-            },
-            result,
-        ))
-    }
-}
-impl CoalesceExpressionExecutor {
-    pub fn try_new(expression: &CoalesceExpression, input_schema: SchemaRef) -> Result<Self> {
-        Self::bind(expression, &input_schema).map(|(executor, _)| executor)
-    }
-    pub fn evaluate_array(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        let value = self.evaluate(input)?;
-        super::materialize(value, self.is_scalar(), input.len())
+    pub fn result_type(&self) -> &ExpressionResultType {
+        &self.result_type
     }
 
-    pub fn is_scalar(&self) -> bool {
-        false
+    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+        Ok(ScalarExpressionEvaluation::Coalesce(self.bind()?))
     }
-    pub fn evaluate(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
-        if input.is_empty() {
-            return self.arguments[0].evaluate(input);
+
+    pub(super) fn bind(&self) -> Result<CoalesceExpressionEvaluation> {
+        // The executor indexes its first argument; COALESCE has no value without one.
+        if self.arguments.is_empty() {
+            return Err(Error::InvalidPlan(
+                "coalesce requires at least one argument".into(),
+            ));
         }
-        self.buffers.reset(input.len());
-        let result = self.evaluate_arguments(input);
-        self.buffers.pieces.clear();
-        result
+        let mut arguments = Vec::with_capacity(self.arguments.len());
+        for argument in &self.arguments {
+            arguments.push(argument.to_evaluation()?);
+        }
+        Ok(CoalesceExpressionEvaluation {
+            data_type: self.result_type.data_type.clone(),
+            arguments,
+        })
     }
-    fn evaluate_arguments(&mut self, input: &ExpressionInput<'_>) -> Result<ArrayRef> {
+}
+
+impl CoalesceExpressionEvaluation {
+    /// Evaluate required rows and combine branch outputs in input order.
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+        let num_rows = executor.num_rows()?;
+        if num_rows == 0 {
+            return self.eval(executor, &[], &[]);
+        }
+        let mut buffers = CoalesceBuffers::new(num_rows);
+        self.eval_arguments(executor, &mut buffers)?;
+        self.eval(
+            executor,
+            &buffers.pieces.iter().collect::<Vec<_>>(),
+            &buffers.mapping,
+        )
+    }
+    fn eval(
+        &self,
+        executor: &ScalarExpressionExecutor,
+        input: &[&ArrayRef],
+        mapping: &[(usize, usize)],
+    ) -> Result<ArrayRef> {
+        Ok(if executor.num_rows()? == 0 {
+            new_empty_array(&self.data_type)
+        } else {
+            interleave(
+                &input.iter().map(|value| value.as_ref()).collect::<Vec<_>>(),
+                mapping,
+            )?
+        })
+    }
+
+    fn eval_arguments(
+        &self,
+        executor: &ScalarExpressionExecutor,
+        buffers: &mut CoalesceBuffers,
+    ) -> Result<()> {
         let last = self.arguments.len() - 1;
-        let buffers = &mut self.buffers;
-        for (child_index, child) in self.arguments.iter_mut().enumerate() {
-            if buffers.selection.remaining.is_empty() {
+        for (child_index, child) in self.arguments.iter().enumerate() {
+            if buffers.remaining.is_empty() {
                 break;
             }
-            buffers.selection.map_rows(input);
-            let value = child.evaluate(&selected_input(input, &buffers.selection.rows))?;
-            let value = materialize(value, child.is_scalar(), buffers.selection.remaining.len())?;
+            let input = branch_columns(
+                executor.columns()?,
+                executor.num_rows()?,
+                &buffers.remaining,
+            )?;
+            let remaining = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
+            let value = child.evaluate(&remaining)?;
             let nulls = value.logical_nulls();
-            buffers.selection.next.clear();
-            for (i, position) in buffers.selection.remaining.drain(..).enumerate() {
+            buffers.next.clear();
+            for (i, position) in buffers.remaining.drain(..).enumerate() {
                 if child_index != last && nulls.as_ref().is_some_and(|n| n.is_null(i)) {
-                    buffers.selection.next.push(position);
+                    buffers.next.push(position);
                 } else {
                     buffers.mapping[position] = (buffers.pieces.len(), i);
                 }
             }
             buffers.pieces.push(value);
-            std::mem::swap(
-                &mut buffers.selection.remaining,
-                &mut buffers.selection.next,
-            );
+            std::mem::swap(&mut buffers.remaining, &mut buffers.next);
         }
-        buffers.finish()
+        Ok(())
     }
 }
 
-impl CoalesceExpression {
-    pub fn create_executor(&self, input_schema: SchemaRef) -> Result<CoalesceExpressionExecutor> {
-        CoalesceExpressionExecutor::try_new(self, input_schema)
+/// Branches evaluate compact columns. Their row count is rows.len(), even
+/// when there are no columns; the parent retains positions to restore order.
+fn branch_columns(columns: &[ArrayRef], num_rows: usize, rows: &[usize]) -> Result<Vec<ArrayRef>> {
+    if rows.len() == num_rows {
+        return Ok(columns.to_vec());
+    }
+    let indices = UInt64Array::from_iter_values(rows.iter().map(|&row| row as u64));
+    columns
+        .iter()
+        .map(|col| Ok(take(col.as_ref(), &indices, None)?))
+        .collect()
+}
+
+#[derive(Debug)]
+struct CoalesceBuffers {
+    remaining: Vec<usize>,
+    next: Vec<usize>,
+    pieces: Vec<ArrayRef>,
+    mapping: Vec<(usize, usize)>,
+}
+
+impl CoalesceBuffers {
+    fn new(len: usize) -> Self {
+        Self {
+            remaining: (0..len).collect(),
+            next: Vec::new(),
+            pieces: Vec::new(),
+            mapping: vec![(0, 0); len],
+        }
     }
 }

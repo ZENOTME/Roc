@@ -1,13 +1,10 @@
 use super::Operator;
 use super::Projection;
+use crate::expr::agg::AggregateExpression;
 use crate::{
     error::{Error, Result},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
-};
-use crate::{
-    exec::ProjectionExecutor,
-    expr::agg::{AggregateExpression, executor::AggregateExpressionExecutor},
 };
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::sync::Arc;
@@ -25,9 +22,7 @@ impl AggregateOperator {
                 "aggregate needs a group or function".into(),
             ));
         }
-        let operator = Self { groups, aggregates };
-        operator.output_schema()?;
-        Ok(operator)
+        Ok(Self { groups, aggregates })
     }
     pub fn groups(&self) -> &Projection {
         &self.groups
@@ -35,26 +30,19 @@ impl AggregateOperator {
     pub fn aggregates(&self) -> &[Arc<AggregateExpression>] {
         &self.aggregates
     }
-    /// Obtain result metadata from executor initialization, including on empty inputs.
-    pub fn output_schema(&self) -> Result<SchemaRef> {
-        let groups = ProjectionExecutor::try_new(self.groups.clone())?;
-        let mut fields = groups.output_schema().fields().to_vec();
+    /// Result types come from the descriptions; no executor is built.
+    pub fn output_schema(&self) -> SchemaRef {
+        let groups = self.groups.output_schema();
+        let mut fields = groups.fields().to_vec();
         for aggregate in &self.aggregates {
-            let executor = AggregateExpressionExecutor::try_new(
-                aggregate.clone(),
-                self.groups.input_schema().clone(),
-            )?;
-            let result = executor.result();
+            let result_type = aggregate.result_type();
             fields.push(Arc::new(Field::new(
                 aggregate.output_name(),
-                result.data_type.clone(),
-                result.nullable,
+                result_type.data_type().clone(),
+                result_type.is_nullable(),
             )));
         }
-        Ok(Arc::new(Schema::new_with_metadata(
-            fields,
-            groups.output_schema().metadata().clone(),
-        )))
+        Arc::new(Schema::new_with_metadata(fields, groups.metadata().clone()))
     }
 }
 
