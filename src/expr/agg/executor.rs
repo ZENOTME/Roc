@@ -74,12 +74,23 @@ impl AggregateExpressionExecutor {
         self.accumulator.resize(count);
     }
     pub fn update(&mut self, input: &RecordBatch, ids: &[usize], groups: usize) -> Result<()> {
-        self.resize(groups);
         if ids.len() != input.num_rows() || ids.iter().any(|&id| id >= groups) {
             return Err(Error::Execution(
                 "aggregate group IDs do not match input".into(),
             ));
         }
+        self.update_validated(input, ids, groups)
+    }
+    /// Internal path for IDs produced and validated by the grouping operator.
+    pub(crate) fn update_validated(
+        &mut self,
+        input: &RecordBatch,
+        ids: &[usize],
+        groups: usize,
+    ) -> Result<()> {
+        debug_assert_eq!(ids.len(), input.num_rows());
+        debug_assert!(ids.iter().all(|&id| id < groups));
+        self.resize(groups);
         let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
         let selected = self
             .filter
@@ -116,6 +127,43 @@ impl AggregateExpressionExecutor {
             })
             .collect::<Result<Vec<_>>>()?;
         self.accumulator.update(&values, ids)
+    }
+    /// Update an ungrouped aggregate, retaining one state even for empty input.
+    pub fn update_single(&mut self, input: &RecordBatch) -> Result<()> {
+        self.resize(1);
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        let selected = self
+            .filter
+            .as_ref()
+            .map(|filter| select_true(filter.evaluate(&executor)?.into_array(input.num_rows())?))
+            .transpose()?;
+        let rows = selected.as_ref().map_or(input.num_rows(), Vec::len);
+        if rows == 0 {
+            return Ok(());
+        }
+        let selected_input = selected
+            .as_ref()
+            .map(|rows| {
+                let mut mask = vec![false; input.num_rows()];
+                for &row in rows {
+                    mask[row] = true;
+                }
+                filter_record_batch(input, &BooleanArray::from(mask))
+            })
+            .transpose()?;
+        // FILTER must run before argument evaluation, including fallible arguments.
+        let input = selected_input.as_ref().unwrap_or(input);
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        let values = self
+            .arguments
+            .iter()
+            .map(|argument| {
+                let value = argument.evaluate(&executor)?;
+                let value = value.into_array(input.num_rows())?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.accumulator.update_single(&values, rows)
     }
     pub fn merge(&mut self, state: &[ArrayRef], ids: &[usize], groups: usize) -> Result<()> {
         self.resize(groups);

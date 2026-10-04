@@ -136,6 +136,12 @@ impl AggregateState {
         if batch.num_rows() == 0 {
             return Ok(());
         }
+        if self.groups.output_schema().fields().is_empty() {
+            for accumulator in &mut self.accumulators {
+                accumulator.update_single(batch)?;
+            }
+            return Ok(());
+        }
         let groups = self.groups.project_batch(batch)?;
         let ids = self.group_ids(groups.columns(), batch.num_rows())?;
         let count = self.group_count();

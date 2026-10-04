@@ -259,6 +259,60 @@ impl Accumulator {
         }
         Ok(())
     }
+    /// Reduce a whole batch into the sole global group without materializing IDs.
+    pub fn update_single(&mut self, values: &[ArrayRef], rows: usize) -> Result<()> {
+        match self {
+            Self::Count(groups) => {
+                let null_count = values
+                    .first()
+                    .and_then(|value| value.logical_nulls())
+                    .map_or(0, |nulls| nulls.null_count());
+                let count = i64::try_from(rows - null_count).map_err(|_| overflow())?;
+                groups[0] = groups[0].checked_add(count).ok_or_else(overflow)?;
+            }
+            Self::Sum { groups, data_type } => {
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast(argument.as_ref(), data_type)?;
+                // Retain sequential checked overflow, including prefixes that
+                // overflow before later values cancel, without materializing IDs.
+                macro_rules! accumulate {
+                    ($array:expr, $variant:ident) => {
+                        for value in $array.iter().flatten() {
+                            let value = Number::$variant(value);
+                            groups[0] = Some(match groups[0] {
+                                Some(previous) => previous.add(value)?,
+                                None => value,
+                            });
+                        }
+                    };
+                }
+                match data_type {
+                    DataType::Int64 => accumulate!(as_i64(&values), Signed),
+                    DataType::UInt64 => accumulate!(as_u64(&values), Unsigned),
+                    DataType::Float64 => accumulate!(as_f64(&values), Float),
+                    _ => return Err(unsupported_sum_type(data_type)),
+                }
+            }
+            Self::Avg(groups) => {
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
+                let values = cast(argument.as_ref(), &DataType::Float64)?;
+                let values = as_f64(&values);
+                // AVG's floating sum must accumulate into the existing state
+                // in input order, just like grouped updates. A batch subtotal
+                // would reassociate additions and change cancellation results.
+                for value in values.iter().flatten() {
+                    groups[0].0 = groups[0].0.checked_add(1).ok_or_else(overflow)?;
+                    groups[0].1 += value;
+                }
+            }
+            _ => self.update(values, &vec![0; rows])?,
+        }
+        Ok(())
+    }
     pub fn state_types(&self) -> Vec<DataType> {
         match self {
             Self::Count(_) => vec![DataType::Int64],
