@@ -60,11 +60,14 @@ pub(super) enum Number {
     Float(f64),
 }
 impl Number {
-    // SUM uses the same wrapping arithmetic for raw input and partial states.
     fn add(self, other: Self) -> Result<Self> {
         match (self, other) {
-            (Self::Signed(a), Self::Signed(b)) => Ok(Self::Signed(a.wrapping_add(b))),
-            (Self::Unsigned(a), Self::Unsigned(b)) => Ok(Self::Unsigned(a.wrapping_add(b))),
+            (Self::Signed(a), Self::Signed(b)) => {
+                Ok(Self::Signed(a.checked_add(b).ok_or_else(overflow)?))
+            }
+            (Self::Unsigned(a), Self::Unsigned(b)) => {
+                Ok(Self::Unsigned(a.checked_add(b).ok_or_else(overflow)?))
+            }
             (Self::Float(a), Self::Float(b)) => Ok(Self::Float(a + b)),
             _ => Err(Error::Execution(
                 "incompatible numeric aggregate states".into(),
@@ -290,19 +293,9 @@ impl Accumulator {
                 vec![Arc::new(builder.finish())]
             }
             Self::Sum { groups, data_type } => vec![number_array(groups, data_type)?],
-            // Both state columns are null for groups without contributing values,
-            // matching grouped AVG states without confusing an empty sum with zero.
             Self::Avg(groups) => vec![
-                Arc::new(UInt64Array::from_iter(
-                    groups
-                        .iter()
-                        .map(|(count, _)| (*count != 0).then_some(*count)),
-                )),
-                Arc::new(Float64Array::from_iter(
-                    groups
-                        .iter()
-                        .map(|(count, sum)| (*count != 0).then_some(*sum)),
-                )),
+                Arc::new(UInt64Array::from_iter_values(groups.iter().map(|g| g.0))),
+                Arc::new(Float64Array::from_iter_values(groups.iter().map(|g| g.1))),
             ],
             Self::Covar(groups) => vec![
                 Arc::new(UInt64Array::from_iter_values(
@@ -365,15 +358,11 @@ impl Accumulator {
             Self::Avg(groups) => {
                 let (counts, sums) = (as_u64(&states[0]), as_f64(&states[1]));
                 for (i, &id) in ids.iter().enumerate() {
-                    if counts.is_valid(i) {
-                        groups[id].0 = groups[id]
-                            .0
-                            .checked_add(counts.value(i))
-                            .ok_or_else(overflow)?;
-                    }
-                    if sums.is_valid(i) {
-                        groups[id].1 += sums.value(i);
-                    }
+                    groups[id].0 = groups[id]
+                        .0
+                        .checked_add(counts.value(i))
+                        .ok_or_else(overflow)?;
+                    groups[id].1 += sums.value(i);
                 }
             }
             Self::Covar(groups) => {
