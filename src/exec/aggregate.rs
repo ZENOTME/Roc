@@ -820,22 +820,31 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_sum_stays_exact_and_signed_sum_checks_overflow() {
+    fn integer_sum_stays_exact_and_wraps_on_update_and_partial_merge() {
         use arrow::array::UInt64Array;
-        for (data_type, array) in [
+        for (array, expected) in [
             (
-                DataType::UInt64,
                 Arc::new(UInt64Array::from(vec![
                     Some(9_007_199_254_740_993),
                     None,
                     Some(2),
                 ])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![9_007_199_254_740_995])) as ArrayRef,
             ),
             (
-                DataType::Int64,
                 Arc::new(Int64Array::from(vec![Some(i64::MAX), None, Some(1)])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![i64::MIN])) as ArrayRef,
+            ),
+            (
+                Arc::new(Int64Array::from(vec![Some(i64::MIN), None, Some(-1)])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![i64::MAX])) as ArrayRef,
+            ),
+            (
+                Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(1)])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![0])) as ArrayRef,
             ),
         ] {
+            let data_type = array.data_type().clone();
             let input_schema =
                 Arc::new(Schema::new(vec![Field::new("v", data_type.clone(), true)]));
             let operator = Arc::new(
@@ -861,22 +870,21 @@ mod tests {
             );
             let mut state = AggregateState::new(&operator).unwrap();
             let input = RecordBatch::try_new(input_schema, vec![array]).unwrap();
-            if data_type == DataType::Int64 {
-                assert!(state.update(&input).is_err());
-            } else {
-                state.update(&input).unwrap();
-                let mut merged = AggregateState::new(&operator).unwrap();
-                merged.merge(&state.finish_partial().unwrap()).unwrap();
+            state.update(&input).unwrap();
+
+            // Each worker's value fits by itself; overflow occurs only when
+            // partial states combine. Include a NULL-only worker as well.
+            let mut merged = AggregateState::new(&operator).unwrap();
+            for row in 0..input.num_rows() {
+                let mut worker = AggregateState::new(&operator).unwrap();
+                worker.update(&input.slice(row, 1)).unwrap();
+                merged.merge(&worker.finish_partial().unwrap()).unwrap();
+            }
+            for result in [state.finish().unwrap(), merged.finish().unwrap()] {
                 assert_eq!(
-                    merged
-                        .finish()
-                        .unwrap()
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap()
-                        .value(0),
-                    9_007_199_254_740_995
+                    result.column(0).to_data(),
+                    expected.to_data(),
+                    "SUM over {data_type}"
                 );
             }
         }
