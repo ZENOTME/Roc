@@ -47,6 +47,9 @@ searched CASE. ORDER BY, LIMIT, joins, windows, grouping sets, arbitrary UDFs,
 aggregate ordering and explicit null treatment fail at conversion. Decimal SUM
 and non-numeric casts are not supported. Float comparisons are rejected because
 Roc's Arrow total ordering and DataFusion's signed-zero normalization differ.
+AND/OR with a fallible right operand (such as division or strict casts) is also
+rejected because DataFusion may skip evaluation while Roc currently evaluates
+both operands. This prevents changing observable error behavior.
 
 Integer arithmetic and SUM retain Roc's checked overflow behavior. Empty AVG
 states remain `(count=0, sum=0)`, with final count deciding result validity.

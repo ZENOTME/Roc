@@ -198,6 +198,17 @@ impl LogicalPlanConverter {
                         if !field.metadata().is_empty() {
                             return Err(unsupported("aggregate field metadata"));
                         }
+                        if function == AggregateFunction::Sum
+                            && !matches!(
+                                field.data_type(),
+                                DataType::Int64 | DataType::UInt64 | DataType::Float64
+                            )
+                        {
+                            return Err(unsupported(format!(
+                                "SUM result type {}",
+                                field.data_type()
+                            )));
+                        }
                         let mut expression = AggregateExpression::new(
                             function,
                             args,
@@ -286,6 +297,11 @@ fn convert_expression(expr: &Arc<dyn PhysicalExpr>, input: &Schema) -> Result<Sc
         let left = recurse(binary.left())?;
         let right = recurse(binary.right())?;
         if matches!(binary.op(), Operator::And | Operator::Or) {
+            // DataFusion can skip its RHS; Roc's conjunction evaluates both.
+            // Do not change observable errors for an expression that can fail.
+            if may_error(binary.right()) {
+                return Err(unsupported("AND/OR with a fallible right operand"));
+            }
             return Ok(ConjunctionExpression::new(
                 if *binary.op() == Operator::And {
                     Conjunction::And
@@ -390,4 +406,27 @@ fn convert_expression(expr: &Arc<dyn PhysicalExpr>, input: &Schema) -> Result<Sc
         return Ok(CaseExpression::new(branches, otherwise, data_type, nullable).into_ref());
     }
     Err(unsupported(format!("scalar expression {expr}")))
+}
+
+fn may_error(expr: &Arc<dyn PhysicalExpr>) -> bool {
+    if let Some(binary) = expr.downcast_ref::<BinaryExpr>() {
+        if matches!(
+            binary.op(),
+            Operator::Plus
+                | Operator::Minus
+                | Operator::Multiply
+                | Operator::Divide
+                | Operator::Modulo
+        ) {
+            return true;
+        }
+    }
+    if expr.downcast_ref::<NegativeExpr>().is_some()
+        || expr
+            .downcast_ref::<CastExpr>()
+            .is_some_and(|cast| !cast.cast_options().safe)
+    {
+        return true;
+    }
+    expr.children().into_iter().any(may_error)
 }

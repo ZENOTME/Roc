@@ -223,6 +223,7 @@ async fn logical_queries_match_datafusion() -> Result<()> {
         "SELECT g, COUNT(DISTINCT v) AS c, SUM(v) FILTER (WHERE v > 3) AS s FROM t GROUP BY g",
         "SELECT g, COUNT(*) AS n FROM t GROUP BY g HAVING COUNT(*) > 2",
         "SELECT DISTINCT g FROM t",
+        "SELECT g, COVAR_POP(v, v) AS c FROM t GROUP BY g",
         "SELECT CASE WHEN v > 3 THEN v + 1 ELSE v - 1 END AS x FROM t",
         "SELECT CAST(v AS BIGINT) AS x, TRY_CAST(v AS SMALLINT) AS y FROM t",
     ] {
@@ -260,6 +261,9 @@ async fn unsupported_queries_fail_at_conversion() -> Result<()> {
         "SELECT abs(v) FROM t",
         "SELECT a.v FROM t a JOIN t b ON a.g = b.g",
         "SELECT g, SUM(v) FROM t GROUP BY ROLLUP(g)",
+        "SELECT SUM(CAST(v AS DECIMAL(20, 0))) FROM t",
+        "SELECT CAST(v AS DOUBLE) > 0 FROM t",
+        "SELECT (v > 0) AND ((1 / v) > 0) AS x FROM t",
     ] {
         let error = LogicalPlanConverter::convert_dataframe(ctx.sql(sql).await?)
             .await
