@@ -39,6 +39,14 @@ Generate the API documentation with:
 cargo doc --no-deps
 ```
 
+## DataFusion Parquet integration
+
+The optional [`roc-datafusion`](integrations/datafusion/README.md) workspace crate
+adapts DataFusion's planned Parquet scans to Roc's `ScanStorage` interface. It
+reuses DataFusion's I/O and decoding while Roc executes downstream operators.
+The integration includes storage correctness tests and a reproducible comparison
+of both engines over the same Parquet scan plan.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).

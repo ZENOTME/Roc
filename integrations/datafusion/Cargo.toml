@@ -13,31 +13,26 @@
 # limitations under the License.
 
 [package]
-name = "roc"
+name = "roc-datafusion"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Extensible Arrow execution engine with pipeline scheduling"
+description = "DataFusion Parquet scans for Roc pipelines"
 license = "Apache-2.0"
 
-[workspace]
-members = ["integrations/datafusion"]
-resolver = "3"
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
+roc = { path = "../.." }
 arrow = { version = "59.2.0", default-features = false }
-asyncband = { version = "0.7.3", default-features = false, features = ["shutdown", "mpmc"] }
+asyncband = { version = "0.7.3", default-features = false, features = ["shutdown"] }
+datafusion = { version = "=55.1.0", default-features = false, features = ["parquet", "sql"] }
 futures = "0.3"
-thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
 
 [dev-dependencies]
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
-
-[[bench]]
-name = "add_kernel"
-harness = false
-
-[[bench]]
-name = "add_nullable"
-harness = false
+parquet = { version = "59.2.0", default-features = false, features = ["arrow", "snap"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
