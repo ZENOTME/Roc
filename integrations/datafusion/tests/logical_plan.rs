@@ -262,6 +262,7 @@ async fn unsupported_queries_fail_at_conversion() -> Result<()> {
         "SELECT a.v FROM t a JOIN t b ON a.g = b.g",
         "SELECT g, SUM(v) FROM t GROUP BY ROLLUP(g)",
         "SELECT SUM(CAST(v AS DECIMAL(20, 0))) FROM t",
+        "SELECT AVG(CAST(v AS DECIMAL(20, 0))) FROM t",
         "SELECT CAST(v AS DOUBLE) > 0 FROM t",
         "SELECT (v > 0) AND ((1 / v) > 0) AS x FROM t",
     ] {

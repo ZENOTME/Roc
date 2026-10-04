@@ -209,6 +209,14 @@ impl LogicalPlanConverter {
                                 field.data_type()
                             )));
                         }
+                        if function == AggregateFunction::Avg
+                            && field.data_type() != &DataType::Float64
+                        {
+                            return Err(unsupported(format!(
+                                "AVG result type {}",
+                                field.data_type()
+                            )));
+                        }
                         let mut expression = AggregateExpression::new(
                             function,
                             args,

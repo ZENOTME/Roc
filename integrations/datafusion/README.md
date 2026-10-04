@@ -44,7 +44,7 @@ aggregate FILTER is supported. Logical DISTINCT may work when DataFusion rewrite
 it into supported grouping. Supported scalar expressions include references,
 literals, arithmetic, comparisons, null tests, AND/OR/NOT, numeric casts and
 searched CASE. ORDER BY, LIMIT, joins, windows, grouping sets, arbitrary UDFs,
-aggregate ordering and explicit null treatment fail at conversion. Decimal SUM
+aggregate ordering and explicit null treatment fail at conversion. Decimal SUM/AVG
 and non-numeric casts are not supported. Float comparisons are rejected because
 Roc's Arrow total ordering and DataFusion's signed-zero normalization differ.
 AND/OR with a fallible right operand (such as division or strict casts) is also
