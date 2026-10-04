@@ -12,28 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! DataFusion's planned Arrow streams as Roc storage inputs.
+//! DataFusion SQL and logical planning with native Roc execution.
 //!
-//! DataFusion retains responsibility for Parquet I/O, decoding, projection and
-//! predicate pruning. Roc consumers pull directly from its output partitions.
+//! Convert an analyzed, optimized logical plan into Roc operators. DataFusion
+//! binds scalar expressions and plans table scans; Roc owns aggregation phases,
+//! kernels and pipeline scheduling. Unsupported features fail at conversion.
 //!
 //! ```no_run
 //! # async fn example() -> datafusion::error::Result<()> {
-//! use std::sync::Arc;
-//! use datafusion::prelude::{ParquetReadOptions, SessionContext};
-//! use roc::operator::ScanOperator;
-//! use roc_datafusion::{DataFusionScan, DataFusionStorage};
+//! use datafusion::prelude::SessionContext;
+//! use roc_datafusion::LogicalPlanConverter;
 //!
 //! let ctx = SessionContext::new();
-//! let frame = ctx.read_parquet("data.parquet", ParquetReadOptions::default()).await?;
-//! // Apply DataFrame filters/projection before planning to preserve pushdown.
-//! let plan = frame.create_physical_plan().await?;
-//! let source = DataFusionScan::new(plan, ctx.task_ctx());
-//! let scan = ScanOperator::new(source, Arc::new(DataFusionStorage));
+//! // Register tables through DataFusion as usual.
+//! let frame = ctx.sql("SELECT group_key, SUM(value) FROM t GROUP BY group_key").await?;
+//! let tree = LogicalPlanConverter::convert_dataframe(frame).await?;
+//! // Install a Roc result sink, build_pipeline_on_node(tree.root(), ...),
+//! // and execute the graph using PipelineGraphExecutor.
 //! # Ok(())
 //! # }
 //! ```
 
+mod converter;
 mod storage;
 
+pub use converter::LogicalPlanConverter;
 pub use storage::{DataFusionScan, DataFusionStorage};

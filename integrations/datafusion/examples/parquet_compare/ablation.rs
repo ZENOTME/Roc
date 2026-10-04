@@ -51,7 +51,7 @@ fn sha256(path: &Path) -> Result<String> {
     .into())
 }
 
-fn input_files(data_dir: &Path) -> Result<Vec<Value>> {
+pub(super) fn input_files(data_dir: &Path) -> Result<Vec<Value>> {
     let mut pending = vec![data_dir.to_path_buf()];
     let mut files = Vec::new();
     while let Some(directory) = pending.pop() {
@@ -82,7 +82,7 @@ fn input_files(data_dir: &Path) -> Result<Vec<Value>> {
         .collect()
 }
 
-fn build_metadata(label: &str) -> Result<Value> {
+pub(super) fn build_metadata(label: &str) -> Result<Value> {
     let executable = fs::canonicalize(std::env::current_exe()?)?;
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let git = |args: &[&str]| {

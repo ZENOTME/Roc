@@ -96,6 +96,8 @@ use serde_json::{Value, json};
 mod ablation;
 #[path = "parquet_compare/diagnostics.rs"]
 mod diagnostics;
+#[path = "parquet_compare/logical.rs"]
+mod logical;
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const BATCH_ROWS: usize = 8192;
@@ -711,6 +713,9 @@ fn locked_package_version(name: &str) -> &'static str {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--logical") {
+        return logical::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("--ablate") {
         return ablation::run();
     }
