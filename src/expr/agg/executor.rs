@@ -25,7 +25,7 @@ use arrow::{
     datatypes::DataType,
     record_batch::RecordBatch,
 };
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 /// Worker-local argument evaluators and aggregate state.
 pub struct AggregateExpressionExecutor {
@@ -117,14 +117,23 @@ impl AggregateExpressionExecutor {
             })
             .transpose()?;
         let input = selected_input.as_ref().unwrap_or(input);
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        let values = self
-            .arguments
-            .iter()
-            .map(|argument| argument.evaluate(&executor)?.into_array(input.num_rows()))
-            .collect::<Result<Vec<_>>>()?;
+        let values = self.evaluate_arguments(input)?;
         self.accumulator.update(&values, ids)
     }
+    /// Argument-free aggregates do not need a scalar evaluation context.
+    /// All expression arguments use the shared scalar evaluation path.
+    fn evaluate_arguments<'a>(&self, input: &'a RecordBatch) -> Result<Cow<'a, [ArrayRef]>> {
+        if self.arguments.is_empty() {
+            return Ok(Cow::Borrowed(&[]));
+        }
+        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        self.arguments
+            .iter()
+            .map(|argument| argument.evaluate(&executor)?.into_array(input.num_rows()))
+            .collect::<Result<Vec<_>>>()
+            .map(Cow::Owned)
+    }
+
     pub fn merge(&mut self, state: &[ArrayRef], ids: &[usize], groups: usize) -> Result<()> {
         self.resize(groups);
         let types = self.state_types();
@@ -254,29 +263,36 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![1, 2]))],
         )
         .unwrap();
-        let expression = AggregateExpression::new(
-            AggregateFunction::Sum,
-            vec![
-                ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, false))
+        // References must reject out-of-range indices, including usize::MAX,
+        // without panicking.
+        for index in [1, usize::MAX] {
+            let expression = AggregateExpression::new(
+                AggregateFunction::Sum,
+                vec![
+                    ReferenceExpression::new(
+                        index,
+                        ExpressionResultType::new(DataType::Int64, false),
+                    )
                     .into_ref(),
-            ],
-            DataType::Int64,
-            true,
-        );
-        let mut grouped =
-            AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
-        for result in [grouped.update(&input, &[0, 0], 1)] {
-            assert!(
-                matches!(result, Err(Error::Execution(message)) if message == "column index 1 out of bounds")
+                ],
+                DataType::Int64,
+                true,
             );
+            let mut grouped =
+                AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
+            for result in [grouped.update(&input, &[0, 0], 1)] {
+                assert!(
+                    matches!(result, Err(Error::Execution(message)) if message == format!("column index {index} out of bounds"))
+                );
+            }
+            // When FILTER rejects every row, argument evaluation is skipped entirely,
+            // including its bounds checks, as on the generic expression path.
+            let expression =
+                expression.with_filter(ConstantExpression::boolean(Some(false)).into_ref());
+            let mut filtered = AggregateExpressionExecutor::try_new(Arc::new(expression)).unwrap();
+            filtered.update(&input, &[0, 0], 1).unwrap();
+            assert!(filtered.evaluate().unwrap().is_null(0));
         }
-        // When FILTER rejects every row, argument evaluation is skipped entirely,
-        // including its bounds checks, as on the generic expression path.
-        let expression =
-            expression.with_filter(ConstantExpression::boolean(Some(false)).into_ref());
-        let mut filtered = AggregateExpressionExecutor::try_new(Arc::new(expression)).unwrap();
-        filtered.update(&input, &[0, 0], 1).unwrap();
-        assert!(filtered.evaluate().unwrap().is_null(0));
     }
 
     #[test]
