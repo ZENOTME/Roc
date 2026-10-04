@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_sum_stays_exact_and_wraps_on_update_and_partial_merge() {
+    fn integer_sum_stays_exact_and_checks_overflow_on_update_and_partial_merge() {
         use arrow::array::UInt64Array;
         for (array, expected) in [
             (
@@ -829,19 +829,19 @@ mod tests {
                     None,
                     Some(2),
                 ])) as ArrayRef,
-                Arc::new(UInt64Array::from(vec![9_007_199_254_740_995])) as ArrayRef,
+                Some(Arc::new(UInt64Array::from(vec![9_007_199_254_740_995])) as ArrayRef),
             ),
             (
                 Arc::new(Int64Array::from(vec![Some(i64::MAX), None, Some(1)])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![i64::MIN])) as ArrayRef,
+                None,
             ),
             (
                 Arc::new(Int64Array::from(vec![Some(i64::MIN), None, Some(-1)])) as ArrayRef,
-                Arc::new(Int64Array::from(vec![i64::MAX])) as ArrayRef,
+                None,
             ),
             (
                 Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(1)])) as ArrayRef,
-                Arc::new(UInt64Array::from(vec![0])) as ArrayRef,
+                None,
             ),
         ] {
             let data_type = array.data_type().clone();
@@ -870,22 +870,33 @@ mod tests {
             );
             let mut state = AggregateState::new(&operator).unwrap();
             let input = RecordBatch::try_new(input_schema, vec![array]).unwrap();
-            state.update(&input).unwrap();
+            let update_result = state.update(&input);
 
             // Each worker's value fits by itself; overflow occurs only when
             // partial states combine. Include a NULL-only worker as well.
             let mut merged = AggregateState::new(&operator).unwrap();
-            for row in 0..input.num_rows() {
+            let merge_result = (0..input.num_rows()).try_for_each(|row| {
                 let mut worker = AggregateState::new(&operator).unwrap();
                 worker.update(&input.slice(row, 1)).unwrap();
-                merged.merge(&worker.finish_partial().unwrap()).unwrap();
-            }
-            for result in [state.finish().unwrap(), merged.finish().unwrap()] {
-                assert_eq!(
-                    result.column(0).to_data(),
-                    expected.to_data(),
-                    "SUM over {data_type}"
-                );
+                merged.merge(&worker.finish_partial().unwrap())
+            });
+            if let Some(expected) = expected {
+                update_result.unwrap();
+                merge_result.unwrap();
+                for result in [state.finish().unwrap(), merged.finish().unwrap()] {
+                    assert_eq!(
+                        result.column(0).to_data(),
+                        expected.to_data(),
+                        "SUM over {data_type}"
+                    );
+                }
+            } else {
+                for result in [update_result, merge_result] {
+                    assert!(
+                        matches!(result, Err(Error::Execution(message)) if message == "aggregate arithmetic overflow"),
+                        "SUM over {data_type} must report overflow"
+                    );
+                }
             }
         }
     }

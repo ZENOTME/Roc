@@ -60,11 +60,14 @@ pub(super) enum Number {
     Float(f64),
 }
 impl Number {
-    // SUM uses the same wrapping arithmetic for raw input and partial states.
     fn add(self, other: Self) -> Result<Self> {
         match (self, other) {
-            (Self::Signed(a), Self::Signed(b)) => Ok(Self::Signed(a.wrapping_add(b))),
-            (Self::Unsigned(a), Self::Unsigned(b)) => Ok(Self::Unsigned(a.wrapping_add(b))),
+            (Self::Signed(a), Self::Signed(b)) => {
+                Ok(Self::Signed(a.checked_add(b).ok_or_else(overflow)?))
+            }
+            (Self::Unsigned(a), Self::Unsigned(b)) => {
+                Ok(Self::Unsigned(a.checked_add(b).ok_or_else(overflow)?))
+            }
             (Self::Float(a), Self::Float(b)) => Ok(Self::Float(a + b)),
             _ => Err(Error::Execution(
                 "incompatible numeric aggregate states".into(),
