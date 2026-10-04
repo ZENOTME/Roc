@@ -23,7 +23,6 @@ pub enum AggregateFunction {
     Avg,
     Min,
     Max,
-    CovarPop,
 }
 
 impl AggregateFunction {
@@ -34,18 +33,17 @@ impl AggregateFunction {
             Self::Avg => "avg",
             Self::Min => "min",
             Self::Max => "max",
-            Self::CovarPop => "covar_pop",
         }
     }
 }
 
 /// An aggregate call such as COUNT, SUM, or MIN, with optional DISTINCT and
-/// FILTER. COUNT without arguments is COUNT(*).
+/// FILTER. A missing argument represents COUNT(*).
 #[derive(Clone, Debug)]
 pub struct AggregateExpression {
     alias: Option<String>,
     function: AggregateFunction,
-    arguments: Vec<ScalarExprRef>,
+    argument: Option<ScalarExprRef>,
     result_type: ExpressionResultType,
     distinct: bool,
     filter: Option<ScalarExprRef>,
@@ -53,14 +51,14 @@ pub struct AggregateExpression {
 impl AggregateExpression {
     pub fn new(
         function: AggregateFunction,
-        arguments: Vec<ScalarExprRef>,
+        argument: Option<ScalarExprRef>,
         data_type: DataType,
         nullable: bool,
     ) -> Self {
         Self {
             alias: None,
             function,
-            arguments,
+            argument,
             result_type: ExpressionResultType {
                 data_type,
                 nullable,
@@ -94,8 +92,8 @@ impl AggregateExpression {
     pub fn function(&self) -> AggregateFunction {
         self.function
     }
-    pub fn arguments(&self) -> &[ScalarExprRef] {
-        &self.arguments
+    pub fn argument(&self) -> Option<&ScalarExprRef> {
+        self.argument.as_ref()
     }
     pub fn is_distinct(&self) -> bool {
         self.distinct

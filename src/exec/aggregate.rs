@@ -371,35 +371,31 @@ mod tests {
         Projection::from_indices(schema(), if grouped { &[0] } else { &[] }).unwrap()
     }
     /// Result types and nullability are host-supplied: SUM over Float64 is
-    /// Float64, AVG and COVAR_POP are Float64, and only COUNT is non-nullable.
+    /// Float64, AVG is Float64, and only COUNT is non-nullable.
     fn aggregates() -> Vec<Arc<AggregateExpression>> {
         use AggregateFunction::*;
         vec![
             Arc::new(AggregateExpression::new(
                 Sum,
-                vec![value()],
+                Some(value()),
                 DataType::Float64,
                 true,
             )),
             Arc::new(
-                AggregateExpression::new(Avg, vec![value()], DataType::Float64, true)
+                AggregateExpression::new(Avg, Some(value()), DataType::Float64, true)
                     .with_alias("avg"),
             ),
             Arc::new(
-                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
+                AggregateExpression::new(Count, Some(value()), DataType::Int64, false)
                     .with_alias("count"),
             ),
             Arc::new(
-                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
+                AggregateExpression::new(Count, Some(value()), DataType::Int64, false)
                     .with_distinct()
                     .with_alias("distinct"),
             ),
             Arc::new(
-                AggregateExpression::new(CovarPop, vec![value(), value()], DataType::Float64, true)
-                    .with_alias("covar"),
-            ),
-            Arc::new(
-                AggregateExpression::new(Count, vec![], DataType::Int64, false).with_alias("rows"),
+                AggregateExpression::new(Count, None, DataType::Int64, false).with_alias("rows"),
             ),
         ]
     }
@@ -451,15 +447,15 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         for row in 0..3 {
-            let (sum, avg, count, distinct, covar, rows) = if keys.is_null(row) {
-                (6., 3., 2, 2, 1., 2)
+            let (sum, avg, count, distinct, rows) = if keys.is_null(row) {
+                (6., 3., 2, 2, 2)
             } else if keys.value(row) == "a" {
-                (7., 7. / 3., 3, 2, 8. / 9., 3)
+                (7., 7. / 3., 3, 2, 3)
             } else {
                 assert_eq!(keys.value(row), "b");
-                (8., 8., 1, 1, 0., 2)
+                (8., 8., 1, 1, 2)
             };
-            for (column, expected) in [(1, sum), (2, avg), (5, covar)] {
+            for (column, expected) in [(1, sum), (2, avg)] {
                 let array = result
                     .column(column)
                     .as_any()
@@ -468,7 +464,7 @@ mod tests {
                 assert!(array.is_valid(row));
                 assert!((array.value(row) - expected).abs() < 1e-10);
             }
-            for (column, expected) in [(3, count), (4, distinct), (6, rows)] {
+            for (column, expected) in [(3, count), (4, distinct), (5, rows)] {
                 let array = result
                     .column(column)
                     .as_any()
@@ -495,14 +491,14 @@ mod tests {
             AggregateState::new(&operator).unwrap().finish().unwrap(),
         ] {
             assert_eq!(result.num_rows(), 1);
-            for col in [0, 1, 4] {
+            for col in [0, 1] {
                 assert!(
                     result.column(col).is_null(0),
                     "column {col}: {:?}",
                     result.column(col)
                 );
             }
-            for col in [2, 3, 5] {
+            for col in [2, 3, 4] {
                 assert_eq!(
                     result
                         .column(col)
@@ -536,10 +532,10 @@ mod tests {
             .unwrap();
         let result = merged.finish().unwrap();
         assert_eq!(result.num_rows(), 1);
-        for col in [1, 2, 5] {
+        for col in [1, 2] {
             assert!(result.column(col).is_null(0));
         }
-        for (col, expected) in [(3, 0), (4, 0), (6, 2)] {
+        for (col, expected) in [(3, 0), (4, 0), (5, 2)] {
             assert_eq!(
                 result
                     .column(col)
@@ -585,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             result
-                .column(5)
+                .column(4)
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .unwrap()
@@ -672,7 +668,7 @@ mod tests {
             Arc::new(
                 AggregateExpression::new(
                     AggregateFunction::Sum,
-                    vec![division],
+                    Some(division),
                     DataType::Int64,
                     true,
                 )
@@ -682,7 +678,7 @@ mod tests {
             Arc::new(
                 AggregateExpression::new(
                     AggregateFunction::Count,
-                    vec![value()],
+                    Some(value()),
                     DataType::Int64,
                     false,
                 )
@@ -744,7 +740,7 @@ mod tests {
             .into_iter()
             .map(|f| {
                 Arc::new(
-                    AggregateExpression::new(f, vec![expr.clone()], DataType::Utf8, true)
+                    AggregateExpression::new(f, Some(expr.clone()), DataType::Utf8, true)
                         .with_alias(format!("{f:?}")),
                 )
             })
@@ -811,13 +807,13 @@ mod tests {
                     vec![Arc::new(
                         AggregateExpression::new(
                             AggregateFunction::Sum,
-                            vec![
+                            Some(
                                 ReferenceExpression::new(
                                     0,
                                     ExpressionResultType::new(data_type.clone(), true),
                                 )
                                 .into_ref(),
-                            ],
+                            ),
                             data_type.clone(),
                             true,
                         )
@@ -859,7 +855,7 @@ mod tests {
                 Arc::new(
                     AggregateExpression::new(
                         AggregateFunction::Count,
-                        vec![],
+                        None,
                         DataType::Int64,
                         false,
                     )
@@ -906,14 +902,14 @@ mod tests {
         // assembles descriptions; executor construction is the first point that
         // builds an accumulator.
         for expr in [
-            AggregateExpression::new(AggregateFunction::Count, vec![], DataType::Int64, false)
+            AggregateExpression::new(AggregateFunction::Count, None, DataType::Int64, false)
                 .with_distinct(),
-            AggregateExpression::new(AggregateFunction::Min, vec![], DataType::Utf8, true),
-            AggregateExpression::new(AggregateFunction::Max, vec![], DataType::Utf8, true),
+            AggregateExpression::new(AggregateFunction::Min, None, DataType::Utf8, true),
+            AggregateExpression::new(AggregateFunction::Max, None, DataType::Utf8, true),
             // Only COUNT keeps a DISTINCT set; the others would silently drop it.
             AggregateExpression::new(
                 AggregateFunction::Sum,
-                vec![value()],
+                Some(value()),
                 DataType::Float64,
                 true,
             )
@@ -932,59 +928,18 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_executor_defers_other_signature_checks_to_runtime() {
-        // Arity and argument types are host responsibilities now. COUNT simply
-        // ignores arguments beyond the first; SUM, AVG, and COVAR_POP build
-        // argument-independent state and reject a missing argument once values
-        // arrive, because their arity is not checked while constructing.
-        let count_two = AggregateExpression::new(
-            AggregateFunction::Count,
-            vec![value(), value()],
-            DataType::Int64,
-            false,
-        );
-        let operator = AggregateOperator::try_new(
-            groups(false),
-            vec![Arc::new(count_two.with_alias("count_two"))],
-        )
-        .unwrap();
-        let mut state = AggregateState::new(&operator).unwrap();
-        state
-            .update(&batch(vec![Some("a")], vec![None]))
-            .expect("extra COUNT arguments are accepted");
-        assert_eq!(
-            state
-                .finish()
-                .unwrap()
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(0),
-            0
-        );
-
-        for expr in [
-            AggregateExpression::new(AggregateFunction::Sum, vec![], DataType::Float64, true),
-            AggregateExpression::new(AggregateFunction::Avg, vec![], DataType::Float64, true),
-            AggregateExpression::new(
-                AggregateFunction::CovarPop,
-                vec![value()],
-                DataType::Float64,
-                true,
-            ),
+    fn missing_arguments_are_plan_errors_and_runtime_types_remain_checked() {
+        for function in [
+            AggregateFunction::Sum,
+            AggregateFunction::Avg,
+            AggregateFunction::Min,
+            AggregateFunction::Max,
         ] {
-            let operator = AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(expr.with_alias("missing_argument"))],
-            )
-            .unwrap();
-            let mut state = AggregateState::new(&operator).unwrap();
-            assert!(
-                state
-                    .update(&batch(vec![Some("a")], vec![Some(1.)]))
-                    .is_err()
-            );
+            let expression = AggregateExpression::new(function, None, DataType::Float64, true);
+            assert!(matches!(
+                AggregateExpressionExecutor::try_new(Arc::new(expression)),
+                Err(Error::InvalidPlan(_))
+            ));
         }
 
         use crate::expr::scalar::ConstantExpression;
@@ -996,7 +951,7 @@ mod tests {
                 vec![Arc::new(
                     AggregateExpression::new(
                         AggregateFunction::Sum,
-                        vec![ConstantExpression::string(Some("x")).into_ref()],
+                        Some(ConstantExpression::string(Some("x")).into_ref()),
                         DataType::Int64,
                         true,
                     )
@@ -1018,7 +973,7 @@ mod tests {
                 vec![Arc::new(
                     AggregateExpression::new(
                         AggregateFunction::Count,
-                        vec![],
+                        None,
                         DataType::Int64,
                         false,
                     )
@@ -1045,7 +1000,7 @@ mod tests {
                 vec![Arc::new(
                     AggregateExpression::new(
                         AggregateFunction::Sum,
-                        vec![value()],
+                        Some(value()),
                         DataType::Utf8,
                         true,
                     )
@@ -1074,13 +1029,13 @@ mod tests {
             vec![
                 Arc::new(AggregateExpression::new(
                     AggregateFunction::Sum,
-                    vec![value.clone()],
+                    Some(value.clone()),
                     DataType::Int64,
                     true,
                 )),
                 Arc::new(AggregateExpression::new(
                     AggregateFunction::Count,
-                    vec![value],
+                    Some(value),
                     DataType::Int64,
                     false,
                 )),
