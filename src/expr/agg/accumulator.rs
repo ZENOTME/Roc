@@ -26,7 +26,7 @@ use arrow::{
     datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, UInt64Type},
     row::{RowConverter, SortField},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
 fn input_type(inputs: &[DataType]) -> Result<DataType> {
     inputs
@@ -135,7 +135,7 @@ impl SumGroups {
                 let argument = values
                     .first()
                     .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_i64_mut().update(as_i64(&values), ids)
             }),
             DataType::UInt64 => (Self::Unsigned(TypedSum::new()), |state, values, ids| {
@@ -143,7 +143,7 @@ impl SumGroups {
                 let argument = values
                     .first()
                     .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_u64_mut().update(as_u64(&values), ids)
             }),
             DataType::Float64 => (Self::Float(TypedSum::new()), |state, values, ids| {
@@ -151,7 +151,7 @@ impl SumGroups {
                 let argument = values
                     .first()
                     .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_f64_mut().update(as_f64(&values), ids)
             }),
             _ => {
@@ -449,6 +449,16 @@ impl Accumulator {
         })
     }
 }
+/// Identical types can borrow the original array. Calling Arrow's cast in
+/// that case reconstructs an array wrapper and clones its backing buffers.
+fn cast_argument<'a>(argument: &'a ArrayRef, data_type: &DataType) -> Result<Cow<'a, ArrayRef>> {
+    if argument.data_type() == data_type {
+        Ok(Cow::Borrowed(argument))
+    } else {
+        Ok(Cow::Owned(cast(argument.as_ref(), data_type)?))
+    }
+}
+
 impl AccumulatorState {
     fn as_count_mut(&mut self) -> &mut Vec<i64> {
         let Self::Count(groups) = self else {
@@ -531,7 +541,7 @@ fn update_avg(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) 
     let argument = values
         .first()
         .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
-    let values = cast(argument.as_ref(), &DataType::Float64)?;
+    let values = cast_argument(argument, &DataType::Float64)?;
     let values = as_f64(&values);
     for (i, &id) in ids.iter().enumerate() {
         if values.is_null(i) {
@@ -550,8 +560,8 @@ fn update_covar(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]
         .split_first()
         .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
         .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
-    let x = cast(x.as_ref(), &DataType::Float64)?;
-    let y = cast(y.as_ref(), &DataType::Float64)?;
+    let x = cast_argument(x, &DataType::Float64)?;
+    let y = cast_argument(y, &DataType::Float64)?;
     let (x, y) = (as_f64(&x), as_f64(&y));
     for (i, &id) in ids.iter().enumerate() {
         if x.is_valid(i) && y.is_valid(i) {
@@ -601,4 +611,22 @@ fn as_u64(a: &ArrayRef) -> &UInt64Array {
 }
 fn as_f64(a: &ArrayRef) -> &Float64Array {
     a.as_any().downcast_ref().unwrap()
+}
+
+#[cfg(test)]
+mod cast_argument_tests {
+    use super::*;
+    use arrow::array::Int32Array;
+
+    #[test]
+    fn same_type_borrows_and_numeric_coercion_still_casts() {
+        let source = Arc::new(Int64Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
+        let borrowed = cast_argument(&source, &DataType::Int64).unwrap();
+        assert!(matches!(&borrowed, Cow::Borrowed(_)));
+        assert!(Arc::ptr_eq(&source, borrowed.as_ref()));
+        let narrow = Arc::new(Int32Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
+        let converted = cast_argument(&narrow, &DataType::Int64).unwrap();
+        assert!(matches!(&converted, Cow::Owned(_)));
+        assert_eq!(converted.to_data(), source.to_data());
+    }
 }

@@ -107,7 +107,9 @@ impl AggregateState {
             .intern(groups.columns(), batch.num_rows(), &mut self.group_ids)?;
         let count = self.group_count();
         for accumulator in &mut self.accumulators {
-            accumulator.update(batch, &self.group_ids, count)?;
+            // GroupIndex creates one in-range ID per input row. Validate once
+            // at that boundary instead of rescanning IDs for every aggregate.
+            accumulator.update_validated(batch, &self.group_ids, count)?;
         }
         Ok(())
     }
