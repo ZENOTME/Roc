@@ -63,17 +63,17 @@ enum AccumulatorState {
 /// untouched group remains distinguishable from a zero sum. Construction pairs
 /// this enum with its typed update function.
 pub(super) enum SumGroups {
-    Signed(TypedSum<Int64Type>),
-    Unsigned(TypedSum<UInt64Type>),
-    Float(TypedSum<Float64Type>),
+    Signed(TypedSum<Int64Type, false>),
+    Unsigned(TypedSum<UInt64Type, false>),
+    Float(TypedSum<Float64Type, true>),
 }
 
-pub(super) struct TypedSum<T: ArrowPrimitiveType> {
+pub(super) struct TypedSum<T: ArrowPrimitiveType, const PRESERVE_FIRST: bool> {
     values: Vec<T::Native>,
     valid: Vec<bool>,
 }
 
-impl<T: ArrowPrimitiveType> TypedSum<T>
+impl<T: ArrowPrimitiveType, const PRESERVE_FIRST: bool> TypedSum<T, PRESERVE_FIRST>
 where
     T::Native: ArrowNativeTypeOp,
 {
@@ -91,11 +91,12 @@ where
 
     #[inline]
     fn add(&mut self, id: usize, value: T::Native) -> Result<()> {
-        // Preserve the first value (including floating-point signed zero).
-        self.values[id] = if self.valid[id] {
-            self.values[id].add_checked(value).map_err(|_| overflow())?
-        } else {
+        // Integers can always add into the initial zero. Floating-point groups
+        // retain their first value, including its signed-zero representation.
+        self.values[id] = if PRESERVE_FIRST && !self.valid[id] {
             value
+        } else {
+            self.values[id].add_checked(value).map_err(|_| overflow())?
         };
         self.valid[id] = true;
         Ok(())
@@ -107,11 +108,36 @@ where
             for (&id, &value) in ids.iter().zip(values.iter()) {
                 self.add(id, value)?;
             }
-        } else {
-            // Iterating set bits respects sliced bitmap offsets and never reads
-            // arbitrary payloads beneath nulls.
+        } else if array.null_count() > array.len() / 2 {
+            // Sparse inputs are cheaper to visit by their set-bit positions.
             for index in array.nulls().unwrap().valid_indices() {
                 self.add(ids[index], values[index])?;
+            }
+        } else {
+            // For dense inputs, traverse values and IDs sequentially, reusing
+            // each 64-bit validity word. Arrow accounts for sliced bit offsets.
+            let nulls = array.nulls().unwrap();
+            let bits = nulls.inner().bit_chunks();
+            let ids_chunks = ids.chunks_exact(64);
+            let values_chunks = values.chunks_exact(64);
+            let ids_remainder = ids_chunks.remainder();
+            let values_remainder = values_chunks.remainder();
+            for ((ids, values), mut mask) in ids_chunks.zip(values_chunks).zip(bits.iter()) {
+                for (&id, value) in ids.iter().zip(values) {
+                    if mask & 1 != 0 {
+                        // Dereference only after validity; null payloads do not
+                        // participate in arithmetic (notably floating NaNs).
+                        self.add(id, *value)?;
+                    }
+                    mask >>= 1;
+                }
+            }
+            let mut mask = bits.remainder_bits();
+            for (&id, value) in ids_remainder.iter().zip(values_remainder) {
+                if mask & 1 != 0 {
+                    self.add(id, *value)?;
+                }
+                mask >>= 1;
             }
         }
         Ok(())
@@ -157,21 +183,21 @@ impl SumGroups {
         })
     }
 
-    fn as_i64_mut(&mut self) -> &mut TypedSum<Int64Type> {
+    fn as_i64_mut(&mut self) -> &mut TypedSum<Int64Type, false> {
         let Self::Signed(groups) = self else {
             unreachable!("aggregate state and update function are bound together")
         };
         groups
     }
 
-    fn as_u64_mut(&mut self) -> &mut TypedSum<UInt64Type> {
+    fn as_u64_mut(&mut self) -> &mut TypedSum<UInt64Type, false> {
         let Self::Unsigned(groups) = self else {
             unreachable!("aggregate state and update function are bound together")
         };
         groups
     }
 
-    fn as_f64_mut(&mut self) -> &mut TypedSum<Float64Type> {
+    fn as_f64_mut(&mut self) -> &mut TypedSum<Float64Type, true> {
         let Self::Float(groups) = self else {
             unreachable!("aggregate state and update function are bound together")
         };
@@ -430,9 +456,30 @@ fn update_count(
     let groups = state.as_count_mut();
     let nulls = value.and_then(|v| v.logical_nulls());
     if let Some(nulls) = nulls.filter(|nulls| nulls.null_count() != 0) {
-        for index in nulls.valid_indices() {
-            let id = ids[index];
-            groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+        if nulls.null_count() > nulls.len() / 2 {
+            for index in nulls.valid_indices() {
+                let id = ids[index];
+                groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+            }
+        } else {
+            let bits = nulls.inner().bit_chunks();
+            let chunks = ids.chunks_exact(64);
+            let remainder = chunks.remainder();
+            for (ids, mut mask) in chunks.zip(bits.iter()) {
+                for &id in ids {
+                    if mask & 1 != 0 {
+                        groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+                    }
+                    mask >>= 1;
+                }
+            }
+            let mut mask = bits.remainder_bits();
+            for &id in remainder {
+                if mask & 1 != 0 {
+                    groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+                }
+                mask >>= 1;
+            }
         }
     } else {
         for &id in ids {
