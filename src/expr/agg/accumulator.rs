@@ -18,11 +18,12 @@ use crate::{
 };
 use arrow::{
     array::{
-        Array, ArrayRef, BinaryArray, BinaryBuilder, Float64Array, Int64Array, ListArray,
-        ListBuilder, UInt64Array, new_empty_array, new_null_array,
+        Array, ArrayRef, ArrowNativeTypeOp, BinaryArray, BinaryBuilder, Float64Array, Int64Array,
+        ListArray, ListBuilder, PrimitiveArray, UInt64Array, new_empty_array, new_null_array,
     },
+    buffer::NullBuffer,
     compute::{cast, kernels::interleave::interleave},
-    datatypes::{DataType, Field},
+    datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, UInt64Type},
     row::{RowConverter, SortField},
 };
 use std::{collections::HashSet, sync::Arc};
@@ -34,14 +35,22 @@ fn input_type(inputs: &[DataType]) -> Result<DataType> {
         .ok_or_else(|| Error::InvalidPlan("aggregate requires an argument".into()))
 }
 
-pub(super) enum Accumulator {
+type UpdateFn = fn(&mut AccumulatorState, &[ArrayRef], &[usize]) -> Result<()>;
+
+/// Worker-local enum state paired with its update function during construction.
+pub(super) struct Accumulator {
+    state: AccumulatorState,
+    update_fn: UpdateFn,
+}
+
+enum AccumulatorState {
     Count(Vec<i64>),
     Distinct {
         groups: Vec<HashSet<Vec<u8>>>,
         converter: RowConverter,
     },
     Sum {
-        groups: Vec<Option<Number>>,
+        groups: SumGroups,
         data_type: DataType,
     },
     Avg(Vec<(u64, f64)>),
@@ -50,28 +59,143 @@ pub(super) enum Accumulator {
         groups: Vec<Option<(Vec<u8>, ArrayRef)>>,
         converter: RowConverter,
         data_type: DataType,
-        minimum: bool,
     },
 }
-#[derive(Clone, Copy)]
-pub(super) enum Number {
-    Signed(i64),
-    Unsigned(u64),
-    Float(f64),
+/// Each group holds a native value and an independent validity flag so an
+/// untouched group remains distinguishable from a zero sum. Construction pairs
+/// this enum with its typed update function.
+pub(super) enum SumGroups {
+    Signed(TypedSum<Int64Type>),
+    Unsigned(TypedSum<UInt64Type>),
+    Float(TypedSum<Float64Type>),
 }
-impl Number {
-    fn add(self, other: Self) -> Result<Self> {
-        match (self, other) {
-            (Self::Signed(a), Self::Signed(b)) => {
-                Ok(Self::Signed(a.checked_add(b).ok_or_else(overflow)?))
+
+pub(super) struct TypedSum<T: ArrowPrimitiveType> {
+    values: Vec<T::Native>,
+    valid: Vec<bool>,
+}
+
+impl<T: ArrowPrimitiveType> TypedSum<T>
+where
+    T::Native: ArrowNativeTypeOp,
+{
+    fn new() -> Self {
+        Self {
+            values: Vec::new(),
+            valid: Vec::new(),
+        }
+    }
+
+    fn resize(&mut self, count: usize) {
+        self.values.resize(count, T::Native::ZERO);
+        self.valid.resize(count, false);
+    }
+
+    #[inline]
+    fn add(&mut self, id: usize, value: T::Native) -> Result<()> {
+        // Preserve the first value (including floating-point signed zero).
+        self.values[id] = if self.valid[id] {
+            self.values[id].add_checked(value).map_err(|_| overflow())?
+        } else {
+            value
+        };
+        self.valid[id] = true;
+        Ok(())
+    }
+
+    fn update(&mut self, array: &PrimitiveArray<T>, ids: &[usize]) -> Result<()> {
+        let values = array.values();
+        if array.null_count() == 0 {
+            for (&id, &value) in ids.iter().zip(values.iter()) {
+                self.add(id, value)?;
             }
-            (Self::Unsigned(a), Self::Unsigned(b)) => {
-                Ok(Self::Unsigned(a.checked_add(b).ok_or_else(overflow)?))
+        } else {
+            // Iterating set bits respects sliced bitmap offsets and never reads
+            // arbitrary payloads beneath nulls.
+            for index in array.nulls().unwrap().valid_indices() {
+                self.add(ids[index], values[index])?;
             }
-            (Self::Float(a), Self::Float(b)) => Ok(Self::Float(a + b)),
-            _ => Err(Error::Execution(
-                "incompatible numeric aggregate states".into(),
-            )),
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> ArrayRef {
+        Arc::new(PrimitiveArray::<T>::new(
+            self.values.clone().into(),
+            Some(NullBuffer::from(self.valid.clone())),
+        ))
+    }
+}
+
+impl SumGroups {
+    fn bind(data_type: &DataType) -> Result<(Self, UpdateFn)> {
+        Ok(match data_type {
+            DataType::Int64 => (Self::Signed(TypedSum::new()), |state, values, ids| {
+                let (groups, data_type) = state.as_sum_mut();
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast(argument.as_ref(), data_type)?;
+                groups.as_i64_mut().update(as_i64(&values), ids)
+            }),
+            DataType::UInt64 => (Self::Unsigned(TypedSum::new()), |state, values, ids| {
+                let (groups, data_type) = state.as_sum_mut();
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast(argument.as_ref(), data_type)?;
+                groups.as_u64_mut().update(as_u64(&values), ids)
+            }),
+            DataType::Float64 => (Self::Float(TypedSum::new()), |state, values, ids| {
+                let (groups, data_type) = state.as_sum_mut();
+                let argument = values
+                    .first()
+                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast(argument.as_ref(), data_type)?;
+                groups.as_f64_mut().update(as_f64(&values), ids)
+            }),
+            _ => {
+                return Err(Error::InvalidPlan(format!(
+                    "unsupported sum result type: {data_type}"
+                )));
+            }
+        })
+    }
+
+    fn as_i64_mut(&mut self) -> &mut TypedSum<Int64Type> {
+        let Self::Signed(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn as_u64_mut(&mut self) -> &mut TypedSum<UInt64Type> {
+        let Self::Unsigned(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn as_f64_mut(&mut self) -> &mut TypedSum<Float64Type> {
+        let Self::Float(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn resize(&mut self, count: usize) {
+        match self {
+            Self::Signed(groups) => groups.resize(count),
+            Self::Unsigned(groups) => groups.resize(count),
+            Self::Float(groups) => groups.resize(count),
+        }
+    }
+
+    fn state(&self) -> ArrayRef {
+        match self {
+            Self::Signed(groups) => groups.state(),
+            Self::Unsigned(groups) => groups.state(),
+            Self::Float(groups) => groups.state(),
         }
     }
 }
@@ -121,157 +245,75 @@ impl Accumulator {
         output: &DataType,
     ) -> Result<Self> {
         use AggregateFunction::*;
-        Ok(match function {
+        let (state, update_fn): (AccumulatorState, UpdateFn) = match function {
             Count if distinct => {
                 let input = input_type(inputs)?;
-                Self::Distinct {
-                    groups: vec![],
-                    converter: RowConverter::new(vec![SortField::new(input)])?,
-                }
+                (
+                    AccumulatorState::Distinct {
+                        groups: vec![],
+                        converter: RowConverter::new(vec![SortField::new(input)])?,
+                    },
+                    update_distinct,
+                )
             }
-            Count => Self::Count(vec![]),
-            Sum => Self::Sum {
-                groups: vec![],
-                data_type: output.clone(),
-            },
-            Avg => Self::Avg(vec![]),
-            CovarPop => Self::Covar(vec![]),
+            Count => (AccumulatorState::Count(vec![]), update_count),
+            Sum => {
+                let (groups, update_fn) = SumGroups::bind(output)?;
+                (
+                    AccumulatorState::Sum {
+                        groups,
+                        data_type: output.clone(),
+                    },
+                    update_fn,
+                )
+            }
+            Avg => (AccumulatorState::Avg(vec![]), update_avg),
+            CovarPop => (AccumulatorState::Covar(vec![]), update_covar),
             Min | Max => {
                 let input = input_type(inputs)?;
-                Self::Extremum {
-                    groups: vec![],
-                    converter: RowConverter::new(vec![SortField::new(input)])?,
-                    data_type: output.clone(),
-                    minimum: function == Min,
-                }
+                (
+                    AccumulatorState::Extremum {
+                        groups: vec![],
+                        converter: RowConverter::new(vec![SortField::new(input)])?,
+                        data_type: output.clone(),
+                    },
+                    if function == Min {
+                        update_extremum::<true>
+                    } else {
+                        update_extremum::<false>
+                    },
+                )
             }
-        })
+        };
+        Ok(Self { state, update_fn })
     }
     pub fn resize(&mut self, count: usize) {
-        match self {
-            Self::Count(groups) => groups.resize(count, 0),
-            Self::Distinct { groups, .. } => groups.resize_with(count, HashSet::new),
-            Self::Sum { groups, .. } => groups.resize(count, None),
-            Self::Avg(groups) => groups.resize(count, (0, 0.0)),
-            Self::Covar(groups) => groups.resize(count, Covariance::default()),
-            Self::Extremum { groups, .. } => groups.resize(count, None),
+        match &mut self.state {
+            AccumulatorState::Count(groups) => groups.resize(count, 0),
+            AccumulatorState::Distinct { groups, .. } => groups.resize_with(count, HashSet::new),
+            AccumulatorState::Sum { groups, .. } => groups.resize(count),
+            AccumulatorState::Avg(groups) => groups.resize(count, (0, 0.0)),
+            AccumulatorState::Covar(groups) => groups.resize(count, Covariance::default()),
+            AccumulatorState::Extremum { groups, .. } => groups.resize(count, None),
         }
     }
     pub fn update(&mut self, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
-        match self {
-            Self::Count(groups) => {
-                let nulls = values.first().and_then(|v| v.logical_nulls());
-                for (i, &id) in ids.iter().enumerate() {
-                    if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
-                        groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
-                    }
-                }
-            }
-            Self::Distinct { groups, converter } => {
-                let rows = converter.convert_columns(values)?;
-                let nulls = values[0].logical_nulls();
-                for (i, &id) in ids.iter().enumerate() {
-                    if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
-                        groups[id].insert(rows.row(i).as_ref().to_vec());
-                    }
-                }
-            }
-            Self::Sum { groups, data_type } => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
-                for (i, &id) in ids.iter().enumerate() {
-                    if values.is_null(i) {
-                        continue;
-                    }
-                    let number = match data_type {
-                        DataType::Int64 => Number::Signed(as_i64(&values).value(i)),
-                        DataType::UInt64 => Number::Unsigned(as_u64(&values).value(i)),
-                        DataType::Float64 => Number::Float(as_f64(&values).value(i)),
-                        _ => return Err(unsupported_sum_type(data_type)),
-                    };
-                    groups[id] = Some(match groups[id] {
-                        Some(old) => old.add(number)?,
-                        None => number,
-                    });
-                }
-            }
-            Self::Avg(groups) => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
-                let values = cast(argument.as_ref(), &DataType::Float64)?;
-                let values = as_f64(&values);
-                for (i, &id) in ids.iter().enumerate() {
-                    if values.is_null(i) {
-                        continue;
-                    }
-                    groups[id].0 = groups[id].0.checked_add(1).ok_or_else(overflow)?;
-                    groups[id].1 += values.value(i);
-                }
-            }
-            Self::Covar(groups) => {
-                let (x, y) = values
-                    .split_first()
-                    .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
-                    .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
-                let x = cast(x.as_ref(), &DataType::Float64)?;
-                let y = cast(y.as_ref(), &DataType::Float64)?;
-                let (x, y) = (as_f64(&x), as_f64(&y));
-                for (i, &id) in ids.iter().enumerate() {
-                    if x.is_valid(i) && y.is_valid(i) {
-                        groups[id].update(x.value(i), y.value(i))?;
-                    }
-                }
-            }
-            Self::Extremum {
-                groups,
-                converter,
-                minimum,
-                ..
-            } => {
-                let rows = converter.convert_columns(values)?;
-                let nulls = values[0].logical_nulls();
-                for (i, &id) in ids.iter().enumerate() {
-                    if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
-                        continue;
-                    }
-                    let row = rows.row(i);
-                    let replace = groups[id].as_ref().is_none_or(|(key, _)| {
-                        if *minimum {
-                            row.as_ref() < key.as_slice()
-                        } else {
-                            row.as_ref() > key.as_slice()
-                        }
-                    });
-                    if replace {
-                        // Retain the chosen row; Arrow may share backing buffers.
-                        let value = arrow::compute::take(
-                            values[0].as_ref(),
-                            &UInt64Array::from(vec![i as u64]),
-                            None,
-                        )?;
-                        groups[id] = Some((row.as_ref().to_vec(), value));
-                    }
-                }
-            }
-        }
-        Ok(())
+        (self.update_fn)(&mut self.state, values, ids)
     }
     pub fn state_types(&self) -> Vec<DataType> {
-        match self {
-            Self::Count(_) => vec![DataType::Int64],
-            Self::Distinct { .. } => vec![DataType::List(Arc::new(Field::new(
+        match &self.state {
+            AccumulatorState::Count(_) => vec![DataType::Int64],
+            AccumulatorState::Distinct { .. } => vec![DataType::List(Arc::new(Field::new(
                 "item",
                 DataType::Binary,
                 true,
             )))],
-            Self::Sum { data_type, .. } | Self::Extremum { data_type, .. } => {
+            AccumulatorState::Sum { data_type, .. }
+            | AccumulatorState::Extremum { data_type, .. } => {
                 vec![data_type.clone()]
             }
-            Self::Avg(_) => vec![DataType::UInt64, DataType::Float64],
-            Self::Covar(_) => vec![
+            AccumulatorState::Avg(_) => vec![DataType::UInt64, DataType::Float64],
+            AccumulatorState::Covar(_) => vec![
                 DataType::UInt64,
                 DataType::Float64,
                 DataType::Float64,
@@ -280,9 +322,9 @@ impl Accumulator {
         }
     }
     pub fn state(&self) -> Result<Vec<ArrayRef>> {
-        Ok(match self {
-            Self::Count(groups) => vec![Arc::new(Int64Array::from(groups.clone()))],
-            Self::Distinct { groups, .. } => {
+        Ok(match &self.state {
+            AccumulatorState::Count(groups) => vec![Arc::new(Int64Array::from(groups.clone()))],
+            AccumulatorState::Distinct { groups, .. } => {
                 let mut builder = ListBuilder::new(BinaryBuilder::new());
                 for group in groups {
                     for key in group {
@@ -292,12 +334,12 @@ impl Accumulator {
                 }
                 vec![Arc::new(builder.finish())]
             }
-            Self::Sum { groups, data_type } => vec![number_array(groups, data_type)?],
-            Self::Avg(groups) => vec![
+            AccumulatorState::Sum { groups, .. } => vec![groups.state()],
+            AccumulatorState::Avg(groups) => vec![
                 Arc::new(UInt64Array::from_iter_values(groups.iter().map(|g| g.0))),
                 Arc::new(Float64Array::from_iter_values(groups.iter().map(|g| g.1))),
             ],
-            Self::Covar(groups) => vec![
+            AccumulatorState::Covar(groups) => vec![
                 Arc::new(UInt64Array::from_iter_values(
                     groups.iter().map(|g| g.count),
                 )),
@@ -311,7 +353,7 @@ impl Accumulator {
                     groups.iter().map(|g| g.co_moment),
                 )),
             ],
-            Self::Extremum {
+            AccumulatorState::Extremum {
                 groups, data_type, ..
             } => {
                 if groups.is_empty() {
@@ -336,8 +378,8 @@ impl Accumulator {
         })
     }
     pub fn merge(&mut self, states: &[ArrayRef], ids: &[usize]) -> Result<()> {
-        match self {
-            Self::Count(groups) => {
+        match &mut self.state {
+            AccumulatorState::Count(groups) => {
                 let values = as_i64(&states[0]);
                 for (i, &id) in ids.iter().enumerate() {
                     groups[id] = groups[id]
@@ -345,7 +387,7 @@ impl Accumulator {
                         .ok_or_else(overflow)?;
                 }
             }
-            Self::Distinct { groups, .. } => {
+            AccumulatorState::Distinct { groups, .. } => {
                 let lists = states[0].as_any().downcast_ref::<ListArray>().unwrap();
                 for (i, &id) in ids.iter().enumerate() {
                     let values = lists.value(i);
@@ -355,7 +397,7 @@ impl Accumulator {
                     }
                 }
             }
-            Self::Avg(groups) => {
+            AccumulatorState::Avg(groups) => {
                 let (counts, sums) = (as_u64(&states[0]), as_f64(&states[1]));
                 for (i, &id) in ids.iter().enumerate() {
                     groups[id].0 = groups[id]
@@ -365,7 +407,7 @@ impl Accumulator {
                     groups[id].1 += sums.value(i);
                 }
             }
-            Self::Covar(groups) => {
+            AccumulatorState::Covar(groups) => {
                 let count = as_u64(&states[0]);
                 let (x, y, c) = (as_f64(&states[1]), as_f64(&states[2]), as_f64(&states[3]));
                 for (i, &id) in ids.iter().enumerate() {
@@ -377,25 +419,27 @@ impl Accumulator {
                     })?;
                 }
             }
-            Self::Sum { .. } | Self::Extremum { .. } => self.update(states, ids)?,
+            AccumulatorState::Sum { .. } | AccumulatorState::Extremum { .. } => {
+                self.update(states, ids)?
+            }
         }
         Ok(())
     }
     pub fn evaluate(&self) -> Result<ArrayRef> {
-        Ok(match self {
-            Self::Distinct { groups, .. } => Arc::new(Int64Array::from(
+        Ok(match &self.state {
+            AccumulatorState::Distinct { groups, .. } => Arc::new(Int64Array::from(
                 groups
                     .iter()
                     .map(|s| i64::try_from(s.len()).map_err(|_| overflow()))
                     .collect::<Result<Vec<_>>>()?,
             )),
-            Self::Avg(groups) => Arc::new(Float64Array::from(
+            AccumulatorState::Avg(groups) => Arc::new(Float64Array::from(
                 groups
                     .iter()
                     .map(|(count, sum)| (*count != 0).then(|| *sum / *count as f64))
                     .collect::<Vec<_>>(),
             )),
-            Self::Covar(groups) => Arc::new(Float64Array::from(
+            AccumulatorState::Covar(groups) => Arc::new(Float64Array::from(
                 groups
                     .iter()
                     .map(|g| (g.count != 0).then(|| g.co_moment / g.count as f64))
@@ -405,6 +449,150 @@ impl Accumulator {
         })
     }
 }
+impl AccumulatorState {
+    fn as_count_mut(&mut self) -> &mut Vec<i64> {
+        let Self::Count(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn as_avg_mut(&mut self) -> &mut Vec<(u64, f64)> {
+        let Self::Avg(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn as_covar_mut(&mut self) -> &mut Vec<Covariance> {
+        let Self::Covar(groups) = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        groups
+    }
+
+    fn as_distinct_mut(&mut self) -> (&mut Vec<HashSet<Vec<u8>>>, &mut RowConverter) {
+        let Self::Distinct { groups, converter } = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        (groups, converter)
+    }
+
+    fn as_sum_mut(&mut self) -> (&mut SumGroups, &DataType) {
+        let Self::Sum { groups, data_type } = self else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        (groups, data_type)
+    }
+
+    fn as_extremum_mut(&mut self) -> (&mut Vec<Option<(Vec<u8>, ArrayRef)>>, &mut RowConverter) {
+        let Self::Extremum {
+            groups, converter, ..
+        } = self
+        else {
+            unreachable!("aggregate state and update function are bound together")
+        };
+        (groups, converter)
+    }
+}
+
+fn update_count(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+    let groups = state.as_count_mut();
+    let nulls = values.first().and_then(|v| v.logical_nulls());
+    if let Some(nulls) = nulls.filter(|nulls| nulls.null_count() != 0) {
+        for index in nulls.valid_indices() {
+            let id = ids[index];
+            groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+        }
+    } else {
+        for &id in ids {
+            groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn update_distinct(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+    let (groups, converter) = state.as_distinct_mut();
+    let rows = converter.convert_columns(values)?;
+    let nulls = values[0].logical_nulls();
+    for (i, &id) in ids.iter().enumerate() {
+        if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
+            groups[id].insert(rows.row(i).as_ref().to_vec());
+        }
+    }
+
+    Ok(())
+}
+
+fn update_avg(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+    let groups = state.as_avg_mut();
+    let argument = values
+        .first()
+        .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
+    let values = cast(argument.as_ref(), &DataType::Float64)?;
+    let values = as_f64(&values);
+    for (i, &id) in ids.iter().enumerate() {
+        if values.is_null(i) {
+            continue;
+        }
+        groups[id].0 = groups[id].0.checked_add(1).ok_or_else(overflow)?;
+        groups[id].1 += values.value(i);
+    }
+
+    Ok(())
+}
+
+fn update_covar(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+    let groups = state.as_covar_mut();
+    let (x, y) = values
+        .split_first()
+        .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
+        .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
+    let x = cast(x.as_ref(), &DataType::Float64)?;
+    let y = cast(y.as_ref(), &DataType::Float64)?;
+    let (x, y) = (as_f64(&x), as_f64(&y));
+    for (i, &id) in ids.iter().enumerate() {
+        if x.is_valid(i) && y.is_valid(i) {
+            groups[id].update(x.value(i), y.value(i))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn update_extremum<const MINIMUM: bool>(
+    state: &mut AccumulatorState,
+    values: &[ArrayRef],
+    ids: &[usize],
+) -> Result<()> {
+    let (groups, converter) = state.as_extremum_mut();
+    let rows = converter.convert_columns(values)?;
+    let nulls = values[0].logical_nulls();
+    for (i, &id) in ids.iter().enumerate() {
+        if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
+            continue;
+        }
+        let row = rows.row(i);
+        let replace = groups[id].as_ref().is_none_or(|(key, _)| {
+            if MINIMUM {
+                row.as_ref() < key.as_slice()
+            } else {
+                row.as_ref() > key.as_slice()
+            }
+        });
+        if replace {
+            // Retain the chosen row; Arrow may share backing buffers.
+            let value =
+                arrow::compute::take(values[0].as_ref(), &UInt64Array::from(vec![i as u64]), None)?;
+            groups[id] = Some((row.as_ref().to_vec(), value));
+        }
+    }
+
+    Ok(())
+}
+
 fn as_i64(a: &ArrayRef) -> &Int64Array {
     a.as_any().downcast_ref().unwrap()
 }
@@ -413,43 +601,4 @@ fn as_u64(a: &ArrayRef) -> &UInt64Array {
 }
 fn as_f64(a: &ArrayRef) -> &Float64Array {
     a.as_any().downcast_ref().unwrap()
-}
-fn unsupported_sum_type(data_type: &DataType) -> Error {
-    Error::Execution(format!("unsupported sum result type: {data_type}"))
-}
-
-fn number_array(groups: &[Option<Number>], data_type: &DataType) -> Result<ArrayRef> {
-    Ok(match data_type {
-        DataType::Int64 => Arc::new(Int64Array::from(
-            groups
-                .iter()
-                .map(|n| match n {
-                    Some(Number::Signed(v)) => Some(*v),
-                    None => None,
-                    _ => unreachable!(),
-                })
-                .collect::<Vec<_>>(),
-        )),
-        DataType::UInt64 => Arc::new(UInt64Array::from(
-            groups
-                .iter()
-                .map(|n| match n {
-                    Some(Number::Unsigned(v)) => Some(*v),
-                    None => None,
-                    _ => unreachable!(),
-                })
-                .collect::<Vec<_>>(),
-        )),
-        DataType::Float64 => Arc::new(Float64Array::from(
-            groups
-                .iter()
-                .map(|n| match n {
-                    Some(Number::Float(v)) => Some(*v),
-                    None => None,
-                    _ => unreachable!(),
-                })
-                .collect::<Vec<_>>(),
-        )),
-        _ => return Err(unsupported_sum_type(data_type)),
-    })
 }

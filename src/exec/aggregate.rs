@@ -1070,8 +1070,8 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sum_result_type_is_an_execution_error() {
-        // The host declares the SUM result type; an unusable one must not panic.
+    fn unsupported_sum_result_type_is_rejected_during_state_construction() {
+        // Reject the host-declared result type before any input batch is processed.
         let operator = Arc::new(
             AggregateOperator::try_new(
                 groups(false),
@@ -1087,10 +1087,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut state = AggregateState::new(&operator).unwrap();
         assert!(matches!(
-            state.update(&batch(vec![Some("a")], vec![Some(1.)])),
-            Err(Error::Execution(_))
+            AggregateState::new(&operator),
+            Err(Error::InvalidPlan(message)) if message == "unsupported sum result type: Utf8"
         ));
     }
 }
