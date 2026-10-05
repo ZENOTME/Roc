@@ -32,7 +32,9 @@ mod reference;
 pub use case::{CaseExpression, CaseExpressionEvaluation};
 pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};
 pub use coalesce::{CoalesceExpression, CoalesceExpressionEvaluation};
-pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionEvaluation};
+pub use conjunction::{
+    AndExpressionEvaluation, Conjunction, ConjunctionExpression, OrExpressionEvaluation,
+};
 pub use constant::{ConstantExpression, ConstantExpressionEvaluation};
 pub use function::{
     BinaryFunctionExpressionEvaluation, FunctionExpression, FunctionKind,
@@ -116,7 +118,8 @@ scalar_evaluation! {
     UnaryFunction(UnaryFunctionExpressionEvaluation),
     BinaryFunction(BinaryFunctionExpressionEvaluation),
     Cast(CastExpressionEvaluation),
-    Conjunction(ConjunctionExpressionEvaluation),
+    And(AndExpressionEvaluation),
+    Or(OrExpressionEvaluation),
     Not(NotExpressionEvaluation),
     Case(CaseExpressionEvaluation),
     Coalesce(CoalesceExpressionEvaluation),
