@@ -50,6 +50,7 @@ impl ProcessExecutor for FilterExecutor {
     fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
         let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
         let predicate = self.predicate.evaluate(&executor)?;
+        let predicate = predicate.into_array(input.num_rows())?;
         let mask = predicate
             .as_boolean_opt()
             .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;

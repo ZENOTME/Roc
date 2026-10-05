@@ -67,7 +67,12 @@ impl ProjectionExecutor {
         let columns = self
             .expressions
             .iter()
-            .map(|e| e.evaluate(&executor))
+            .map(|e| {
+                let value = e.evaluate(&executor)?;
+                // RecordBatch checks each column's concrete Arrow type against its schema.
+                let value = value.into_array(input.num_rows())?;
+                Ok(value)
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(RecordBatch::try_new_with_options(
             self.output_schema.clone(),

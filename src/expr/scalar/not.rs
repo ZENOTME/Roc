@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
 use arrow::{
-    array::{ArrayRef, AsArray, new_empty_array},
+    array::{AsArray, new_empty_array},
     compute::not,
     datatypes::DataType,
 };
@@ -64,25 +64,36 @@ impl NotExpression {
 }
 
 impl NotExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         if executor.num_rows()? == 0 {
             return self.eval(executor, &[]);
         }
         let argument = self.argument.evaluate(executor)?;
-        self.eval(executor, &[&argument])
+        self.eval(executor, &[argument])
     }
-    fn eval(&self, executor: &ScalarExpressionExecutor, input: &[&ArrayRef]) -> Result<ArrayRef> {
+    fn eval(
+        &self,
+        executor: &ScalarExpressionExecutor,
+        input: &[ColumnValue],
+    ) -> Result<ColumnValue> {
         Ok(if executor.num_rows()? == 0 {
-            new_empty_array(&DataType::Boolean)
+            ColumnValue::Array(new_empty_array(&DataType::Boolean))
         } else {
             let [argument] = input else {
                 return Err(Error::Execution("not requires one input result".into()));
             };
 
-            let argument = argument
-                .as_boolean_opt()
-                .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
-            Arc::new(not(argument)?)
+            match argument {
+                ColumnValue::Scalar(value) => {
+                    ColumnValue::Scalar(ScalarValue::Boolean(value.as_boolean()?.map(|v| !v)))
+                }
+                ColumnValue::Array(value) => {
+                    let value = value
+                        .as_boolean_opt()
+                        .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+                    ColumnValue::Array(Arc::new(not(value)?))
+                }
+            }
         })
     }
 }

@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
 use arrow::{
     array::{Array, ArrayRef, AsArray, BooleanArray, new_empty_array},
     buffer::{BooleanBuffer, MutableBuffer, NullBuffer},
     datatypes::DataType,
-    util::bit_util::apply_bitwise_binary_op,
+    util::bit_util::{apply_bitwise_binary_op, apply_bitwise_unary_op},
 };
 use std::sync::Arc;
 
@@ -84,13 +84,13 @@ impl ConjunctionExpression {
 }
 
 impl AndExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         evaluate::<true>(&self.arguments, executor)
     }
 }
 
 impl OrExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         evaluate::<false>(&self.arguments, executor)
     }
 }
@@ -98,17 +98,48 @@ impl OrExpressionEvaluation {
 fn evaluate<const AND: bool>(
     arguments: &[ScalarExpressionEvaluation],
     executor: &ScalarExpressionExecutor,
-) -> Result<ArrayRef> {
+) -> Result<ColumnValue> {
     let rows = executor.num_rows()?;
     if rows == 0 {
-        return Ok(new_empty_array(&DataType::Boolean));
+        return Ok(ColumnValue::Array(new_empty_array(&DataType::Boolean)));
     }
-    let mut col = ConjunctionBuffer::new::<AND>(rows);
+    let mut scalar = Some(AND);
+    let mut col = None;
     for argument in arguments {
         let value = argument.evaluate(executor)?;
-        update::<AND>(&mut col, &value)?;
+        match value {
+            ColumnValue::Scalar(value) => {
+                if let Some(col) = &mut col {
+                    update_scalar::<AND>(col, &value)?;
+                } else {
+                    let value = value.as_boolean()?;
+                    scalar = match (scalar, value) {
+                        (Some(left), Some(right)) => {
+                            Some(if AND { left && right } else { left || right })
+                        }
+                        (Some(value), None) | (None, Some(value)) if value != AND => Some(value),
+                        _ => None,
+                    };
+                }
+            }
+            ColumnValue::Array(value) => {
+                if let Some(col) = &mut col {
+                    update_array::<AND>(col, &value)?;
+                } else {
+                    let mut buffer = ConjunctionBuffer::new::<AND>(rows);
+                    if scalar != Some(AND) {
+                        update_scalar::<AND>(&mut buffer, &ScalarValue::Boolean(scalar))?;
+                    }
+                    update_array::<AND>(&mut buffer, &value)?;
+                    col = Some(buffer);
+                }
+            }
+        }
     }
-    Ok(Arc::new(col.finish()))
+    Ok(match col {
+        Some(col) => ColumnValue::Array(Arc::new(col.finish())),
+        None => ColumnValue::Scalar(ScalarValue::Boolean(scalar)),
+    })
 }
 
 /// Mutable workspace for one result, converted to an Arrow array only at the end.
@@ -141,8 +172,41 @@ impl ConjunctionBuffer {
     }
 }
 
-/// The concrete evaluation fixes AND/OR; representation dispatch stays inside this kernel.
-fn update<const AND: bool>(col: &mut ConjunctionBuffer, input: &ArrayRef) -> Result<()> {
+/// Merge a Boolean scalar without allocating a broadcast input array.
+fn update_scalar<const AND: bool>(col: &mut ConjunctionBuffer, input: &ScalarValue) -> Result<()> {
+    let value = input.as_boolean()?;
+    let bits = if value == Some(true) { u64::MAX } else { 0 };
+    if value.is_some() {
+        if let Some(validity) = &mut col.validity {
+            apply_bitwise_unary_op(validity.as_slice_mut(), 0, col.len, |valid| {
+                valid | if AND { !bits } else { bits }
+            });
+        }
+        apply_bitwise_unary_op(col.values.as_slice_mut(), 0, col.len, |left| {
+            if AND { left & bits } else { left | bits }
+        });
+    } else {
+        let validity = col.validity.get_or_insert_with(|| {
+            let mut buffer = MutableBuffer::from_len_zeroed(col.values.len());
+            buffer.as_slice_mut().fill(0xff);
+            buffer
+        });
+        apply_bitwise_binary_op(
+            validity.as_slice_mut(),
+            0,
+            col.values.as_slice(),
+            0,
+            col.len,
+            |valid, value| valid & if AND { !value } else { value },
+        );
+        // NULL adds no decisive value. Retain only an already valid FALSE
+        // for AND (TRUE for OR); value bits under NULL remain arbitrary.
+    }
+    Ok(())
+}
+
+/// Merge an ordinary Boolean array into the existing result buffers.
+fn update_array<const AND: bool>(col: &mut ConjunctionBuffer, input: &ArrayRef) -> Result<()> {
     if input.len() != col.len {
         return Err(Error::Execution("Boolean input lengths differ".into()));
     }
@@ -228,6 +292,7 @@ mod tests {
         error::Error,
         expr::scalar::{ConstantExpression, ReferenceExpression},
     };
+    use arrow::array::ArrayRef;
     use arrow::array::Int64Array;
 
     #[test]
@@ -273,9 +338,20 @@ mod tests {
                 if message == "expected Boolean expression")
             );
             let empty = ScalarExpressionExecutor::new(&[], 0);
-            assert!(expression.evaluate(&empty).unwrap().is_empty());
+            assert!(
+                expression
+                    .evaluate(&empty)
+                    .unwrap()
+                    .into_array(0)
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
+    fn constant(value: Option<bool>, _len: usize) -> ColumnValue {
+        ColumnValue::Scalar(ScalarValue::Boolean(value))
+    }
+
     fn sliced(offset: usize, len: usize, seed: usize, nullable: bool) -> ArrayRef {
         let size = offset + len + 1;
         let array: ArrayRef = Arc::new(BooleanArray::new(
@@ -288,19 +364,28 @@ mod tests {
     }
 
     fn check<const AND: bool>(inputs: Vec<ArrayRef>, len: usize) {
-        let before = inputs.iter().map(|a| a.to_data()).collect::<Vec<_>>();
+        check_values::<AND>(inputs.into_iter().map(ColumnValue::Array).collect(), len);
+    }
+    fn check_values<const AND: bool>(inputs: Vec<ColumnValue>, len: usize) {
+        let before = inputs
+            .iter()
+            .map(|a| a.clone().into_array(len).unwrap().to_data())
+            .collect::<Vec<_>>();
         let mut col = ConjunctionBuffer::new::<AND>(len);
         let values_ptr = col.values.as_ptr();
         let mut validity_ptr = None;
         let mut expected = BooleanArray::from(vec![AND; len]);
         for input in &inputs {
-            let flat = input;
+            let flat = input.clone().into_array(len).unwrap();
             expected = if AND {
                 arrow::compute::and_kleene(&expected, flat.as_boolean()).unwrap()
             } else {
                 arrow::compute::or_kleene(&expected, flat.as_boolean()).unwrap()
             };
-            update::<AND>(&mut col, input).unwrap();
+            match input {
+                ColumnValue::Scalar(value) => update_scalar::<AND>(&mut col, value).unwrap(),
+                ColumnValue::Array(value) => update_array::<AND>(&mut col, value).unwrap(),
+            }
             assert_eq!(col.values.as_ptr(), values_ptr);
             if let Some(validity) = &col.validity {
                 if let Some(ptr) = validity_ptr {
@@ -330,7 +415,10 @@ mod tests {
             assert_eq!(Some(nulls.buffer().as_ptr()), validity_ptr);
         }
         assert_eq!(
-            inputs.iter().map(|a| a.to_data()).collect::<Vec<_>>(),
+            inputs
+                .iter()
+                .map(|a| a.clone().into_array(len).unwrap().to_data())
+                .collect::<Vec<_>>(),
             before
         );
     }
@@ -409,9 +497,9 @@ mod tests {
                 sliced(63, 129, 2, false),
             ] {
                 if and {
-                    update::<true>(&mut col, &input).unwrap();
+                    update_array::<true>(&mut col, &input).unwrap();
                 } else {
-                    update::<false>(&mut col, &input).unwrap();
+                    update_array::<false>(&mut col, &input).unwrap();
                 }
                 assert_eq!(col.values.as_ptr(), ptr);
                 assert!(col.validity.is_none());
@@ -430,10 +518,30 @@ mod tests {
             let mut col = ConjunctionBuffer::new::<true>(3);
             let ptr = col.values.as_ptr();
             let before = col.values.as_slice().to_vec();
-            assert!(update::<true>(&mut col, &input).is_err());
+            assert!(update_array::<true>(&mut col, &input).is_err());
             assert_eq!(col.values.as_ptr(), ptr);
             assert_eq!(col.values.as_slice(), before);
             assert!(col.validity.is_none());
+        }
+    }
+    #[test]
+    fn scalar_constants_match_arrow_and_reuse_all_buffers() {
+        for len in [1, 7, 8, 63, 64, 65, 127, 129, 257] {
+            for offset in [0, 1, 7, 63, 65] {
+                for scalar in [Some(true), Some(false), None] {
+                    let inputs = vec![
+                        constant(scalar, len),
+                        ColumnValue::Array(sliced(offset, len, 0, true)),
+                        constant(None, len),
+                        ColumnValue::Array(sliced(offset + 1, len, 1, false)),
+                        constant(Some(true), len),
+                        constant(Some(false), len),
+                        ColumnValue::Array(sliced(offset + 2, len, 2, true)),
+                    ];
+                    check_values::<true>(inputs.clone(), len);
+                    check_values::<false>(inputs, len);
+                }
+            }
         }
     }
 }

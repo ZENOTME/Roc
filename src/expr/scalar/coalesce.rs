@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType};
 use crate::error::{Error, Result};
 use arrow::{
     array::{ArrayRef, UInt64Array, new_empty_array},
@@ -76,7 +76,7 @@ impl CoalesceExpression {
 
 impl CoalesceExpressionEvaluation {
     /// Evaluate required rows and combine branch outputs in input order.
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         let num_rows = executor.num_rows()?;
         if num_rows == 0 {
             return self.eval(executor, &[], &[]);
@@ -94,15 +94,15 @@ impl CoalesceExpressionEvaluation {
         executor: &ScalarExpressionExecutor,
         input: &[&ArrayRef],
         mapping: &[(usize, usize)],
-    ) -> Result<ArrayRef> {
-        Ok(if executor.num_rows()? == 0 {
+    ) -> Result<ColumnValue> {
+        Ok(ColumnValue::Array(if executor.num_rows()? == 0 {
             new_empty_array(&self.data_type)
         } else {
             interleave(
                 &input.iter().map(|value| value.as_ref()).collect::<Vec<_>>(),
                 mapping,
             )?
-        })
+        }))
     }
 
     fn eval_arguments(
@@ -122,6 +122,7 @@ impl CoalesceExpressionEvaluation {
             )?;
             let remaining = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
             let value = child.evaluate(&remaining)?;
+            let value = value.into_array(remaining.num_rows()?)?;
             let nulls = value.logical_nulls();
             buffers.next.clear();
             for (i, position) in buffers.remaining.drain(..).enumerate() {

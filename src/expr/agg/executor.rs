@@ -84,7 +84,7 @@ impl AggregateExpressionExecutor {
         let selected = self
             .filter
             .as_ref()
-            .map(|filter| select_true(filter.evaluate(&executor)?))
+            .map(|filter| select_true(filter.evaluate(&executor)?.into_array(input.num_rows())?))
             .transpose()?;
         let selected_ids = selected
             .as_ref()
@@ -108,7 +108,12 @@ impl AggregateExpressionExecutor {
         let values = self
             .arguments
             .iter()
-            .map(|e| e.evaluate(&executor))
+            .map(|e| {
+                let value = e.evaluate(&executor)?;
+                // Accumulators currently consume ordinary typed arrays.
+                let value = value.into_array(input.num_rows())?;
+                Ok(value)
+            })
             .collect::<Result<Vec<_>>>()?;
         self.accumulator.update(&values, ids)
     }

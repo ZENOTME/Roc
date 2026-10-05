@@ -65,8 +65,9 @@ impl ScalarExpressionEvaluation {
     pub fn try_new(expression: ScalarExprRef) -> Result<Self> {
         expression.to_evaluation()
     }
-    /// Evaluate the expression tree; concrete nodes prepare their child inputs.
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    /// Evaluate to a scalar or an array. Scalars broadcast over the executor's
+    /// input rows; consumers materialize them only when they need full columns.
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         match self {
             Self::Reference(e) => e.evaluate(executor),
             Self::Constant(e) => e.evaluate(executor),
@@ -108,7 +109,12 @@ mod tests {
     fn binary(kind: FunctionKind, left: ScalarExprRef, right: ScalarExprRef) -> ScalarExprRef {
         FunctionExpression::binary(kind, left, right, DataType::Int64, false).into_ref()
     }
-    fn ints(array: &ArrayRef) -> Vec<i64> {
+    fn ints(value: &ColumnValue) -> Vec<i64> {
+        let len = match value {
+            ColumnValue::Array(a) => a.len(),
+            ColumnValue::Scalar(_) => 1,
+        };
+        let array = value.clone().into_array(len).unwrap();
         array
             .as_any()
             .downcast_ref::<Int64Array>()
@@ -136,7 +142,10 @@ mod tests {
 
         assert_eq!(ints(&output), vec![12, 6]);
         let stored = output.clone();
-        let previous = Arc::downgrade(&output);
+        let ColumnValue::Array(array) = &output else {
+            panic!("expected array")
+        };
+        let previous = Arc::downgrade(array);
         drop(output);
         assert!(previous.upgrade().is_some());
 
