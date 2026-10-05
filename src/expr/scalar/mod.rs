@@ -28,6 +28,8 @@ mod function;
 mod kernels;
 mod not;
 mod reference;
+mod value;
+pub use value::{ColumnValue, ScalarValue};
 
 pub use case::{CaseExpression, CaseExpressionEvaluation};
 pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};

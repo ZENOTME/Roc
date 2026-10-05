@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType};
 use crate::error::Result;
 use crate::expr::predicate::select_true;
 use arrow::{
@@ -83,7 +83,7 @@ impl CaseExpression {
 
 impl CaseExpressionEvaluation {
     /// Evaluate required rows and combine branch outputs in input order.
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         let num_rows = executor.num_rows()?;
         if num_rows == 0 {
             return self.eval(executor, &[], &[]);
@@ -101,15 +101,15 @@ impl CaseExpressionEvaluation {
         executor: &ScalarExpressionExecutor,
         input: &[&ArrayRef],
         mapping: &[(usize, usize)],
-    ) -> Result<ArrayRef> {
-        Ok(if executor.num_rows()? == 0 {
+    ) -> Result<ColumnValue> {
+        Ok(ColumnValue::Array(if executor.num_rows()? == 0 {
             new_empty_array(&self.data_type)
         } else {
             interleave(
                 &input.iter().map(|value| value.as_ref()).collect::<Vec<_>>(),
                 mapping,
             )?
-        })
+        }))
     }
 
     fn eval_branches(
@@ -127,9 +127,13 @@ impl CaseExpressionEvaluation {
                 &buffers.remaining,
             )?;
             let candidates = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
-            let mut selected = select_true(condition.evaluate(&candidates)?)?
-                .into_iter()
-                .peekable();
+            let mut selected = select_true(
+                condition
+                    .evaluate(&candidates)?
+                    .into_array(candidates.num_rows()?)?,
+            )?
+            .into_iter()
+            .peekable();
             buffers.matched.clear();
             buffers.next.clear();
             for (i, position) in buffers.remaining.drain(..).enumerate() {
@@ -146,6 +150,7 @@ impl CaseExpressionEvaluation {
                     branch_columns(executor.columns()?, executor.num_rows()?, &buffers.matched)?;
                 let matched = ScalarExpressionExecutor::new(&input, buffers.matched.len());
                 let value = branch.evaluate(&matched)?;
+                let value = value.into_array(matched.num_rows()?)?;
                 for (i, &position) in buffers.matched.iter().enumerate() {
                     buffers.mapping[position] = (buffers.pieces.len(), i);
                 }
@@ -160,6 +165,7 @@ impl CaseExpressionEvaluation {
             )?;
             let remaining = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
             let value = self.otherwise.evaluate(&remaining)?;
+            let value = value.into_array(remaining.num_rows()?)?;
             for (i, &position) in buffers.remaining.iter().enumerate() {
                 buffers.mapping[position] = (buffers.pieces.len(), i);
             }

@@ -12,96 +12,91 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
-use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, UInt64Array, new_null_array,
-};
-use arrow::compute::take;
-use arrow::datatypes::DataType;
-use std::sync::Arc;
+use arrow::{array::ArrayRef, datatypes::DataType};
 
-/// An expression that evaluates to a single typed constant, stored as a
-/// one-element Arrow array.
+/// A typed scalar constant, independent of the input batch length.
 #[derive(Clone, Debug)]
 pub struct ConstantExpression {
-    value: ArrayRef,
+    value: ScalarValue,
     result_type: ExpressionResultType,
 }
 
 #[derive(Debug)]
 pub struct ConstantExpressionEvaluation {
-    value: ArrayRef,
+    value: ScalarValue,
 }
 
 impl ConstantExpression {
+    pub fn new(value: ScalarValue) -> Self {
+        let result_type = ExpressionResultType {
+            data_type: value.data_type(),
+            nullable: value.is_null(),
+        };
+        Self { value, result_type }
+    }
+    /// Compatibility constructor for callers supplying one Arrow value.
     pub fn try_new(value: ArrayRef) -> Result<Self> {
         if value.len() != 1 {
             return Err(Error::InvalidPlan(
                 "constant must contain exactly one value".into(),
             ));
         }
-        Ok(Self::from_array(value))
+        Ok(Self::new(ScalarValue::try_from_array(&value, 0)?))
     }
-    fn from_array(value: ArrayRef) -> Self {
-        let result_type = ExpressionResultType {
-            data_type: value.data_type().clone(),
-            nullable: value.logical_null_count() != 0,
-        };
-        Self { value, result_type }
-    }
-    pub fn value(&self) -> &ArrayRef {
+    pub fn value(&self) -> &ScalarValue {
         &self.value
     }
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
     }
-
     pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ScalarExpressionEvaluation::Constant(self.bind()))
-    }
-
-    pub(super) fn bind(&self) -> ConstantExpressionEvaluation {
-        ConstantExpressionEvaluation {
+        Ok(ConstantExpressionEvaluation {
             value: self.value.clone(),
         }
+        .into())
     }
     pub fn null(data_type: &DataType) -> Self {
-        Self::from_array(new_null_array(data_type, 1))
+        Self::new(ScalarValue::Null(data_type.clone()))
     }
     pub fn int64(value: Option<i64>) -> Self {
-        Self::from_array(Arc::new(Int64Array::from(vec![value])))
+        Self::new(ScalarValue::Int64(value))
     }
     pub fn float64(value: Option<f64>) -> Self {
-        Self::from_array(Arc::new(Float64Array::from(vec![value])))
+        Self::new(ScalarValue::Float64(value))
     }
     pub fn boolean(value: Option<bool>) -> Self {
-        Self::from_array(Arc::new(BooleanArray::from(vec![value])))
+        Self::new(ScalarValue::Boolean(value))
     }
     pub fn string(value: Option<&str>) -> Self {
-        Self::from_array(Arc::new(StringArray::from(vec![value])))
+        Self::new(ScalarValue::Utf8(value.map(str::to_owned)))
+    }
+}
+impl ConstantExpressionEvaluation {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
+        executor.num_rows()?;
+        Ok(ColumnValue::Scalar(self.value.clone()))
     }
 }
 
-impl ConstantExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
-        self.eval(executor, &[])
-    }
-    fn eval(&self, executor: &ScalarExpressionExecutor, _input: &[&ArrayRef]) -> Result<ArrayRef> {
-        let num_rows = executor.num_rows()?;
-        Ok(if num_rows == 0 {
-            self.value.slice(0, 0)
-        } else if num_rows == 1 {
-            self.value.clone()
-        } else if self.value.logical_null_count() != 0 {
-            new_null_array(self.value.data_type(), num_rows)
-        } else {
-            take(
-                self.value.as_ref(),
-                &UInt64Array::from(vec![0; num_rows]),
-                None,
-            )?
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn constant_stays_scalar_at_every_batch_length() {
+        for value in [Some(7), None] {
+            let expression = ConstantExpression::int64(value).to_evaluation().unwrap();
+            for len in [0, 1, 3, 4096] {
+                let output = expression
+                    .evaluate(&ScalarExpressionExecutor::new(&[], len))
+                    .unwrap();
+                assert!(matches!(output, ColumnValue::Scalar(ScalarValue::Int64(v)) if v == value));
+                let array = output.into_array(len).unwrap();
+                assert_eq!(array.len(), len);
+                assert_eq!(array.data_type(), &DataType::Int64);
+            }
+        }
     }
 }

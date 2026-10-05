@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
+use super::{ColumnValue, ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
 use arrow::{
-    array::{ArrayRef, new_empty_array},
+    array::new_empty_array,
     compute::{CastOptions, cast_with_options},
     datatypes::DataType,
 };
@@ -83,22 +83,37 @@ impl CastExpression {
 }
 
 impl CastExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
+    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         if executor.num_rows()? == 0 {
             return self.eval(executor, &[]);
         }
         let argument = self.argument.evaluate(executor)?;
-        self.eval(executor, &[&argument])
+        self.eval(executor, &[argument])
     }
-    fn eval(&self, executor: &ScalarExpressionExecutor, input: &[&ArrayRef]) -> Result<ArrayRef> {
+    fn eval(
+        &self,
+        executor: &ScalarExpressionExecutor,
+        input: &[ColumnValue],
+    ) -> Result<ColumnValue> {
         Ok(if executor.num_rows()? == 0 {
-            new_empty_array(&self.target)
+            ColumnValue::Array(new_empty_array(&self.target))
         } else {
             let [argument] = input else {
                 return Err(Error::Execution("cast requires one input result".into()));
             };
 
-            cast_with_options(argument.as_ref(), &self.target, &self.options)?
+            match argument {
+                ColumnValue::Array(value) => ColumnValue::Array(cast_with_options(
+                    value.as_ref(),
+                    &self.target,
+                    &self.options,
+                )?),
+                ColumnValue::Scalar(value) => {
+                    let output =
+                        cast_with_options(value.to_array()?.as_ref(), &self.target, &self.options)?;
+                    ColumnValue::Scalar(ScalarValue::try_from_array(&output, 0)?)
+                }
+            }
         })
     }
 }
