@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod group_index;
+
 use super::ProjectionExecutor;
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
 use crate::expr::agg::executor::AggregateExpressionExecutor;
@@ -23,11 +25,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::{
     array::ArrayRef,
     record_batch::{RecordBatch, RecordBatchOptions},
-    row::{RowConverter, SortField},
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
-use std::collections::HashMap;
+use group_index::GroupIndex;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
@@ -39,9 +40,8 @@ const AGGREGATE_MORSEL_ROWS: usize = 2048;
 
 /// Worker-local grouping, expression evaluation, and aggregate states.
 struct AggregateState {
-    converter: RowConverter,
-    index: HashMap<Vec<u8>, usize>,
-    keys: Vec<Vec<u8>>,
+    index: GroupIndex,
+    group_ids: Vec<usize>,
     groups: ProjectionExecutor,
     output_schema: SchemaRef,
     accumulators: Vec<AggregateExpressionExecutor>,
@@ -74,14 +74,7 @@ impl PartialAggregate {
 impl AggregateState {
     fn new(operator: &AggregateOperator) -> Result<Self> {
         let groups = ProjectionExecutor::try_new(operator.groups().clone())?;
-        let converter = RowConverter::new(
-            groups
-                .output_schema()
-                .fields()
-                .iter()
-                .map(|f| SortField::new(f.data_type().clone()))
-                .collect(),
-        )?;
+        let index = GroupIndex::new(groups.output_schema())?;
         let grouped = !groups.output_schema().fields().is_empty();
         let output_schema = operator.output_schema();
         let mut accumulators = vec![];
@@ -93,9 +86,8 @@ impl AggregateState {
             accumulators.push(executor);
         }
         Ok(Self {
-            converter,
-            index: HashMap::new(),
-            keys: vec![],
+            index,
+            group_ids: vec![],
             groups,
             output_schema,
             accumulators,
@@ -103,33 +95,7 @@ impl AggregateState {
     }
 
     fn group_count(&self) -> usize {
-        if self.groups.output_schema().fields().is_empty() {
-            1
-        } else {
-            self.keys.len()
-        }
-    }
-
-    fn group_ids(&mut self, columns: &[ArrayRef], rows: usize) -> Result<Vec<usize>> {
-        if columns.is_empty() {
-            return Ok(vec![0; rows]);
-        }
-        let rows = self.converter.convert_columns(columns)?;
-        let mut ids = Vec::with_capacity(rows.num_rows());
-        for row in rows.iter() {
-            let id = match self.index.get(row.as_ref()) {
-                Some(id) => *id,
-                None => {
-                    let id = self.keys.len();
-                    let key = row.as_ref().to_vec();
-                    self.index.insert(key.clone(), id);
-                    self.keys.push(key);
-                    id
-                }
-            };
-            ids.push(id);
-        }
-        Ok(ids)
+        self.index.len()
     }
 
     fn update(&mut self, batch: &RecordBatch) -> Result<()> {
@@ -137,10 +103,11 @@ impl AggregateState {
             return Ok(());
         }
         let groups = self.groups.project_batch(batch)?;
-        let ids = self.group_ids(groups.columns(), batch.num_rows())?;
+        self.index
+            .intern(groups.columns(), batch.num_rows(), &mut self.group_ids)?;
         let count = self.group_count();
         for accumulator in &mut self.accumulators {
-            accumulator.update(batch, &ids, count)?;
+            accumulator.update(batch, &self.group_ids, count)?;
         }
         Ok(())
     }
@@ -149,22 +116,20 @@ impl AggregateState {
         if partial.num_rows() == 0 {
             return Ok(());
         }
-        let ids = self.group_ids(partial.groups.columns(), partial.num_rows())?;
+        self.index.intern(
+            partial.groups.columns(),
+            partial.num_rows(),
+            &mut self.group_ids,
+        )?;
         let count = self.group_count();
         for (accumulator, state) in self.accumulators.iter_mut().zip(&partial.states) {
-            accumulator.merge(state, &ids, count)?;
+            accumulator.merge(state, &self.group_ids, count)?;
         }
         Ok(())
     }
 
     fn group_columns(&self) -> Result<Vec<ArrayRef>> {
-        if self.groups.output_schema().fields().is_empty() {
-            return Ok(vec![]);
-        }
-        let parser = self.converter.parser();
-        Ok(self
-            .converter
-            .convert_rows(self.keys.iter().map(|key| parser.parse(key)))?)
+        self.index.columns()
     }
 
     fn finish_partial(self) -> Result<PartialAggregate> {
@@ -1091,5 +1056,78 @@ mod tests {
             AggregateState::new(&operator),
             Err(Error::InvalidPlan(message)) if message == "unsupported sum result type: Utf8"
         ));
+    }
+
+    #[test]
+    fn integer_groups_remap_partial_ids_and_keep_null_and_exact_sum() {
+        use std::collections::BTreeMap;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let value = ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, true))
+            .into_ref();
+        let operator = AggregateOperator::try_new(
+            Projection::from_indices(schema.clone(), &[0]).unwrap(),
+            vec![
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Sum,
+                    vec![value.clone()],
+                    DataType::Int64,
+                    true,
+                )),
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Count,
+                    vec![value],
+                    DataType::Int64,
+                    false,
+                )),
+            ],
+        )
+        .unwrap();
+        let inputs = [
+            (
+                vec![Some(i64::MIN), None, Some(0), Some(i64::MAX)],
+                vec![Some(i64::MAX - 1), None, Some(2), Some(4)],
+            ),
+            (
+                vec![Some(i64::MAX), Some(i64::MIN), None, Some(1)],
+                vec![Some(3), Some(1), None, Some(-1)],
+            ),
+        ];
+        let mut merged = AggregateState::new(&operator).unwrap();
+        for (keys, values) in inputs {
+            let input = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(keys)),
+                    Arc::new(Int64Array::from(values)),
+                ],
+            )
+            .unwrap();
+            let mut partial = AggregateState::new(&operator).unwrap();
+            partial.update(&input).unwrap();
+            merged.merge(&partial.finish_partial().unwrap()).unwrap();
+        }
+        let output = merged.finish().unwrap();
+        let arrays = output
+            .columns()
+            .iter()
+            .map(|a| a.as_any().downcast_ref::<Int64Array>().unwrap())
+            .collect::<Vec<_>>();
+        let actual = arrays[0]
+            .iter()
+            .zip(arrays[1].iter().zip(arrays[2].iter()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            actual,
+            BTreeMap::from([
+                (None, (None, Some(0))),
+                (Some(i64::MIN), (Some(i64::MAX), Some(2))),
+                (Some(0), (Some(2), Some(1))),
+                (Some(1), (Some(-1), Some(1))),
+                (Some(i64::MAX), (Some(7), Some(2))),
+            ])
+        );
     }
 }

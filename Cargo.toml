@@ -24,6 +24,7 @@ license = "Apache-2.0"
 arrow = { version = "59.2.0", default-features = false }
 asyncband = { version = "0.7.3", default-features = false, features = ["shutdown", "mpmc"] }
 futures = "0.3"
+foldhash = "0.2"
 thiserror = "2"
 
 [dev-dependencies]
