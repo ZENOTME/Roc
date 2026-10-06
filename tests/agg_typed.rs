@@ -33,7 +33,7 @@ fn expression(
 ) -> AggregateExpression {
     AggregateExpression::new(
         function,
-        vec![ReferenceExpression::new(0, ExpressionResultType::new(input, true)).into_ref()],
+        Some(ReferenceExpression::new(0, ExpressionResultType::new(input, true)).into_ref()),
         output,
         true,
     )

@@ -26,16 +26,15 @@ use arrow::{
     datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, UInt64Type},
     row::{RowConverter, SortField},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{borrow::Cow, collections::HashSet, sync::Arc};
 
-fn input_type(inputs: &[DataType]) -> Result<DataType> {
-    inputs
-        .first()
+fn input_type(input: Option<&DataType>) -> Result<DataType> {
+    input
         .cloned()
         .ok_or_else(|| Error::InvalidPlan("aggregate requires an argument".into()))
 }
 
-type UpdateFn = fn(&mut AccumulatorState, &[ArrayRef], &[usize]) -> Result<()>;
+type UpdateFn = fn(&mut AccumulatorState, Option<&ArrayRef>, &[usize]) -> Result<()>;
 
 /// Worker-local enum state paired with its update function during construction.
 pub(super) struct Accumulator {
@@ -54,7 +53,6 @@ enum AccumulatorState {
         data_type: DataType,
     },
     Avg(Vec<(u64, f64)>),
-    Covar(Vec<Covariance>),
     Extremum {
         groups: Vec<Option<(Vec<u8>, ArrayRef)>>,
         converter: RowConverter,
@@ -130,28 +128,25 @@ where
 impl SumGroups {
     fn bind(data_type: &DataType) -> Result<(Self, UpdateFn)> {
         Ok(match data_type {
-            DataType::Int64 => (Self::Signed(TypedSum::new()), |state, values, ids| {
+            DataType::Int64 => (Self::Signed(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let argument =
+                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_i64_mut().update(as_i64(&values), ids)
             }),
-            DataType::UInt64 => (Self::Unsigned(TypedSum::new()), |state, values, ids| {
+            DataType::UInt64 => (Self::Unsigned(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let argument =
+                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_u64_mut().update(as_u64(&values), ids)
             }),
-            DataType::Float64 => (Self::Float(TypedSum::new()), |state, values, ids| {
+            DataType::Float64 => (Self::Float(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast(argument.as_ref(), data_type)?;
+                let argument =
+                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                let values = cast_argument(argument, data_type)?;
                 groups.as_f64_mut().update(as_f64(&values), ids)
             }),
             _ => {
@@ -202,52 +197,20 @@ impl SumGroups {
 fn overflow() -> Error {
     Error::Execution("aggregate arithmetic overflow".into())
 }
-#[derive(Clone, Copy, Default)]
-pub(super) struct Covariance {
-    count: u64,
-    mean_x: f64,
-    mean_y: f64,
-    co_moment: f64,
-}
-impl Covariance {
-    fn update(&mut self, x: f64, y: f64) -> Result<()> {
-        self.count = self.count.checked_add(1).ok_or_else(overflow)?;
-        let dx = x - self.mean_x;
-        self.mean_x += dx / self.count as f64;
-        self.mean_y += (y - self.mean_y) / self.count as f64;
-        self.co_moment += dx * (y - self.mean_y);
-        Ok(())
-    }
-    fn merge(&mut self, other: Self) -> Result<()> {
-        if other.count == 0 {
-            return Ok(());
-        }
-        if self.count == 0 {
-            *self = other;
-            return Ok(());
-        }
-        let total = self.count.checked_add(other.count).ok_or_else(overflow)?;
-        let dx = other.mean_x - self.mean_x;
-        let dy = other.mean_y - self.mean_y;
-        self.co_moment +=
-            other.co_moment + dx * dy * (self.count as f64 * (other.count as f64 / total as f64));
-        self.mean_x += dx * (other.count as f64 / total as f64);
-        self.mean_y += dy * (other.count as f64 / total as f64);
-        self.count = total;
-        Ok(())
-    }
-}
 impl Accumulator {
     pub fn new(
         function: AggregateFunction,
         distinct: bool,
-        inputs: &[DataType],
+        input: Option<&DataType>,
         output: &DataType,
     ) -> Result<Self> {
         use AggregateFunction::*;
+        if function != Count || distinct {
+            input_type(input)?;
+        }
         let (state, update_fn): (AccumulatorState, UpdateFn) = match function {
             Count if distinct => {
-                let input = input_type(inputs)?;
+                let input = input_type(input)?;
                 (
                     AccumulatorState::Distinct {
                         groups: vec![],
@@ -268,9 +231,8 @@ impl Accumulator {
                 )
             }
             Avg => (AccumulatorState::Avg(vec![]), update_avg),
-            CovarPop => (AccumulatorState::Covar(vec![]), update_covar),
             Min | Max => {
-                let input = input_type(inputs)?;
+                let input = input_type(input)?;
                 (
                     AccumulatorState::Extremum {
                         groups: vec![],
@@ -293,12 +255,11 @@ impl Accumulator {
             AccumulatorState::Distinct { groups, .. } => groups.resize_with(count, HashSet::new),
             AccumulatorState::Sum { groups, .. } => groups.resize(count),
             AccumulatorState::Avg(groups) => groups.resize(count, (0, 0.0)),
-            AccumulatorState::Covar(groups) => groups.resize(count, Covariance::default()),
             AccumulatorState::Extremum { groups, .. } => groups.resize(count, None),
         }
     }
-    pub fn update(&mut self, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
-        (self.update_fn)(&mut self.state, values, ids)
+    pub fn update(&mut self, value: Option<&ArrayRef>, ids: &[usize]) -> Result<()> {
+        (self.update_fn)(&mut self.state, value, ids)
     }
     pub fn state_types(&self) -> Vec<DataType> {
         match &self.state {
@@ -313,12 +274,6 @@ impl Accumulator {
                 vec![data_type.clone()]
             }
             AccumulatorState::Avg(_) => vec![DataType::UInt64, DataType::Float64],
-            AccumulatorState::Covar(_) => vec![
-                DataType::UInt64,
-                DataType::Float64,
-                DataType::Float64,
-                DataType::Float64,
-            ],
         }
     }
     pub fn state(&self) -> Result<Vec<ArrayRef>> {
@@ -338,20 +293,6 @@ impl Accumulator {
             AccumulatorState::Avg(groups) => vec![
                 Arc::new(UInt64Array::from_iter_values(groups.iter().map(|g| g.0))),
                 Arc::new(Float64Array::from_iter_values(groups.iter().map(|g| g.1))),
-            ],
-            AccumulatorState::Covar(groups) => vec![
-                Arc::new(UInt64Array::from_iter_values(
-                    groups.iter().map(|g| g.count),
-                )),
-                Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.mean_x),
-                )),
-                Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.mean_y),
-                )),
-                Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.co_moment),
-                )),
             ],
             AccumulatorState::Extremum {
                 groups, data_type, ..
@@ -407,20 +348,8 @@ impl Accumulator {
                     groups[id].1 += sums.value(i);
                 }
             }
-            AccumulatorState::Covar(groups) => {
-                let count = as_u64(&states[0]);
-                let (x, y, c) = (as_f64(&states[1]), as_f64(&states[2]), as_f64(&states[3]));
-                for (i, &id) in ids.iter().enumerate() {
-                    groups[id].merge(Covariance {
-                        count: count.value(i),
-                        mean_x: x.value(i),
-                        mean_y: y.value(i),
-                        co_moment: c.value(i),
-                    })?;
-                }
-            }
             AccumulatorState::Sum { .. } | AccumulatorState::Extremum { .. } => {
-                self.update(states, ids)?
+                self.update(states.first(), ids)?
             }
         }
         Ok(())
@@ -439,16 +368,20 @@ impl Accumulator {
                     .map(|(count, sum)| (*count != 0).then(|| *sum / *count as f64))
                     .collect::<Vec<_>>(),
             )),
-            AccumulatorState::Covar(groups) => Arc::new(Float64Array::from(
-                groups
-                    .iter()
-                    .map(|g| (g.count != 0).then(|| g.co_moment / g.count as f64))
-                    .collect::<Vec<_>>(),
-            )),
             _ => self.state()?.remove(0),
         })
     }
 }
+/// Identical types can borrow the original array. Calling Arrow's cast in
+/// that case reconstructs an array wrapper and clones its backing buffers.
+fn cast_argument<'a>(argument: &'a ArrayRef, data_type: &DataType) -> Result<Cow<'a, ArrayRef>> {
+    if argument.data_type() == data_type {
+        Ok(Cow::Borrowed(argument))
+    } else {
+        Ok(Cow::Owned(cast(argument.as_ref(), data_type)?))
+    }
+}
+
 impl AccumulatorState {
     fn as_count_mut(&mut self) -> &mut Vec<i64> {
         let Self::Count(groups) = self else {
@@ -459,13 +392,6 @@ impl AccumulatorState {
 
     fn as_avg_mut(&mut self) -> &mut Vec<(u64, f64)> {
         let Self::Avg(groups) = self else {
-            unreachable!("aggregate state and update function are bound together")
-        };
-        groups
-    }
-
-    fn as_covar_mut(&mut self) -> &mut Vec<Covariance> {
-        let Self::Covar(groups) = self else {
             unreachable!("aggregate state and update function are bound together")
         };
         groups
@@ -496,9 +422,13 @@ impl AccumulatorState {
     }
 }
 
-fn update_count(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+fn update_count(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
     let groups = state.as_count_mut();
-    let nulls = values.first().and_then(|v| v.logical_nulls());
+    let nulls = value.and_then(|v| v.logical_nulls());
     if let Some(nulls) = nulls.filter(|nulls| nulls.null_count() != 0) {
         for index in nulls.valid_indices() {
             let id = ids[index];
@@ -513,10 +443,15 @@ fn update_count(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]
     Ok(())
 }
 
-fn update_distinct(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+fn update_distinct(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
     let (groups, converter) = state.as_distinct_mut();
-    let rows = converter.convert_columns(values)?;
-    let nulls = values[0].logical_nulls();
+    let value = value.ok_or_else(|| Error::Execution("aggregate requires an argument".into()))?;
+    let rows = converter.convert_columns(std::slice::from_ref(value))?;
+    let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
         if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
             groups[id].insert(rows.row(i).as_ref().to_vec());
@@ -526,12 +461,10 @@ fn update_distinct(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usi
     Ok(())
 }
 
-fn update_avg(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
+fn update_avg(state: &mut AccumulatorState, value: Option<&ArrayRef>, ids: &[usize]) -> Result<()> {
     let groups = state.as_avg_mut();
-    let argument = values
-        .first()
-        .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
-    let values = cast(argument.as_ref(), &DataType::Float64)?;
+    let argument = value.ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
+    let values = cast_argument(argument, &DataType::Float64)?;
     let values = as_f64(&values);
     for (i, &id) in ids.iter().enumerate() {
         if values.is_null(i) {
@@ -544,32 +477,15 @@ fn update_avg(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) 
     Ok(())
 }
 
-fn update_covar(state: &mut AccumulatorState, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
-    let groups = state.as_covar_mut();
-    let (x, y) = values
-        .split_first()
-        .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
-        .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
-    let x = cast(x.as_ref(), &DataType::Float64)?;
-    let y = cast(y.as_ref(), &DataType::Float64)?;
-    let (x, y) = (as_f64(&x), as_f64(&y));
-    for (i, &id) in ids.iter().enumerate() {
-        if x.is_valid(i) && y.is_valid(i) {
-            groups[id].update(x.value(i), y.value(i))?;
-        }
-    }
-
-    Ok(())
-}
-
 fn update_extremum<const MINIMUM: bool>(
     state: &mut AccumulatorState,
-    values: &[ArrayRef],
+    value: Option<&ArrayRef>,
     ids: &[usize],
 ) -> Result<()> {
     let (groups, converter) = state.as_extremum_mut();
-    let rows = converter.convert_columns(values)?;
-    let nulls = values[0].logical_nulls();
+    let value = value.ok_or_else(|| Error::Execution("aggregate requires an argument".into()))?;
+    let rows = converter.convert_columns(std::slice::from_ref(value))?;
+    let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
         if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
             continue;
@@ -585,7 +501,7 @@ fn update_extremum<const MINIMUM: bool>(
         if replace {
             // Retain the chosen row; Arrow may share backing buffers.
             let value =
-                arrow::compute::take(values[0].as_ref(), &UInt64Array::from(vec![i as u64]), None)?;
+                arrow::compute::take(value.as_ref(), &UInt64Array::from(vec![i as u64]), None)?;
             groups[id] = Some((row.as_ref().to_vec(), value));
         }
     }
@@ -601,4 +517,22 @@ fn as_u64(a: &ArrayRef) -> &UInt64Array {
 }
 fn as_f64(a: &ArrayRef) -> &Float64Array {
     a.as_any().downcast_ref().unwrap()
+}
+
+#[cfg(test)]
+mod cast_argument_tests {
+    use super::*;
+    use arrow::array::Int32Array;
+
+    #[test]
+    fn same_type_borrows_and_numeric_coercion_still_casts() {
+        let source = Arc::new(Int64Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
+        let borrowed = cast_argument(&source, &DataType::Int64).unwrap();
+        assert!(matches!(&borrowed, Cow::Borrowed(_)));
+        assert!(Arc::ptr_eq(&source, borrowed.as_ref()));
+        let narrow = Arc::new(Int32Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
+        let converted = cast_argument(&narrow, &DataType::Int64).unwrap();
+        assert!(matches!(&converted, Cow::Owned(_)));
+        assert_eq!(converted.to_data(), source.to_data());
+    }
 }

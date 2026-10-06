@@ -257,7 +257,7 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         Arc::new(
             AggregateExpression::new(
                 AggregateFunction::Sum,
-                vec![binary(column(1), ExprOp::Add, 1)],
+                Some(binary(column(1), ExprOp::Add, 1)),
                 DataType::Int64,
                 true,
             )
@@ -266,7 +266,7 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         Arc::new(
             AggregateExpression::new(
                 AggregateFunction::Count,
-                vec![ConstantExpression::int64(Some(1)).into_ref()],
+                Some(ConstantExpression::int64(Some(1)).into_ref()),
                 DataType::Int64,
                 false,
             )
@@ -275,7 +275,7 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         Arc::new(
             AggregateExpression::new(
                 AggregateFunction::Count,
-                vec![ConstantExpression::int64(None).into_ref()],
+                Some(ConstantExpression::int64(None).into_ref()),
                 DataType::Int64,
                 false,
             )

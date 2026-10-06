@@ -30,23 +30,20 @@ use std::sync::Arc;
 /// Worker-local argument evaluators and aggregate state.
 pub struct AggregateExpressionExecutor {
     expression: Arc<AggregateExpression>,
-    arguments: Vec<ScalarExpressionEvaluation>,
+    argument: Option<ScalarExpressionEvaluation>,
     filter: Option<ScalarExpressionEvaluation>,
     accumulator: Accumulator,
 }
 
 impl AggregateExpressionExecutor {
     pub fn try_new(expression: Arc<AggregateExpression>) -> Result<Self> {
-        let arguments = expression
-            .arguments()
-            .iter()
-            .map(|e| e.to_evaluation())
-            .collect::<Result<Vec<_>>>()?;
-        let types = expression
-            .arguments()
-            .iter()
-            .map(|e| e.result_type().data_type.clone())
-            .collect::<Vec<_>>();
+        let argument = expression
+            .argument()
+            .map(|argument| argument.to_evaluation())
+            .transpose()?;
+        let input_type = expression
+            .argument()
+            .map(|argument| argument.result_type().data_type());
         // No accumulator implements it, so accepting it would silently drop DISTINCT.
         if expression.is_distinct() && expression.function() != AggregateFunction::Count {
             return Err(Error::InvalidPlan(
@@ -57,12 +54,12 @@ impl AggregateExpressionExecutor {
         let accumulator = Accumulator::new(
             expression.function(),
             expression.is_distinct(),
-            &types,
+            input_type,
             expression.result_type().data_type(),
         )?;
         Ok(Self {
             expression,
-            arguments,
+            argument,
             filter,
             accumulator,
         })
@@ -74,17 +71,30 @@ impl AggregateExpressionExecutor {
         self.accumulator.resize(count);
     }
     pub fn update(&mut self, input: &RecordBatch, ids: &[usize], groups: usize) -> Result<()> {
-        self.resize(groups);
         if ids.len() != input.num_rows() || ids.iter().any(|&id| id >= groups) {
             return Err(Error::Execution(
                 "aggregate group IDs do not match input".into(),
             ));
         }
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+        self.update_validated(input, ids, groups)
+    }
+    /// Internal path for IDs produced and validated by the grouping operator.
+    pub(crate) fn update_validated(
+        &mut self,
+        input: &RecordBatch,
+        ids: &[usize],
+        groups: usize,
+    ) -> Result<()> {
+        debug_assert_eq!(ids.len(), input.num_rows());
+        debug_assert!(ids.iter().all(|&id| id < groups));
+        self.resize(groups);
         let selected = self
             .filter
             .as_ref()
-            .map(|filter| select_true(filter.evaluate(&executor)?.into_array(input.num_rows())?))
+            .map(|filter| {
+                let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+                select_true(filter.evaluate(&executor)?.into_array(input.num_rows())?)
+            })
             .transpose()?;
         let selected_ids = selected
             .as_ref()
@@ -104,19 +114,19 @@ impl AggregateExpressionExecutor {
             })
             .transpose()?;
         let input = selected_input.as_ref().unwrap_or(input);
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        let values = self
-            .arguments
-            .iter()
-            .map(|e| {
-                let value = e.evaluate(&executor)?;
-                // Accumulators currently consume ordinary typed arrays.
-                let value = value.into_array(input.num_rows())?;
-                Ok(value)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        self.accumulator.update(&values, ids)
+        let value = self.evaluate_argument(input)?;
+        self.accumulator.update(value.as_ref(), ids)
     }
+    fn evaluate_argument(&self, input: &RecordBatch) -> Result<Option<ArrayRef>> {
+        self.argument
+            .as_ref()
+            .map(|argument| {
+                let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+                argument.evaluate(&executor)?.into_array(input.num_rows())
+            })
+            .transpose()
+    }
+
     pub fn merge(&mut self, state: &[ArrayRef], ids: &[usize], groups: usize) -> Result<()> {
         self.resize(groups);
         let types = self.state_types();
@@ -173,21 +183,21 @@ mod tests {
         )
         .unwrap();
         let ids = [1, 0, 1, 0, 1];
-        for (arguments, expected) in [
+        for (argument, expected) in [
             (
-                vec![
+                Some(
                     ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
                         .into_ref(),
-                ],
+                ),
                 vec![Some(10), Some(80)],
             ),
             (
-                vec![ConstantExpression::int64(Some(3)).into_ref()],
+                Some(ConstantExpression::int64(Some(3)).into_ref()),
                 vec![Some(6), Some(6)],
             ),
         ] {
             let expression = Arc::new(
-                AggregateExpression::new(AggregateFunction::Sum, arguments, DataType::Int64, true)
+                AggregateExpression::new(AggregateFunction::Sum, argument, DataType::Int64, true)
                     .with_filter(
                         ReferenceExpression::new(
                             1,
@@ -211,7 +221,7 @@ mod tests {
         }
         let expression = Arc::new(AggregateExpression::new(
             AggregateFunction::Count,
-            vec![],
+            None,
             DataType::Int64,
             false,
         ));
@@ -233,5 +243,100 @@ mod tests {
                 .merge(&executor.state().unwrap(), &[0, 2], 2)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn references_check_indices_after_filtering() {
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                false,
+            )])),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        // References must reject out-of-range indices, including usize::MAX,
+        // without panicking.
+        for index in [1, usize::MAX] {
+            let expression = AggregateExpression::new(
+                AggregateFunction::Sum,
+                Some(
+                    ReferenceExpression::new(
+                        index,
+                        ExpressionResultType::new(DataType::Int64, false),
+                    )
+                    .into_ref(),
+                ),
+                DataType::Int64,
+                true,
+            );
+            let mut grouped =
+                AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
+            for result in [grouped.update(&input, &[0, 0], 1)] {
+                assert!(
+                    matches!(result, Err(Error::Execution(message)) if message == format!("column index {index} out of bounds"))
+                );
+            }
+            // When FILTER rejects every row, argument evaluation is skipped entirely,
+            // including its bounds checks, as on the generic expression path.
+            let expression =
+                expression.with_filter(ConstantExpression::boolean(Some(false)).into_ref());
+            let mut filtered = AggregateExpressionExecutor::try_new(Arc::new(expression)).unwrap();
+            filtered.update(&input, &[0, 0], 1).unwrap();
+            assert!(filtered.evaluate().unwrap().is_null(0));
+        }
+    }
+
+    #[test]
+    fn computed_argument_uses_filtered_input() {
+        use crate::expr::scalar::{FunctionExpression, FunctionKind};
+
+        let input = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("value", DataType::Int64, false),
+                Field::new("keep", DataType::Boolean, false),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![0, 2, 4])),
+                Arc::new(BooleanArray::from(vec![false, true, true])),
+            ],
+        )
+        .unwrap();
+        let reference =
+            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false))
+                .into_ref();
+        let divided = FunctionExpression::binary(
+            FunctionKind::Divide,
+            ConstantExpression::int64(Some(8)).into_ref(),
+            reference.clone(),
+            DataType::Int64,
+            false,
+        )
+        .into_ref();
+        let expression = Arc::new(
+            AggregateExpression::new(AggregateFunction::Sum, Some(divided), DataType::Int64, true)
+                .with_filter(
+                    ReferenceExpression::new(
+                        1,
+                        ExpressionResultType::new(DataType::Boolean, false),
+                    )
+                    .into_ref(),
+                ),
+        );
+        let mut grouped = AggregateExpressionExecutor::try_new(expression.clone()).unwrap();
+        grouped.update(&input, &[0, 0, 0], 1).unwrap();
+        for executor in [grouped] {
+            assert_eq!(
+                executor
+                    .evaluate()
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+                6
+            );
+        }
     }
 }
