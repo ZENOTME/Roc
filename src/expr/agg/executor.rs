@@ -70,6 +70,9 @@ impl AggregateExpressionExecutor {
     pub fn resize(&mut self, count: usize) {
         self.accumulator.resize(count);
     }
+    pub(crate) fn bind_global_count(&mut self) {
+        self.accumulator.bind_global_count();
+    }
     pub fn update(&mut self, input: &RecordBatch, ids: &[usize], groups: usize) -> Result<()> {
         if ids.len() != input.num_rows() || ids.iter().any(|&id| id >= groups) {
             return Err(Error::Execution(

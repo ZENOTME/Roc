@@ -261,6 +261,12 @@ impl Accumulator {
     pub fn update(&mut self, value: Option<&ArrayRef>, ids: &[usize]) -> Result<()> {
         (self.update_fn)(&mut self.state, value, ids)
     }
+    /// The operator binds this only when all input rows belong to group zero.
+    pub fn bind_global_count(&mut self) {
+        if matches!(self.state, AccumulatorState::Count(_)) {
+            self.update_fn = update_global_count;
+        }
+    }
     pub fn state_types(&self) -> Vec<DataType> {
         match &self.state {
             AccumulatorState::Count(_) => vec![DataType::Int64],
@@ -443,6 +449,28 @@ fn update_count(
     Ok(())
 }
 
+fn update_global_count(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
+    let groups = state.as_count_mut();
+    debug_assert_eq!(groups.len(), 1);
+    debug_assert!(ids.iter().all(|&id| id == 0));
+    let null_count = value
+        .and_then(|v| v.logical_nulls())
+        .map_or(0, |nulls| nulls.null_count());
+    let delta = i64::try_from(ids.len() - null_count).map_err(|_| overflow())?;
+    let total = &mut groups[0];
+    let updated = total.checked_add(delta).ok_or_else(|| {
+        // The row loop reaches MAX before failing on the next increment.
+        *total = i64::MAX;
+        overflow()
+    })?;
+    *total = updated;
+    Ok(())
+}
+
 fn update_distinct(
     state: &mut AccumulatorState,
     value: Option<&ArrayRef>,
@@ -517,6 +545,103 @@ fn as_u64(a: &ArrayRef) -> &UInt64Array {
 }
 fn as_f64(a: &ArrayRef) -> &Float64Array {
     a.as_any().downcast_ref().unwrap()
+}
+
+#[cfg(test)]
+mod global_count_tests {
+    use super::*;
+    use arrow::array::{DictionaryArray, Int8Array};
+    use arrow::datatypes::Int8Type;
+
+    #[test]
+    fn global_count_matches_row_updates_for_slices_and_dictionary_nulls() {
+        let sliced: ArrayRef = Arc::new(Int64Array::from(vec![
+            None,
+            Some(3),
+            None,
+            Some(5),
+            Some(3),
+            None,
+        ]));
+        let dictionary: ArrayRef = Arc::new(
+            DictionaryArray::<Int8Type>::try_new(
+                Int8Array::from(vec![Some(0), Some(1), None, Some(0)]),
+                Arc::new(Int64Array::from(vec![Some(7), None])),
+            )
+            .unwrap(),
+        );
+        for value in [sliced.slice(1, 4), dictionary] {
+            let mut rows = Accumulator::new(
+                AggregateFunction::Count,
+                false,
+                Some(value.data_type()),
+                &DataType::Int64,
+            )
+            .unwrap();
+            let mut batch = Accumulator::new(
+                AggregateFunction::Count,
+                false,
+                Some(value.data_type()),
+                &DataType::Int64,
+            )
+            .unwrap();
+            rows.resize(1);
+            batch.resize(1);
+            batch.bind_global_count();
+            let ids = vec![0; value.len()];
+            for _ in 0..2 {
+                rows.update(Some(&value), &ids).unwrap();
+                batch.update(Some(&value), &ids).unwrap();
+            }
+            assert_eq!(
+                rows.evaluate().unwrap().to_data(),
+                batch.evaluate().unwrap().to_data()
+            );
+        }
+    }
+
+    #[test]
+    fn count_star_empty_input_and_distinct_keep_their_semantics() {
+        let mut count =
+            Accumulator::new(AggregateFunction::Count, false, None, &DataType::Int64).unwrap();
+        count.resize(1);
+        count.bind_global_count();
+        count.update(None, &[]).unwrap();
+        assert_eq!(as_i64(&count.evaluate().unwrap()).value(0), 0);
+        count.update(None, &[0, 0, 0]).unwrap();
+        assert_eq!(as_i64(&count.evaluate().unwrap()).value(0), 3);
+
+        let mut distinct = Accumulator::new(
+            AggregateFunction::Count,
+            true,
+            Some(&DataType::Int64),
+            &DataType::Int64,
+        )
+        .unwrap();
+        distinct.resize(1);
+        distinct.bind_global_count();
+        let value: ArrayRef = Arc::new(Int64Array::from(vec![Some(7), None, Some(7)]));
+        distinct.update(Some(&value), &[0, 0, 0]).unwrap();
+        assert_eq!(as_i64(&distinct.evaluate().unwrap()).value(0), 1);
+    }
+
+    #[test]
+    fn overflow_preserves_the_same_successful_prefix_as_row_updates() {
+        for global in [false, true] {
+            let mut count =
+                Accumulator::new(AggregateFunction::Count, false, None, &DataType::Int64).unwrap();
+            count.resize(1);
+            count.state.as_count_mut()[0] = i64::MAX - 1;
+            if global {
+                count.bind_global_count();
+            }
+            assert!(matches!(
+                count.update(None, &[0, 0, 0]),
+                Err(Error::Execution(_))
+            ));
+            assert_eq!(as_i64(&count.evaluate().unwrap()).value(0), i64::MAX);
+        }
+    }
 }
 
 #[cfg(test)]
