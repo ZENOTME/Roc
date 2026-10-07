@@ -24,13 +24,23 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct FilterOperator {
-    /// Built from the declared types. Filtering preserves the input batch schema.
+    /// Bound against the full input, before optional output column selection.
     predicate: ScalarExprRef,
+    output_projection: Option<Vec<usize>>,
 }
 
 impl FilterOperator {
     pub fn new(predicate: ScalarExprRef) -> Self {
-        Self { predicate }
+        Self {
+            predicate,
+            output_projection: None,
+        }
+    }
+    /// Retain these columns after evaluating the predicate. Hosts must bind
+    /// downstream expressions against the resulting column order.
+    pub fn with_output_projection(mut self, indices: Vec<usize>) -> Self {
+        self.output_projection = Some(indices);
+        self
     }
 }
 
@@ -51,9 +61,13 @@ impl Operator for FilterOperator {
                 current_node.children().len(),
             )));
         };
+        let mut executor = FilterExec::new(self.predicate.clone());
+        if let Some(indices) = &self.output_projection {
+            executor = executor.with_output_projection(indices.clone());
+        }
         graph
             .pipeline_mut(current)?
-            .add_processor(Box::new(FilterExec::new(self.predicate.clone())));
+            .add_processor(Box::new(executor));
         build_pipeline_on_node(child, current, graph)
     }
 }
