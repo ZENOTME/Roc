@@ -525,28 +525,177 @@ fn update_global_count(
     Ok(())
 }
 
-macro_rules! global_sum_update {
-    ($name:ident, $groups:ident, $array:ident, $add:expr) => {
-        fn $name(
-            state: &mut AccumulatorState,
-            value: Option<&ArrayRef>,
-            ids: &[usize],
-        ) -> Result<()> {
-            debug_assert!(ids.iter().all(|&id| id == 0));
-            let (groups, data_type) = state.as_sum_mut();
-            let argument =
-                value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-            debug_assert_eq!(argument.len(), ids.len());
-            let values = cast_argument(argument, data_type)?;
-            groups.$groups().update_global($array(&values), $add)
-        }
-    };
+/// Integer arithmetic used to prove that every valid addition prefix fits.
+/// Only the two integer SUM state types implement this private trait.
+trait BatchInteger: ArrowNativeTypeOp {
+    fn checked_add(self, rhs: Self) -> Option<Self>;
+    fn magnitude_bits(self) -> u64;
+    fn magnitude_bound(bits: u64) -> u128;
+    fn remaining_range(self) -> u128;
 }
-global_sum_update!(update_global_sum_i64, as_i64_mut, as_i64, i64::checked_add);
-global_sum_update!(update_global_sum_u64, as_u64_mut, as_u64, u64::checked_add);
-global_sum_update!(update_global_sum_f64, as_f64_mut, as_f64, |a, b| Some(
-    a + b
-));
+
+impl BatchInteger for i64 {
+    #[inline]
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        i64::checked_add(self, rhs)
+    }
+    #[inline]
+    fn magnitude_bits(self) -> u64 {
+        (self ^ (self >> 63)) as u64
+    }
+    #[inline]
+    fn magnitude_bound(bits: u64) -> u128 {
+        u128::from(bits) + 1
+    }
+    #[inline]
+    fn remaining_range(self) -> u128 {
+        (i64::MAX as i128 - self as i128).min(self as i128 - i64::MIN as i128) as u128
+    }
+}
+
+impl BatchInteger for u64 {
+    #[inline]
+    fn checked_add(self, rhs: Self) -> Option<Self> {
+        u64::checked_add(self, rhs)
+    }
+    #[inline]
+    fn magnitude_bits(self) -> u64 {
+        self
+    }
+    #[inline]
+    fn magnitude_bound(bits: u64) -> u128 {
+        u128::from(bits)
+    }
+    #[inline]
+    fn remaining_range(self) -> u128 {
+        u128::from(u64::MAX - self)
+    }
+}
+
+/// A running integer total with batch addition and prefix overflow checks.
+/// The fast scan combines the wrapping subtotal and its safety bound so it
+/// can vectorize; an inconclusive proof falls back to checked additions.
+struct NumberBatchAdd<N> {
+    total: N,
+}
+
+impl<N: BatchInteger> NumberBatchAdd<N> {
+    #[inline]
+    fn new(initial: N) -> Self {
+        Self { total: initial }
+    }
+
+    #[inline]
+    fn total(&self) -> N {
+        self.total
+    }
+
+    #[inline]
+    fn add<T: ArrowPrimitiveType<Native = N>>(&mut self, array: &PrimitiveArray<T>) -> Result<()> {
+        let count = array.len() - array.null_count();
+        if count == 0 {
+            return Ok(());
+        }
+        let (bits, raw_sum) = array
+            .values()
+            .iter()
+            .fold((0u64, N::ZERO), |(bits, sum), &value| {
+                (bits | value.magnitude_bits(), sum.add_wrapping(value))
+            });
+        if N::magnitude_bound(bits) * count as u128 <= self.total.remaining_range() {
+            // Cancel arbitrary NULL payloads modulo 2^64. The bound proves
+            // that every valid prefix fits even if raw subtotals wrapped.
+            let ignored = array
+                .nulls()
+                .filter(|n| n.null_count() != 0)
+                .map_or(N::ZERO, |nulls| {
+                    (!nulls.inner())
+                        .set_indices()
+                        .fold(N::ZERO, |sum, i| sum.add_wrapping(array.value(i)))
+                });
+            self.total = self
+                .total
+                .checked_add(raw_sum.sub_wrapping(ignored))
+                .ok_or_else(overflow)?;
+            return Ok(());
+        }
+        // An inconclusive bound is not overflow. Check the valid values in
+        // input order, retaining the successful prefix if an addition fails.
+        let mut add_slice = |slice: &[N]| -> Result<()> {
+            for &value in slice {
+                self.total = self.total.checked_add(value).ok_or_else(overflow)?;
+            }
+            Ok(())
+        };
+        if array.null_count() == 0 {
+            add_slice(array.values())?;
+        } else {
+            for (lo, hi) in array.nulls().unwrap().valid_slices() {
+                add_slice(&array.values()[lo..hi])?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<T: ArrowPrimitiveType> TypedSum<T> {
+    #[inline]
+    fn update_global_integer(&mut self, array: &PrimitiveArray<T>) -> Result<()>
+    where
+        T::Native: BatchInteger,
+    {
+        if array.len() == array.null_count() {
+            return Ok(());
+        }
+        let mut sum = NumberBatchAdd::new(self.values[0]);
+        let result = sum.add(array);
+        // Preserve the successfully accumulated prefix on overflow too.
+        self.values[0] = sum.total();
+        self.valid[0] = true;
+        result
+    }
+}
+
+fn update_global_sum_i64(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
+    debug_assert!(ids.iter().all(|&id| id == 0));
+    let (groups, data_type) = state.as_sum_mut();
+    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    debug_assert_eq!(argument.len(), ids.len());
+    let values = cast_argument(argument, data_type)?;
+    groups.as_i64_mut().update_global_integer(as_i64(&values))
+}
+
+fn update_global_sum_u64(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
+    debug_assert!(ids.iter().all(|&id| id == 0));
+    let (groups, data_type) = state.as_sum_mut();
+    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    debug_assert_eq!(argument.len(), ids.len());
+    let values = cast_argument(argument, data_type)?;
+    groups.as_u64_mut().update_global_integer(as_u64(&values))
+}
+
+fn update_global_sum_f64(
+    state: &mut AccumulatorState,
+    value: Option<&ArrayRef>,
+    ids: &[usize],
+) -> Result<()> {
+    debug_assert!(ids.iter().all(|&id| id == 0));
+    let (groups, data_type) = state.as_sum_mut();
+    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    debug_assert_eq!(argument.len(), ids.len());
+    let values = cast_argument(argument, data_type)?;
+    groups
+        .as_f64_mut()
+        .update_global(as_f64(&values), |a, b| Some(a + b))
+}
 
 fn update_distinct(
     state: &mut AccumulatorState,
@@ -744,6 +893,25 @@ mod global_sum_tests {
     use super::*;
     use arrow::array::{Float32Array, Int32Array, UInt32Array};
 
+    #[test]
+    fn number_batch_add_starts_with_initial_and_accumulates_multiple_batches() {
+        let mut sum = NumberBatchAdd::new(5i64);
+        sum.add(&Int64Array::from(vec![Some(10), None, Some(-3)]))
+            .unwrap();
+        assert_eq!(sum.total(), 12);
+        sum.add(&Int64Array::from(vec![None, Some(8)])).unwrap();
+        assert_eq!(sum.total(), 20);
+        sum.add(&Int64Array::from(vec![None, None])).unwrap();
+        assert_eq!(sum.total(), 20);
+        // A failed batch retains its successful prefix, and the helper can
+        // subsequently continue from that exact total.
+        let mut sum = NumberBatchAdd::new(i64::MAX - 1);
+        assert!(sum.add(&Int64Array::from(vec![1, 1, -1])).is_err());
+        assert_eq!(sum.total(), i64::MAX);
+        sum.add(&Int64Array::from(vec![-1])).unwrap();
+        assert_eq!(sum.total(), i64::MAX - 1);
+    }
+
     fn pair(input: &DataType, output: &DataType) -> (Accumulator, Accumulator) {
         let mut row = Accumulator::new(AggregateFunction::Sum, false, Some(input), output).unwrap();
         let mut global =
@@ -830,6 +998,86 @@ mod global_sum_tests {
                 assert_eq!(row.update(Some(value), &ids).is_err(), index == 1);
                 assert_eq!(global.update(Some(value), &ids).is_err(), index == 1);
                 compare(&row, &global);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_sum_cancels_arbitrary_null_payloads_even_when_raw_sum_wraps() {
+        for unsigned in [false, true] {
+            let nulls = NullBuffer::from((0..97).map(|i| i == 37).collect::<Vec<_>>());
+            let array: ArrayRef = if unsigned {
+                let mut values = vec![u64::MAX; 97];
+                values[37] = 7;
+                Arc::new(UInt64Array::new(values.into(), Some(nulls)))
+            } else {
+                let mut values = vec![i64::MAX / 2; 97];
+                values[37] = 7;
+                Arc::new(Int64Array::new(values.into(), Some(nulls)))
+            };
+            // One valid small value makes the bound pass; arbitrary NULL payloads
+            // wrap the raw subtotal repeatedly and must cancel modulo 2^64.
+            let array = array.slice(3, 89);
+            let (mut row, mut global) = pair(array.data_type(), array.data_type());
+            for _ in 0..2 {
+                let ids = vec![0; array.len()];
+                row.update(Some(&array), &ids).unwrap();
+                global.update(Some(&array), &ids).unwrap();
+                compare(&row, &global);
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_sum_matches_checked_updates_for_deterministic_extreme_inputs() {
+        let mut seed = 0x5ee_d123_89ab_cdefu64;
+        for case in 0..128 {
+            let mut signed = vec![];
+            let mut unsigned = vec![];
+            let mut valid = vec![];
+            for i in 0..79 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                signed.push(if case % 2 == 0 {
+                    (seed % 200001) as i64 - 100000
+                } else {
+                    match seed % 5 {
+                        0 => i64::MIN,
+                        1 => i64::MAX,
+                        2 => -1,
+                        3 => 1,
+                        _ => seed as i64,
+                    }
+                });
+                unsigned.push(if case % 2 == 0 {
+                    seed % 200001
+                } else {
+                    match seed % 3 {
+                        0 => u64::MAX,
+                        1 => 1,
+                        _ => seed,
+                    }
+                });
+                valid.push(i % 7 != 0 && seed % 4 != 0);
+            }
+            let nulls = NullBuffer::from(valid);
+            for value in [
+                Arc::new(Int64Array::new(signed.into(), Some(nulls.clone()))) as ArrayRef,
+                Arc::new(UInt64Array::new(unsigned.into(), Some(nulls.clone()))),
+            ] {
+                let value = value.slice(case % 7, 65);
+                let (mut row, mut global) = pair(value.data_type(), value.data_type());
+                for _ in 0..3 {
+                    let ids = vec![0; value.len()];
+                    let a = row.update(Some(&value), &ids);
+                    let b = global.update(Some(&value), &ids);
+                    assert_eq!(a.is_err(), b.is_err());
+                    compare(&row, &global);
+                    if a.is_err() {
+                        break;
+                    }
+                }
             }
         }
     }
