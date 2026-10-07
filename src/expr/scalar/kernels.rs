@@ -418,49 +418,15 @@ fn scalar_comparison<T: ScalarPrimitiveType, O: ComparisonOperation, const LEFT:
     scalar: &ScalarValue,
     array: &ArrayRef,
 ) -> Result<ArrayRef> {
-    let scalar = T::scalar(scalar)?;
-    let array = primitive::<T>(array)?;
-    let len = array.len();
-    if scalar.is_none() {
-        if !O::NULL_SAFE {
-            return Ok(Arc::new(BooleanArray::new_null(len)));
-        }
-        let values = BooleanBuffer::collect_bool(len, |i| {
-            if LEFT {
-                O::null_result(false, array.is_valid(i))
-            } else {
-                O::null_result(array.is_valid(i), false)
-            }
-        });
-        return Ok(Arc::new(BooleanArray::new(values, None)));
-    }
-    let scalar = scalar.unwrap();
-    let compare = |value| {
-        if LEFT {
-            O::compare(scalar, value)
-        } else {
-            O::compare(value, scalar)
-        }
-    };
-    let values = if O::NULL_SAFE && array.null_count() != 0 {
-        BooleanBuffer::collect_bool(len, |i| {
-            if array.is_valid(i) {
-                compare(array.value(i))
-            } else if LEFT {
-                O::null_result(true, false)
-            } else {
-                O::null_result(false, true)
-            }
-        })
+    // Check the bound operand type before using Arrow Datum broadcasting.
+    T::scalar(scalar)?;
+    primitive::<T>(array)?;
+    let scalar = Scalar::new(scalar.to_array()?);
+    Ok(Arc::new(if LEFT {
+        O::arrow(&scalar, array)?
     } else {
-        BooleanBuffer::collect_bool(len, |i| compare(array.value(i)))
-    };
-    let nulls = if O::NULL_SAFE {
-        None
-    } else {
-        array.nulls().cloned()
-    };
-    Ok(Arc::new(BooleanArray::new(values, nulls)))
+        O::arrow(array, &scalar)?
+    }))
 }
 
 #[cfg(test)]
