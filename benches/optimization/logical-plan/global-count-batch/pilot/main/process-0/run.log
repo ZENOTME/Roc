@@ -1,0 +1,8 @@
+scan_only threads=1 DF=115.398ms Roc=108.153ms DF/Roc=1.067x
+filter_project threads=1 DF=104.480ms Roc=102.665ms DF/Roc=1.018x
+global_aggregate threads=1 DF=39.738ms Roc=55.220ms DF/Roc=0.720x
+grouped_aggregate threads=1 DF=72.274ms Roc=75.361ms DF/Roc=0.959x
+scan_only threads=4 DF=31.207ms Roc=29.407ms DF/Roc=1.061x
+filter_project threads=4 DF=29.406ms Roc=27.483ms DF/Roc=1.070x
+global_aggregate threads=4 DF=11.306ms Roc=14.765ms DF/Roc=0.766x
+grouped_aggregate threads=4 DF=20.589ms Roc=20.350ms DF/Roc=1.012x

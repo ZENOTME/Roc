@@ -1,0 +1,83 @@
+{
+  "scope": "Same full global SUM/COUNT Parquet query and timing boundaries, alone at one/four threads; avoids preceding multi-million-row scan result validation/sorting. Production core unchanged from the respective recorded commits.",
+  "harness_transform": "Only filter the unchanged WORKLOADS iterator to Workload::GlobalAggregate in logical.rs, identically for both variants.",
+  "variants": {
+    "main": {
+      "original_local_commit": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+      "compiled_source_sha256": "a57d812f65659b70095e46da5803ddfe676542cef887595f65b3df06ec8f8701",
+      "binary_sha256": "74deec3c2942856d290d7d8c9b112f20ef328d22033b65ce2b9ce3f2589b78cc",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-count-batch/focused/main/benchmark",
+      "build_label": "focused-global-count-main",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621"
+    },
+    "count": {
+      "original_local_commit": "590c6875c80689172aa5f72ad1097ed1ea144d0a",
+      "compiled_source_sha256": "d7ecd0e3d8efb1b88b46042dd4379085a41f7391883f148711323dddc57ab6d9",
+      "binary_sha256": "0b6a8f702369a685f75696a3013ad9f703b010d8829765d4fab56b330fa3d179",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-count-batch/focused/count/benchmark",
+      "build_label": "focused-global-count-count",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621"
+    }
+  },
+  "design": {
+    "replicas_per_variant": 10,
+    "samples_per_case_engine": 10,
+    "threads": [
+      1,
+      4
+    ],
+    "warmups": 2,
+    "order": [
+      [
+        "count",
+        "main"
+      ],
+      [
+        "main",
+        "count"
+      ],
+      [
+        "count",
+        "main"
+      ],
+      [
+        "main",
+        "count"
+      ],
+      [
+        "main",
+        "count"
+      ],
+      [
+        "count",
+        "main"
+      ],
+      [
+        "count",
+        "main"
+      ],
+      [
+        "main",
+        "count"
+      ],
+      [
+        "count",
+        "main"
+      ],
+      [
+        "main",
+        "count"
+      ]
+    ],
+    "order_description": "Balanced five main-first/five candidate-first process pairs, randomized with fixed seed; engine order alternates within each sample.",
+    "rows": 4000000,
+    "batch_rows": 8192,
+    "samples": {
+      "roc": 400,
+      "datafusion": 400,
+      "total": 800
+    },
+    "full_correctness_checks": 40,
+    "statistics": "Geometric mean of ten process medians; paired ten-process cluster bootstrap with 10000 resamples. All samples retained."
+  }
+}

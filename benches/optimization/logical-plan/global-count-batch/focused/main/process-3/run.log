@@ -1,0 +1,2 @@
+global_aggregate threads=1 DF=38.577ms Roc=54.153ms DF/Roc=0.712x
+global_aggregate threads=4 DF=11.550ms Roc=14.975ms DF/Roc=0.771x

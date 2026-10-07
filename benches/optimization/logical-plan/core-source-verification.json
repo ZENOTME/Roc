@@ -2533,5 +2533,163 @@
         }
       }
     }
+  },
+  "global_count_batch_candidate_2026_10_07": {
+    "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+    "candidate_core": "0ddd08565871b7e53faa09f738d0cfa25579635c",
+    "candidate_pr": "https://github.com/ZENOTME/Roc/pull/18",
+    "local_harness": "590c6875c80689172aa5f72ad1097ed1ea144d0a",
+    "core_source_and_tests_match_local": true,
+    "core_release_tests_passed": 125,
+    "all_targets_check": true,
+    "report": "global-count-batch/README.md",
+    "primary_focused_summary": {
+      "global_aggregate/1t": {
+        "main_roc_ms": 54.04644831111836,
+        "count_roc_ms": 46.68101830960421,
+        "saved_ms": 7.365430001514149,
+        "roc_elapsed_reduction_percent": 13.627963042298452,
+        "paired_process_bootstrap_95_reduction_percent": [
+          12.053974733626461,
+          15.162257439490823
+        ],
+        "main_datafusion_ms": 38.780796969848545,
+        "count_datafusion_ms": 39.02938482175245,
+        "main_roc_gap_to_datafusion_percent": 39.36394435921113,
+        "count_roc_gap_to_datafusion_percent": 19.604801671347992,
+        "datafusion_control_change_percent": 0.6410075896510881,
+        "process_medians_ms": {
+          "main": {
+            "roc": [
+              56.494646,
+              54.433333000000005,
+              55.1789795,
+              54.15325,
+              54.4887085,
+              53.2304585,
+              52.594104,
+              52.878604499999994,
+              53.67420800000001,
+              53.4505
+            ],
+            "datafusion": [
+              39.0794165,
+              39.763228999999995,
+              40.256146,
+              38.576916,
+              39.19277100000001,
+              38.265874999999994,
+              37.668833,
+              37.851875,
+              38.8094795,
+              38.419604
+            ]
+          },
+          "count": {
+            "roc": [
+              46.444708000000006,
+              46.996104,
+              46.38312500000001,
+              46.500792000000004,
+              45.462542,
+              48.1198335,
+              46.4157295,
+              45.947083500000005,
+              46.573938,
+              48.033125
+            ],
+            "datafusion": [
+              39.4114795,
+              39.03714599999999,
+              38.1345625,
+              39.523458500000004,
+              37.852042,
+              40.2006875,
+              38.910270999999995,
+              38.2640625,
+              39.122875,
+              39.905583500000006
+            ]
+          }
+        }
+      },
+      "global_aggregate/4t": {
+        "main_roc_ms": 15.026987506234505,
+        "count_roc_ms": 12.944855302946447,
+        "saved_ms": 2.082132203288058,
+        "roc_elapsed_reduction_percent": 13.855952182193587,
+        "paired_process_bootstrap_95_reduction_percent": [
+          12.877782330159949,
+          14.888101333851878
+        ],
+        "main_datafusion_ms": 11.522279098726408,
+        "count_datafusion_ms": 11.447549737033468,
+        "main_roc_gap_to_datafusion_percent": 30.416798425716696,
+        "count_roc_gap_to_datafusion_percent": 13.079703520038976,
+        "datafusion_control_change_percent": -0.6485640649096958,
+        "process_medians_ms": {
+          "main": {
+            "roc": [
+              14.989437500000001,
+              14.9416045,
+              15.263749500000001,
+              14.974917000000001,
+              15.293125,
+              14.925771000000001,
+              14.6947295,
+              14.931353999999999,
+              15.321459,
+              14.945729
+            ],
+            "datafusion": [
+              11.582562,
+              11.615729,
+              11.749208,
+              11.550437,
+              11.5350415,
+              11.4305625,
+              11.2160415,
+              11.4110205,
+              11.6935,
+              11.448021
+            ]
+          },
+          "count": {
+            "roc": [
+              13.369937,
+              12.8055625,
+              13.3049375,
+              12.8708755,
+              12.669208000000001,
+              12.784667,
+              12.833896,
+              12.653396,
+              13.1292295,
+              13.0490625
+            ],
+            "datafusion": [
+              11.744542,
+              11.369561999999998,
+              11.5932915,
+              11.3148125,
+              11.327395500000002,
+              11.3756255,
+              11.397417,
+              11.1751255,
+              11.651563,
+              11.538333
+            ]
+          }
+        }
+      }
+    },
+    "all_experiment_counts": {
+      "pilot_total_timings": 1600,
+      "complete_repeat_total_timings": 1600,
+      "focused_total_timings": 800,
+      "total_timings": 4000,
+      "full_correctness_checks": 200
+    },
+    "validation": "Fresh 125 release tests and all-target compilation for the exact candidate core. All 200 complete schema/unordered-row comparisons and 4000 timed row-count checks pass. Focused local binaries apply the same workload-iterator filter to both recorded harness snapshots; production core and timed SQL path are otherwise unchanged. DataFusion integration remains local. Candidate is not merged."
   }
 }

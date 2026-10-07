@@ -1,0 +1,42 @@
+[
+  {
+    "path": "part-000.parquet",
+    "bytes": 6451300,
+    "sha256": "fc4ca32257ca5dfda30ba5bcf65457dafe2cb53f720c3e662e2a290a0a6f2309"
+  },
+  {
+    "path": "part-001.parquet",
+    "bytes": 6452352,
+    "sha256": "902c1ce6cbaadc87eebbdcb9641112af154cb1ac0dfdfe8f9b6fc39fc58d29f8"
+  },
+  {
+    "path": "part-002.parquet",
+    "bytes": 6451712,
+    "sha256": "79a3f0f87624f91bf40fc73ed6947509c868c3385ecf2836576cf8be4c812573"
+  },
+  {
+    "path": "part-003.parquet",
+    "bytes": 6451759,
+    "sha256": "7a65084a02920074ce0fe1358f79b4ef718c3f6d871eead217ca0d1f532f9e54"
+  },
+  {
+    "path": "part-004.parquet",
+    "bytes": 6451976,
+    "sha256": "517b24321a1ed0bc4b8408337a51d703175a378844a2e9a1bb4acf440c2f6387"
+  },
+  {
+    "path": "part-005.parquet",
+    "bytes": 6451555,
+    "sha256": "f828bdd19dbac842facacaa2a67043ac9c241419c14f8ae59a2bd8199554d89a"
+  },
+  {
+    "path": "part-006.parquet",
+    "bytes": 6452163,
+    "sha256": "521d73b24508cf6bf38fe06d5c84ca9bd06af54600303ddf82966cf708927554"
+  },
+  {
+    "path": "part-007.parquet",
+    "bytes": 6451536,
+    "sha256": "0e86c32fd189a4a16139ad22c0da5283eda8f24db4ad7f91d250deb36213d7e6"
+  }
+]

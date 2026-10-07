@@ -1,0 +1,1 @@
+{"head":"0ddd08565871b7e53faa09f738d0cfa25579635c","command":"cargo check --all-targets --locked --target-dir /Users/zenotme/Project/Roc/target/column-value-checks/build","exit_code":0,"output":"Checking roc v0.1.0 (/Users/zenotme/.codex/worktrees/datafusion-optimization-prs/Roc)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 0.71s"}
