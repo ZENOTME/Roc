@@ -117,6 +117,36 @@ impl AggregateExpressionExecutor {
         let value = self.evaluate_argument(input)?;
         self.accumulator.update(value.as_ref(), ids)
     }
+    /// Update an ungrouped aggregate, retaining one state even for empty input.
+    pub fn update_single(&mut self, input: &RecordBatch) -> Result<()> {
+        self.resize(1);
+        let selected = self
+            .filter
+            .as_ref()
+            .map(|filter| {
+                let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
+                select_true(filter.evaluate(&executor)?.into_array(input.num_rows())?)
+            })
+            .transpose()?;
+        let rows = selected.as_ref().map_or(input.num_rows(), Vec::len);
+        if rows == 0 {
+            return Ok(());
+        }
+        let selected_input = selected
+            .as_ref()
+            .map(|rows| {
+                let mut mask = vec![false; input.num_rows()];
+                for &row in rows {
+                    mask[row] = true;
+                }
+                filter_record_batch(input, &BooleanArray::from(mask))
+            })
+            .transpose()?;
+        // FILTER must run before argument evaluation, including fallible arguments.
+        let input = selected_input.as_ref().unwrap_or(input);
+        let value = self.evaluate_argument(input)?;
+        self.accumulator.update_single(value.as_ref(), rows)
+    }
     fn evaluate_argument(&self, input: &RecordBatch) -> Result<Option<ArrayRef>> {
         self.argument
             .as_ref()
@@ -273,7 +303,12 @@ mod tests {
             );
             let mut grouped =
                 AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
-            for result in [grouped.update(&input, &[0, 0], 1)] {
+            let mut single =
+                AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
+            for result in [
+                grouped.update(&input, &[0, 0], 1),
+                single.update_single(&input),
+            ] {
                 assert!(
                     matches!(result, Err(Error::Execution(message)) if message == format!("column index {index} out of bounds"))
                 );
@@ -284,6 +319,7 @@ mod tests {
                 expression.with_filter(ConstantExpression::boolean(Some(false)).into_ref());
             let mut filtered = AggregateExpressionExecutor::try_new(Arc::new(expression)).unwrap();
             filtered.update(&input, &[0, 0], 1).unwrap();
+            filtered.update_single(&input).unwrap();
             assert!(filtered.evaluate().unwrap().is_null(0));
         }
     }
@@ -325,8 +361,10 @@ mod tests {
                 ),
         );
         let mut grouped = AggregateExpressionExecutor::try_new(expression.clone()).unwrap();
+        let mut single = AggregateExpressionExecutor::try_new(expression).unwrap();
         grouped.update(&input, &[0, 0, 0], 1).unwrap();
-        for executor in [grouped] {
+        single.update_single(&input).unwrap();
+        for executor in [grouped, single] {
             assert_eq!(
                 executor
                     .evaluate()

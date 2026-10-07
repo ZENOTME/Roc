@@ -117,6 +117,38 @@ where
         Ok(())
     }
 
+    /// Keep the sole global state in locals; commit the successful prefix even
+    /// on overflow, matching grouped updates without storing state per row.
+    fn update_single(&mut self, array: &PrimitiveArray<T>) -> Result<()> {
+        let mut total = self.values[0];
+        let mut valid = self.valid[0];
+        let mut add = |value: T::Native| -> Result<()> {
+            total = if !valid {
+                value
+            } else {
+                total.add_checked(value).map_err(|_| overflow())?
+            };
+            valid = true;
+            Ok(())
+        };
+        let values = array.values();
+        let result = (|| {
+            if array.null_count() == 0 {
+                for &value in values.iter() {
+                    add(value)?;
+                }
+            } else {
+                for index in array.nulls().unwrap().valid_indices() {
+                    add(values[index])?;
+                }
+            }
+            Ok(())
+        })();
+        self.values[0] = total;
+        self.valid[0] = valid;
+        result
+    }
+
     fn state(&self) -> ArrayRef {
         Arc::new(PrimitiveArray::<T>::new(
             self.values.clone().into(),
@@ -184,6 +216,15 @@ impl SumGroups {
             Self::Unsigned(groups) => groups.resize(count),
             Self::Float(groups) => groups.resize(count),
         }
+    }
+
+    fn update_single(&mut self, values: &ArrayRef) -> Result<()> {
+        match self {
+            Self::Signed(groups) => groups.update_single(as_i64(values))?,
+            Self::Unsigned(groups) => groups.update_single(as_u64(values))?,
+            Self::Float(groups) => groups.update_single(as_f64(values))?,
+        }
+        Ok(())
     }
 
     fn state(&self) -> ArrayRef {
@@ -260,6 +301,21 @@ impl Accumulator {
     }
     pub fn update(&mut self, value: Option<&ArrayRef>, ids: &[usize]) -> Result<()> {
         (self.update_fn)(&mut self.state, value, ids)
+    }
+    /// Reduce SUM with local checked state. Other aggregates retain the
+    /// ordinary grouped update; no batch COUNT or separate AVG loop is used.
+    pub fn update_single(&mut self, value: Option<&ArrayRef>, rows: usize) -> Result<()> {
+        if let AccumulatorState::Sum {
+            groups, data_type, ..
+        } = &mut self.state
+        {
+            let argument =
+                value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+            let values = cast(argument.as_ref(), data_type)?;
+            groups.update_single(&values)
+        } else {
+            self.update(value, &vec![0; rows])
+        }
     }
     pub fn state_types(&self) -> Vec<DataType> {
         match &self.state {
