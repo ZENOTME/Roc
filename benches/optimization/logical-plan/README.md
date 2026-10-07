@@ -1,5 +1,10 @@
 # Roc core optimizations: local DataFusion comparison
 
+## Latest global SUM diagnosis (October 7, 2026)
+
+[Global SUM path evidence](global-sum-path/README.md) isolates storage, COUNT, native checked SUM, zero group-ID writes and a fused integer prefix-safety proof. Pending core PRs: #18 → #34 → #35. The final ten-pair comparison measures Roc at 37.93 ms vs native DataFusion 38.31 ms (1t, 0.98% faster), and 10.81 vs 11.43 ms (4t, 5.49% faster), for the unchanged 4M-row Snappy Parquet SUM/COUNT query. Integer overflow errors are preserved. The resident 4t short query remains slower; this is not a universal engine ranking. All source identities, raw samples, intervals, rejected prototypes and validation are recorded. Integration and executables remain local.
+
+
 **New candidate (October 7, 2026):** [global batch COUNT ablation](global-count-batch/README.md), PR #18, restores batch reduction for ungrouped non-DISTINCT COUNT only. The unchanged global SUM/COUNT query is 13.6% faster at one thread and 13.9% faster at four threads in a balanced ten-pair focused comparison. Remaining native DataFusion gaps are 19.6% and 13.1%. Main and SUM are unchanged; this candidate is not merged. Two noisy complete-query rounds and the focused comparison preserve all 4000 timings and 200 complete result checks, including machine interference and uncertainty.
 
 **Latest measurement (October 7, 2026):** [merged main versus DataFusion](main-current/README.md) freshly measures main `291317e1c4ee43ca7a613f0a532b1f35fae5aab4` with all retained optimizations, five independent processes and 800 timing samples. Scan/filter are near parity at one thread and about 6%-7% faster on Roc at four threads. Grouped SUM/COUNT is 4.2% slower at one thread and 1.5% faster at four. Global SUM/COUNT remains 39.3% and 31.0% slower respectively. Earlier cumulative tables include now-deferred code and do not describe this main revision. All fresh raw results, plans, input hashes and source identities are preserved.

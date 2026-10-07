@@ -1,0 +1,18 @@
+   Compiling roc v0.1.0 (/Users/zenotme/Project/Roc/target/global-sum-diagnostics/paired/reuse/source)
+   Compiling roc-datafusion v0.1.0 (/Users/zenotme/Project/Roc/target/global-sum-diagnostics/paired/reuse/source/integrations/datafusion)
+warning: methods `state_types` and `merge` are never used
+   --> integrations/datafusion/examples/../../../src/expr/agg/accumulator.rs:324:12
+    |
+245 | impl Accumulator {
+    | ---------------- methods in this implementation
+...
+324 |     pub fn state_types(&self) -> Vec<DataType> {
+    |            ^^^^^^^^^^^
+...
+381 |     pub fn merge(&mut self, states: &[ArrayRef], ids: &[usize]) -> Result<()> {
+    |            ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `roc-datafusion` (example "global_probe") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 23.25s

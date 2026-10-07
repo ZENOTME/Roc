@@ -1,0 +1,202 @@
+{
+  "variants": {
+    "main": {
+      "local_source_commit": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+      "compiled_source_sha256": "5f5c6126b1429a421f7decaea5f6be276850b848e6e692f43716d003ec2735d6",
+      "core_source_sha256": "c415aa38e1e7966d7f59be61deee3ba79b6789b7080078b175ae9a21ecf073d7",
+      "binary_sha256": "b2e420fdf4193a1d94871ca0b2cf760fb7f66748423fe92bf927d624f087d23c",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/main/benchmark",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local_archive_sha256": "35063198e1822c2b1b073cf8598bfaa56f992c880a96e7bb2d08f8cd0f386b49"
+    },
+    "count": {
+      "local_source_commit": "590c6875c80689172aa5f72ad1097ed1ea144d0a",
+      "compiled_source_sha256": "021c30341230b0cf94823627dd772748ab8fcf536486554fbc4d146ccbfb3bbd",
+      "core_source_sha256": "eb7032be742822f236c4e9bdb491d28bc1bb86e2dc9dd6a2727082fcdd1a6a47",
+      "binary_sha256": "4502fee46bd0643b2644684778eb84ad13bbaf1e114b5778a51613ce76300ce2",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/count/benchmark",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local_archive_sha256": "32836e2cc4aed061e3cfd0e7a5e4bcd9c1556d4fe6db23c57f05b0505685a6dd"
+    },
+    "sum": {
+      "local_source_commit": "e4714899b0bd6385698eef9c1a6303a2ac6efb64",
+      "compiled_source_sha256": "f5b3d72d9697ea7eb97e97a1c22768444e637fc2afd4cd4c8de8391382c5edac",
+      "core_source_sha256": "3b7ef12028350a6bc6217ae78589659877f1fd86f57bad9d8d6b5df50e7fb14c",
+      "binary_sha256": "e7187ebeb5e903d060fe885a1665d1a947f1508dde671c03c7aad76c76ce66ff",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/sum/benchmark",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local_archive_sha256": "9a5841585d56f0b1a726c9ca139742813fc73caeb820528574d9ab9d4de5dbea"
+    },
+    "reuse": {
+      "local_source_commit": "da4b0e0db2ba1b84008f485e931f7481dde63317",
+      "compiled_source_sha256": "29e2fdf753428c180cf3cbf4a3e17afef4fd7391c397e4aae6ec4ea74564519b",
+      "core_source_sha256": "6f6f7d38dd6d48d4d1df9bfff4f13728c7b824f6a9f9c11b07a2ce117977676b",
+      "binary_sha256": "81ac6d9d0f4e95964ce4c0d977c39d41a7d10601651a1df0cda89a123b75d00e",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/reuse/benchmark",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local_archive_sha256": "55ce2e7358d35f7c7f6e773f67ea98e548f448a91c6e208210aa033f0066fe85"
+    }
+  },
+  "probe_sha256": "8f58bf5055e027adeb92e1b3dc8635aea031f28e07886c204686eaac9f9c83a7",
+  "purpose": "Four-stage ablation of actual main, pending batch COUNT, bound native checked global SUM, and retained zero group IDs. Identical local SQL converter and probe; kernel controls are exploratory, all full-path cases execute the actual core library.",
+  "design": {
+    "data_directory": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+    "input_files": [
+      {
+        "name": "part-000.parquet",
+        "bytes": 6451300,
+        "sha256": "fc4ca32257ca5dfda30ba5bcf65457dafe2cb53f720c3e662e2a290a0a6f2309"
+      },
+      {
+        "name": "part-001.parquet",
+        "bytes": 6452352,
+        "sha256": "902c1ce6cbaadc87eebbdcb9641112af154cb1ac0dfdfe8f9b6fc39fc58d29f8"
+      },
+      {
+        "name": "part-002.parquet",
+        "bytes": 6451712,
+        "sha256": "79a3f0f87624f91bf40fc73ed6947509c868c3385ecf2836576cf8be4c812573"
+      },
+      {
+        "name": "part-003.parquet",
+        "bytes": 6451759,
+        "sha256": "7a65084a02920074ce0fe1358f79b4ef718c3f6d871eead217ca0d1f532f9e54"
+      },
+      {
+        "name": "part-004.parquet",
+        "bytes": 6451976,
+        "sha256": "517b24321a1ed0bc4b8408337a51d703175a378844a2e9a1bb4acf440c2f6387"
+      },
+      {
+        "name": "part-005.parquet",
+        "bytes": 6451555,
+        "sha256": "f828bdd19dbac842facacaa2a67043ac9c241419c14f8ae59a2bd8199554d89a"
+      },
+      {
+        "name": "part-006.parquet",
+        "bytes": 6452163,
+        "sha256": "521d73b24508cf6bf38fe06d5c84ca9bd06af54600303ddf82966cf708927554"
+      },
+      {
+        "name": "part-007.parquet",
+        "bytes": 6451536,
+        "sha256": "0e86c32fd189a4a16139ad22c0da5283eda8f24db4ad7f91d250deb36213d7e6"
+      }
+    ],
+    "replicas_per_stage": 8,
+    "timed_samples_per_case_engine": 10,
+    "warmups": 2,
+    "process_orders": [
+      [
+        "reuse",
+        "count",
+        "main",
+        "sum"
+      ],
+      [
+        "sum",
+        "reuse",
+        "count",
+        "main"
+      ],
+      [
+        "count",
+        "main",
+        "sum",
+        "reuse"
+      ],
+      [
+        "main",
+        "sum",
+        "reuse",
+        "count"
+      ],
+      [
+        "main",
+        "count",
+        "sum",
+        "reuse"
+      ],
+      [
+        "reuse",
+        "main",
+        "count",
+        "sum"
+      ],
+      [
+        "sum",
+        "reuse",
+        "main",
+        "count"
+      ],
+      [
+        "count",
+        "sum",
+        "reuse",
+        "main"
+      ]
+    ],
+    "order": "Two randomized cyclic Latin squares; each stage appears twice at each process position; three engine orders rotate within each sample. No compilation during timing. No observations trimmed.",
+    "sql": "SELECT SUM(value) AS total, COUNT(value) AS count FROM p (Parquet) or m (resident same decoded column)",
+    "batch_rows": 8192,
+    "threads": [
+      1,
+      4
+    ],
+    "timing": "Native collect or Roc execute through shutdown and output extraction; SQL/planning/conversion/Roc graph construction excluded; complete execution including Parquet decode included for p. Correctness/schema checked after each run, outside timers.",
+    "samples": {
+      "full_path": 3840,
+      "kernel": 6400
+    },
+    "statistics": "Geometric mean of eight per-process medians. 95% intervals resample the paired process-level log ratios (10000 resamples). Kernels include exact accumulator source in the example, compiled separately; full paths execute the core library."
+  },
+  "environment": {
+    "date": "2026-10-07",
+    "machine": "Apple M1 Pro",
+    "memory_bytes": 34359738368,
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "arrow": "59.3.0",
+    "datafusion": "55.1.0",
+    "core_identities": {
+      "main": {
+        "core_commit": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+        "local_commit": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+        "src_tests_match_exactly": true,
+        "core_archive_sha256": "d8e7952b1207ab4cfc171d9975aa3c8d1df137499ca03ca441696b41343da3da"
+      },
+      "count": {
+        "core_commit": "0ddd08565871b7e53faa09f738d0cfa25579635c",
+        "local_commit": "590c6875c80689172aa5f72ad1097ed1ea144d0a",
+        "src_tests_match_exactly": true,
+        "core_archive_sha256": "877132b4b1a2eced2726f803ee28d91067d09fc761b0d2433024168fffd4f7b8"
+      },
+      "sum": {
+        "core_commit": "c0fce1680186df137af1970ed3ee4496d3091112",
+        "local_commit": "e4714899b0bd6385698eef9c1a6303a2ac6efb64",
+        "src_tests_match_exactly": true,
+        "core_archive_sha256": "a32beb7dc2cd11cc5de16a53f5469bc5a81f1db88c47b7dcce6e30e99a515cde"
+      },
+      "reuse": {
+        "core_commit": "b3cdd89314ec5808a6525bd03b16c460133bb2f4",
+        "local_commit": "da4b0e0db2ba1b84008f485e931f7481dde63317",
+        "src_tests_match_exactly": true,
+        "core_archive_sha256": "e0315a72d45e37a62df919e8bcc72fcfa8371154d1a80012a4250dbc2f08d345"
+      },
+      "fused": {
+        "core_commit": "37708712d41b2a51ab30ca951ca98c1e144b3274",
+        "local_commit": "b57681fa2fb5aaca1b31a2cf889b8be459ac8bd7",
+        "src_tests_match_exactly": true,
+        "core_archive_sha256": "f1815c068e774ac2efabc61aab3ff6dc8216a9f81d35041c3f55087ce5be3f22"
+      }
+    }
+  },
+  "validation": {
+    "native_core_release_tests": 130,
+    "fused_core_release_tests": 132,
+    "native_and_fused_all_targets_pass": true,
+    "datafusion_integration_local_only": true,
+    "all_timed_schema_and_value_checks_passed": true,
+    "fresh_workspace_wide_tests": false
+  }
+}

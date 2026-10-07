@@ -1,0 +1,298 @@
+1/8 reuse: 1t p:DF=37.879,Roc=38.598 m:DF=1.781,Roc=2.398; 4t p:DF=11.348,Roc=11.040 m:DF=0.719,Roc=0.880
+1/8 count: 1t p:DF=38.107,Roc=45.022 m:DF=1.803,Roc=9.053; 4t p:DF=11.383,Roc=12.897 m:DF=0.753,Roc=3.145
+1/8 main: 1t p:DF=37.914,Roc=52.899 m:DF=1.817,Roc=16.796; 4t p:DF=11.316,Roc=14.739 m:DF=0.748,Roc=4.818
+1/8 sum: 1t p:DF=37.799,Roc=38.868 m:DF=1.794,Roc=2.709; 4t p:DF=11.250,Roc=11.056 m:DF=0.757,Roc=0.974
+2/8 sum: 1t p:DF=38.011,Roc=39.134 m:DF=1.836,Roc=2.721; 4t p:DF=11.317,Roc=11.106 m:DF=0.718,Roc=0.964
+2/8 reuse: 1t p:DF=38.134,Roc=38.961 m:DF=1.777,Roc=2.400; 4t p:DF=11.410,Roc=10.990 m:DF=0.715,Roc=0.896
+2/8 count: 1t p:DF=37.565,Roc=44.673 m:DF=1.826,Roc=9.007; 4t p:DF=11.246,Roc=12.751 m:DF=0.730,Roc=3.000
+2/8 main: 1t p:DF=37.711,Roc=52.672 m:DF=1.793,Roc=16.737; 4t p:DF=11.260,Roc=14.683 m:DF=0.734,Roc=5.008
+3/8 count: 1t p:DF=37.631,Roc=44.808 m:DF=1.810,Roc=9.030; 4t p:DF=11.310,Roc=12.736 m:DF=0.754,Roc=3.049
+3/8 main: 1t p:DF=37.886,Roc=52.437 m:DF=1.803,Roc=16.697; 4t p:DF=11.360,Roc=14.660 m:DF=0.726,Roc=4.873
+3/8 sum: 1t p:DF=37.913,Roc=38.827 m:DF=1.765,Roc=2.682; 4t p:DF=11.279,Roc=10.931 m:DF=0.707,Roc=0.957
+3/8 reuse: 1t p:DF=37.820,Roc=38.531 m:DF=1.778,Roc=2.438; 4t p:DF=11.352,Roc=11.055 m:DF=0.727,Roc=0.853
+4/8 main: 1t p:DF=37.644,Roc=52.329 m:DF=1.801,Roc=16.793; 4t p:DF=11.570,Roc=15.015 m:DF=0.744,Roc=5.280
+4/8 sum: 1t p:DF=38.193,Roc=39.513 m:DF=1.770,Roc=2.670; 4t p:DF=11.545,Roc=11.213 m:DF=0.725,Roc=1.166
+4/8 reuse: 1t p:DF=37.895,Roc=38.623 m:DF=1.766,Roc=2.406; 4t p:DF=11.270,Roc=11.023 m:DF=0.704,Roc=1.028
+4/8 count: 1t p:DF=38.006,Roc=44.943 m:DF=1.824,Roc=9.023; 4t p:DF=11.298,Roc=12.857 m:DF=0.754,Roc=3.161
+5/8 main: 1t p:DF=37.829,Roc=52.944 m:DF=1.811,Roc=16.762; 4t p:DF=11.315,Roc=14.669 m:DF=0.731,Roc=4.802
+5/8 count: 1t p:DF=37.778,Roc=44.868 m:DF=1.818,Roc=9.057; 4t p:DF=11.239,Roc=12.660 m:DF=0.767,Roc=3.811
+5/8 sum: 1t p:DF=37.859,Roc=39.000 m:DF=1.779,Roc=2.676; 4t p:DF=11.420,Roc=11.110 m:DF=0.741,Roc=1.075
+5/8 reuse: 1t p:DF=37.867,Roc=38.401 m:DF=1.752,Roc=2.403; 4t p:DF=11.265,Roc=10.934 m:DF=0.706,Roc=0.856
+6/8 reuse: 1t p:DF=38.030,Roc=38.605 m:DF=1.758,Roc=2.395; 4t p:DF=11.311,Roc=10.985 m:DF=0.723,Roc=0.855
+6/8 main: 1t p:DF=37.912,Roc=52.849 m:DF=1.806,Roc=16.715; 4t p:DF=11.276,Roc=14.679 m:DF=0.755,Roc=4.978
+6/8 count: 1t p:DF=37.968,Roc=45.048 m:DF=1.807,Roc=9.020; 4t p:DF=11.280,Roc=12.642 m:DF=0.759,Roc=3.013
+6/8 sum: 1t p:DF=37.744,Roc=38.840 m:DF=1.768,Roc=2.693; 4t p:DF=11.371,Roc=11.056 m:DF=0.793,Roc=1.062
+7/8 sum: 1t p:DF=37.783,Roc=38.690 m:DF=1.778,Roc=2.685; 4t p:DF=11.394,Roc=11.029 m:DF=0.712,Roc=0.976
+7/8 reuse: 1t p:DF=37.914,Roc=38.634 m:DF=1.758,Roc=2.401; 4t p:DF=11.413,Roc=10.943 m:DF=0.730,Roc=0.860
+7/8 main: 1t p:DF=37.917,Roc=52.629 m:DF=1.792,Roc=16.648; 4t p:DF=11.263,Roc=14.674 m:DF=0.737,Roc=5.134
+7/8 count: 1t p:DF=37.840,Roc=44.685 m:DF=1.822,Roc=8.970; 4t p:DF=11.377,Roc=12.657 m:DF=0.733,Roc=2.974
+8/8 count: 1t p:DF=37.771,Roc=44.912 m:DF=1.815,Roc=9.040; 4t p:DF=11.251,Roc=12.609 m:DF=0.738,Roc=3.149
+8/8 sum: 1t p:DF=37.848,Roc=38.634 m:DF=1.777,Roc=2.678; 4t p:DF=11.358,Roc=11.096 m:DF=0.719,Roc=0.973
+8/8 reuse: 1t p:DF=37.667,Roc=38.622 m:DF=1.751,Roc=2.404; 4t p:DF=11.333,Roc=10.981 m:DF=0.727,Roc=0.868
+8/8 main: 1t p:DF=37.847,Roc=52.698 m:DF=1.835,Roc=16.898; 4t p:DF=11.224,Roc=14.832 m:DF=0.750,Roc=4.964
+{
+  "p/1t": {
+    "main": {
+      "roc_ms": 52.681686990987046,
+      "datafusion_ms": 37.83245107158189,
+      "roc_no_yield_ms": 52.74269768179888,
+      "roc_gap_percent": 39.249997023214966,
+      "roc_vs_df_cluster_95_percent": [
+        38.917953246187054,
+        39.553758022548344
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 0.0,
+      "stage_reduction_95_percent": [
+        -0.0,
+        -0.0
+      ]
+    },
+    "count": {
+      "roc_ms": 44.86953587653403,
+      "datafusion_ms": 37.832797291679405,
+      "roc_no_yield_ms": 44.89446946795996,
+      "roc_gap_percent": 18.599572562936608,
+      "roc_vs_df_cluster_95_percent": [
+        18.349331216224286,
+        18.841131402060117
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 14.828969155428794,
+      "stage_reduction_95_percent": [
+        14.572100978869507,
+        15.055599673072662
+      ]
+    },
+    "sum": {
+      "roc_ms": 38.937231532879046,
+      "datafusion_ms": 37.89341090278902,
+      "roc_no_yield_ms": 38.97384967775091,
+      "roc_gap_percent": 2.75462304717784,
+      "roc_vs_df_cluster_95_percent": [
+        2.4740539227819047,
+        3.033084391717855
+      ],
+      "previous_stage": "count",
+      "stage_elapsed_reduction_percent": 13.221229566489622,
+      "stage_reduction_95_percent": [
+        12.763141891608132,
+        13.625707926391195
+      ]
+    },
+    "reuse": {
+      "roc_ms": 38.62178563828708,
+      "datafusion_ms": 37.90053154502127,
+      "roc_no_yield_ms": 38.68145683512919,
+      "roc_gap_percent": 1.9030184112564408,
+      "roc_vs_df_cluster_95_percent": [
+        1.6802113163318477,
+        2.1356347229908534
+      ],
+      "previous_stage": "sum",
+      "stage_elapsed_reduction_percent": 0.8101395044627147,
+      "stage_reduction_95_percent": [
+        0.37118261981403666,
+        1.3267621525407391
+      ]
+    }
+  },
+  "m/1t": {
+    "main": {
+      "roc_ms": 16.75562782380813,
+      "datafusion_ms": 1.8073427059533422,
+      "roc_no_yield_ms": 16.795074970269063,
+      "roc_gap_percent": 827.086366554362,
+      "roc_vs_df_cluster_95_percent": [
+        824.4506391670105,
+        829.9412282992948
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 0.0,
+      "stage_reduction_95_percent": [
+        -0.0,
+        -0.0
+      ]
+    },
+    "count": {
+      "roc_ms": 9.025008694270152,
+      "datafusion_ms": 1.8156182580699014,
+      "roc_no_yield_ms": 9.030085234033164,
+      "roc_gap_percent": 397.0763349705579,
+      "roc_vs_df_cluster_95_percent": [
+        394.8674676035723,
+        399.1756861880723
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 46.13744832976961,
+      "stage_reduction_95_percent": [
+        46.024626316104055,
+        46.26601666564909
+      ]
+    },
+    "sum": {
+      "roc_ms": 2.6892960357684204,
+      "datafusion_ms": 1.7831664373012388,
+      "roc_no_yield_ms": 2.6877460178408814,
+      "roc_gap_percent": 50.81576119381079,
+      "roc_vs_df_cluster_95_percent": [
+        49.95363920582798,
+        51.53881600734347
+      ],
+      "previous_stage": "count",
+      "stage_elapsed_reduction_percent": 70.20173468114423,
+      "stage_reduction_95_percent": [
+        70.0484453923099,
+        70.3373889200784
+      ]
+    },
+    "reuse": {
+      "roc_ms": 2.405464010518468,
+      "datafusion_ms": 1.7650009594800298,
+      "roc_no_yield_ms": 2.4064960247200764,
+      "roc_gap_percent": 36.28683868971487,
+      "roc_vs_df_cluster_95_percent": [
+        35.621989488825065,
+        36.8824646887977
+      ],
+      "previous_stage": "sum",
+      "stage_elapsed_reduction_percent": 10.554138386957169,
+      "stage_reduction_95_percent": [
+        9.978474214779197,
+        11.132344535379291
+      ]
+    }
+  },
+  "p/4t": {
+    "main": {
+      "roc_ms": 14.743578405205836,
+      "datafusion_ms": 11.322687955191526,
+      "roc_no_yield_ms": 14.719626116882647,
+      "roc_gap_percent": 30.21270623682435,
+      "roc_vs_df_cluster_95_percent": [
+        29.706013201517536,
+        30.830801852903566
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 0.0,
+      "stage_reduction_95_percent": [
+        -0.0,
+        -0.0
+      ]
+    },
+    "count": {
+      "roc_ms": 12.725644688997496,
+      "datafusion_ms": 11.29766391829188,
+      "roc_no_yield_ms": 12.707328634584632,
+      "roc_gap_percent": 12.639610994212646,
+      "roc_vs_df_cluster_95_percent": [
+        12.101695349443563,
+        13.170441285366262
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 13.686865296526818,
+      "stage_reduction_95_percent": [
+        13.201742090863277,
+        14.202490565086045
+      ]
+    },
+    "sum": {
+      "roc_ms": 11.07434471444082,
+      "datafusion_ms": 11.36639450193055,
+      "roc_no_yield_ms": 11.094878185027866,
+      "roc_gap_percent": -2.569414491465405,
+      "roc_vs_df_cluster_95_percent": [
+        -2.9066873506634727,
+        -2.208342697396415
+      ],
+      "previous_stage": "count",
+      "stage_elapsed_reduction_percent": 12.976159675308075,
+      "stage_reduction_95_percent": [
+        12.47332314670101,
+        13.532232902050268
+      ]
+    },
+    "reuse": {
+      "roc_ms": 10.993696097721351,
+      "datafusion_ms": 11.337645629925087,
+      "roc_no_yield_ms": 10.96994401936477,
+      "roc_gap_percent": -3.0336945026390616,
+      "roc_vs_df_cluster_95_percent": [
+        -3.445448297350151,
+        -2.6601221319848545
+      ],
+      "previous_stage": "sum",
+      "stage_elapsed_reduction_percent": 0.728247303105023,
+      "stage_reduction_95_percent": [
+        0.10948731416866586,
+        1.2509442603079846
+      ]
+    }
+  },
+  "m/4t": {
+    "main": {
+      "roc_ms": 4.979882376288093,
+      "datafusion_ms": 0.7405052604377275,
+      "roc_no_yield_ms": 5.009614673044562,
+      "roc_gap_percent": 572.4979068135701,
+      "roc_vs_df_cluster_95_percent": [
+        559.1157381001525,
+        587.2451282384283
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 0.0,
+      "stage_reduction_95_percent": [
+        -0.0,
+        -0.0
+      ]
+    },
+    "count": {
+      "roc_ms": 3.153434719881003,
+      "datafusion_ms": 0.7482583227933837,
+      "roc_no_yield_ms": 3.0418612098282343,
+      "roc_gap_percent": 321.4366380996152,
+      "roc_vs_df_cluster_95_percent": [
+        306.7728768155364,
+        343.46864496368977
+      ],
+      "previous_stage": "main",
+      "stage_elapsed_reduction_percent": 36.67652202196165,
+      "stage_reduction_95_percent": [
+        32.030827002463504,
+        39.85437218670518
+      ]
+    },
+    "sum": {
+      "roc_ms": 1.0160495265402594,
+      "datafusion_ms": 0.7336250669080691,
+      "roc_no_yield_ms": 1.0117789186846056,
+      "roc_gap_percent": 38.497111449925555,
+      "roc_vs_df_cluster_95_percent": [
+        33.33735026818139,
+        45.29821054494685
+      ],
+      "previous_stage": "count",
+      "stage_elapsed_reduction_percent": 67.77959219721535,
+      "stage_reduction_95_percent": [
+        66.00462345453701,
+        69.43996502372202
+      ]
+    },
+    "reuse": {
+      "roc_ms": 0.8853924029134459,
+      "datafusion_ms": 0.7188959419584554,
+      "roc_no_yield_ms": 0.8921087167429602,
+      "roc_gap_percent": 23.160022367272216,
+      "roc_vs_df_cluster_95_percent": [
+        18.95414563407991,
+        29.893019222217344
+      ],
+      "previous_stage": "sum",
+      "stage_elapsed_reduction_percent": 12.859326264509253,
+      "stage_reduction_95_percent": [
+        9.946957964764081,
+        16.007725589689947
+      ]
+    }
+  }
+}
