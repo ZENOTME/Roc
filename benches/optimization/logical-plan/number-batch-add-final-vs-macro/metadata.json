@@ -1,0 +1,135 @@
+{
+  "purpose": "Direct paired comparison of original PR #35 safety-bound macro and current new(initial)/add(array) implementation. Both verified existing binaries reused; no compilation during timing.",
+  "old_core_commit": "37708712d41b2a51ab30ca951ca98c1e144b3274",
+  "new_core_commit": "b66a66cce04e6133fe558356b75e46feae83461f",
+  "variants": {
+    "macro": {
+      "base_local_commit": "b57681fa2fb5aaca1b31a2cf889b8be459ac8bd7",
+      "source_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/macro/source",
+      "compiled_source_sha256": "baacb33fb07fafcf939230f74ba2b369fd27ce12af31344db7add78ef26f9255",
+      "core_source_sha256": "9b41a05ec407826f4822a83cd3138026add7b11d8a2f20b05fc273ff58a97bf6",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add-final-vs-macro/macro/benchmark",
+      "binary_sha256": "847c168cb8d8dc341c06d61340d230d0fcee262667913ce9d17df83425cc2bf5",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "core_commit": "37708712d41b2a51ab30ca951ca98c1e144b3274",
+      "source_matches_core_commit": true,
+      "reused_verified_binary_from": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/macro/benchmark"
+    },
+    "current": {
+      "source_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add-initial/initial/source",
+      "base_local_commit": "f9cbb8d723a7b8b12d54a52dc556d5ae211cdb82",
+      "compiled_source_sha256": "972e188cb3a8a437c5779916b562a900f880f30009bd9560d9fd67683ff9677c",
+      "core_source_sha256": "7693a302c265b180de2d11d3e5b452b74a22543fa46fb43f77017ac7d0b9ea35",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add-final-vs-macro/current/benchmark",
+      "binary_sha256": "d29a60716fc766cef9ffa7782ccbafcc0f2303d7ac1d51248cd98370c8df1e38",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "core_commit": "b66a66cce04e6133fe558356b75e46feae83461f",
+      "source_matches_core_commit": true,
+      "reused_verified_binary_from": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add-initial/initial/benchmark"
+    }
+  },
+  "probe_sha256": "c75c5f1ca94c8a132b4af43a403e8fcf7089a79a19374894c8d7190a4997e522",
+  "design": {
+    "data_directory": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+    "input_files": [
+      {
+        "name": "part-000.parquet",
+        "bytes": 6451300,
+        "sha256": "fc4ca32257ca5dfda30ba5bcf65457dafe2cb53f720c3e662e2a290a0a6f2309"
+      },
+      {
+        "name": "part-001.parquet",
+        "bytes": 6452352,
+        "sha256": "902c1ce6cbaadc87eebbdcb9641112af154cb1ac0dfdfe8f9b6fc39fc58d29f8"
+      },
+      {
+        "name": "part-002.parquet",
+        "bytes": 6451712,
+        "sha256": "79a3f0f87624f91bf40fc73ed6947509c868c3385ecf2836576cf8be4c812573"
+      },
+      {
+        "name": "part-003.parquet",
+        "bytes": 6451759,
+        "sha256": "7a65084a02920074ce0fe1358f79b4ef718c3f6d871eead217ca0d1f532f9e54"
+      },
+      {
+        "name": "part-004.parquet",
+        "bytes": 6451976,
+        "sha256": "517b24321a1ed0bc4b8408337a51d703175a378844a2e9a1bb4acf440c2f6387"
+      },
+      {
+        "name": "part-005.parquet",
+        "bytes": 6451555,
+        "sha256": "f828bdd19dbac842facacaa2a67043ac9c241419c14f8ae59a2bd8199554d89a"
+      },
+      {
+        "name": "part-006.parquet",
+        "bytes": 6452163,
+        "sha256": "521d73b24508cf6bf38fe06d5c84ca9bd06af54600303ddf82966cf708927554"
+      },
+      {
+        "name": "part-007.parquet",
+        "bytes": 6451536,
+        "sha256": "0e86c32fd189a4a16139ad22c0da5283eda8f24db4ad7f91d250deb36213d7e6"
+      }
+    ],
+    "replicas_per_stage": 10,
+    "timed_samples_per_case_engine": 10,
+    "warmups": 2,
+    "process_orders": [
+      [
+        "current",
+        "macro"
+      ],
+      [
+        "current",
+        "macro"
+      ],
+      [
+        "current",
+        "macro"
+      ],
+      [
+        "macro",
+        "current"
+      ],
+      [
+        "macro",
+        "current"
+      ],
+      [
+        "current",
+        "macro"
+      ],
+      [
+        "macro",
+        "current"
+      ],
+      [
+        "current",
+        "macro"
+      ],
+      [
+        "macro",
+        "current"
+      ],
+      [
+        "macro",
+        "current"
+      ]
+    ],
+    "order": "Ten balanced paired processes (five baseline-first/five candidate-first, randomized); three engine orders rotate within each sample. No compilation during timing. No observations trimmed.",
+    "sql": "SELECT SUM(value) AS total, COUNT(value) AS count FROM p (Parquet) or m (resident same decoded column)",
+    "batch_rows": 8192,
+    "threads": [
+      1,
+      4
+    ],
+    "timing": "Native collect or Roc execute through shutdown and output extraction; SQL/planning/conversion/Roc graph construction excluded; complete execution including Parquet decode included for p. Correctness/schema checked after each run, outside timers.",
+    "samples": {
+      "full_path": 2400,
+      "kernel": 4400
+    },
+    "statistics": "Geometric mean of ten per-process medians. 95% intervals resample the paired process-level log ratios (10000 resamples). Kernels include exact accumulator source in the example, compiled separately; full paths execute the core library."
+  }
+}
