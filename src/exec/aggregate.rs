@@ -82,6 +82,7 @@ impl AggregateState {
             let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())?;
             if !grouped {
                 executor.resize(1);
+                executor.bind_global_count();
             }
             accumulators.push(executor);
         }
