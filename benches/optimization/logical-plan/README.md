@@ -1,5 +1,7 @@
 # Roc core optimizations: local DataFusion comparison
 
+**Latest measurement (October 7, 2026):** [merged main versus DataFusion](main-current/README.md) freshly measures main `291317e1c4ee43ca7a613f0a532b1f35fae5aab4` with all retained optimizations, five independent processes and 800 timing samples. Scan/filter are near parity at one thread and about 6%-7% faster on Roc at four threads. Grouped SUM/COUNT is 4.2% slower at one thread and 1.5% faster at four. Global SUM/COUNT remains 39.3% and 31.0% slower respectively. Earlier cumulative tables include now-deferred code and do not describe this main revision. All fresh raw results, plans, input hashes and source identities are preserved.
+
 New: [aggregate update binding ablation](aggregate-binding/README.md) separates dispatch binding, MIN/MAX direction specialization, and the complete source amendment. It records neutral results, regressions and process variation; it is an accumulator microbenchmark, not a fresh end-to-end DataFusion comparison.
 
 > Current review baseline: PR #5 was closed and removed from the active code series. PR #6 now targets main. The historical timings below measure their recorded revisions, which include the old global reduction; they are not measurements of the amended series. See the PR #5 closure note at the end for fresh correctness validation.
