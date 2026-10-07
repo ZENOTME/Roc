@@ -1,0 +1,122 @@
+{
+  "purpose": "Fresh Roc vs native DataFusion benchmark after approved global aggregate optimizations reach main. Prepared source is verified before use against actual merged main.",
+  "prepared_full_local_commit": "f9cbb8d723a7b8b12d54a52dc556d5ae211cdb82",
+  "prepared_core_commit": "b66a66cce04e6133fe558356b75e46feae83461f",
+  "source_path": "/Users/zenotme/Project/Roc/target/post-global-sum-merge-20261007/source",
+  "data_directory": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+  "compiled_source_sha256": "75e001af8f5e416a8df08a4ee80fa32d2d534c19d5ecd30d1fdb8cbdc1cd3a69",
+  "core_source_sha256": "7693a302c265b180de2d11d3e5b452b74a22543fa46fb43f77017ac7d0b9ea35",
+  "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+  "binaries": {
+    "global_probe": {
+      "path": "/Users/zenotme/Project/Roc/target/post-global-sum-merge-20261007/global_probe",
+      "sha256": "884698aee340d996d776131f50be15573800b2128320479253ab2c95491045c2"
+    },
+    "parquet_compare": {
+      "path": "/Users/zenotme/Project/Roc/target/post-global-sum-merge-20261007/parquet_compare",
+      "sha256": "1c601aa5f7f4a4b3ea8bf600db24c668b6eea16348a5a9f985fb07a0fb392dce"
+    }
+  },
+  "merged_main_commit": "285623a70e2ccb0d88a13847b8137b8033ab1c81",
+  "core_source_and_tests_match_merged_main": true,
+  "merge_tree_matches_reviewed_tested_head": true,
+  "merges": [
+    {
+      "pr": 18,
+      "reviewed_head": "0ddd08565871b7e53faa09f738d0cfa25579635c",
+      "merge_commit": "a3e054c0827a26394084cbf459188ff620d752e3"
+    },
+    {
+      "pr": 34,
+      "reviewed_head": "b3cdd89314ec5808a6525bd03b16c460133bb2f4",
+      "restacked_head": "665eb587ec1c29d0b31296dcec6c9d2ed79be0d0",
+      "merge_commit": "7d62bd567dde02f30972d65f8c594c85d388fab3"
+    },
+    {
+      "pr": 35,
+      "reviewed_head": "b66a66cce04e6133fe558356b75e46feae83461f",
+      "restacked_head": "ec52c0e4bc310001c031d4f9280aa861a9313ae2",
+      "merge_commit": "285623a70e2ccb0d88a13847b8137b8033ab1c81"
+    }
+  ],
+  "design": {
+    "input_files": [
+      {
+        "name": "part-000.parquet",
+        "bytes": 6451300,
+        "sha256": "fc4ca32257ca5dfda30ba5bcf65457dafe2cb53f720c3e662e2a290a0a6f2309"
+      },
+      {
+        "name": "part-001.parquet",
+        "bytes": 6452352,
+        "sha256": "902c1ce6cbaadc87eebbdcb9641112af154cb1ac0dfdfe8f9b6fc39fc58d29f8"
+      },
+      {
+        "name": "part-002.parquet",
+        "bytes": 6451712,
+        "sha256": "79a3f0f87624f91bf40fc73ed6947509c868c3385ecf2836576cf8be4c812573"
+      },
+      {
+        "name": "part-003.parquet",
+        "bytes": 6451759,
+        "sha256": "7a65084a02920074ce0fe1358f79b4ef718c3f6d871eead217ca0d1f532f9e54"
+      },
+      {
+        "name": "part-004.parquet",
+        "bytes": 6451976,
+        "sha256": "517b24321a1ed0bc4b8408337a51d703175a378844a2e9a1bb4acf440c2f6387"
+      },
+      {
+        "name": "part-005.parquet",
+        "bytes": 6451555,
+        "sha256": "f828bdd19dbac842facacaa2a67043ac9c241419c14f8ae59a2bd8199554d89a"
+      },
+      {
+        "name": "part-006.parquet",
+        "bytes": 6452163,
+        "sha256": "521d73b24508cf6bf38fe06d5c84ca9bd06af54600303ddf82966cf708927554"
+      },
+      {
+        "name": "part-007.parquet",
+        "bytes": 6451536,
+        "sha256": "0e86c32fd189a4a16139ad22c0da5283eda8f24db4ad7f91d250deb36213d7e6"
+      }
+    ],
+    "global_processes": 10,
+    "suite_processes": 5,
+    "samples_per_case_engine": 10,
+    "warmups": 2,
+    "batch_rows": 8192,
+    "threads": [
+      1,
+      4
+    ],
+    "global_cases": [
+      "Parquet SUM/COUNT",
+      "resident SUM/COUNT"
+    ],
+    "suite_cases": [
+      "scan",
+      "filter/project",
+      "global aggregate",
+      "grouped aggregate"
+    ],
+    "order": "Global probe rotates three engine orders inside samples; SQL suite alternates DataFusion-first/Roc-first. Processes run sequentially; no compilation during timing; no observations trimmed.",
+    "global_full_path_timings": 1200,
+    "global_kernel_timings": 2200,
+    "suite_full_path_timings": 800,
+    "validation": "Every global probe output and kernel result verified after timing. Suite performs exact schema and unordered-row checks for each case before warmups, and row-count checks in every timed sample.",
+    "scope": "SQL planning, logical optimization, native physical planning/conversion and graph construction excluded. Full execution, Parquet decoding where applicable, result collection and task cleanup included. Warm-cache local synthetic workload, not TPC-H."
+  },
+  "reviewed_git_tree": "81ae966134b71ec22c9aa6deb4ddfdc878ea57cd",
+  "merged_git_tree": "81ae966134b71ec22c9aa6deb4ddfdc878ea57cd",
+  "validation": {
+    "release_tests_on_identical_reviewed_tree": 133,
+    "all_targets_compilation_on_identical_reviewed_tree": true,
+    "tests_rerun_after_merge": false,
+    "exact_schema_unordered_row_checks_before_suite_timings": 40,
+    "global_timed_output_and_kernel_checks": 3400,
+    "suite_timed_row_count_checks": 800,
+    "all_pass": true
+  }
+}
