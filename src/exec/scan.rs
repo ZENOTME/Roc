@@ -19,8 +19,8 @@ use crate::{
 };
 use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
-use futures::{FutureExt, future::BoxFuture};
-use std::sync::Arc;
+use futures::future::BoxFuture;
+use std::{future::Future, sync::Arc, task::Poll};
 
 pub struct ScanExec<StorageTaskDesc> {
     operator: ScanOperator<StorageTaskDesc>,
@@ -82,15 +82,114 @@ impl SourceExecutor for ScanExecutor {
         shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            let cancelled = shutdown_guard.shutdown_requested().fuse();
-            let next = self.consumer.next().fuse();
+            let cancelled = shutdown_guard.shutdown_requested();
+            let next = self.consumer.next();
             futures::pin_mut!(cancelled, next);
-            futures::select_biased! {
-                _ = cancelled => {
-                    Err(Error::Cancelled)
-                },
-                batch = next => batch,
-            }
+            futures::future::poll_fn(|cx| {
+                // Preserve cancellation priority on every poll, including when
+                // both the previously pending read and shutdown become ready.
+                if shutdown_guard.is_shutdown_requested() {
+                    return Poll::Ready(Err(Error::Cancelled));
+                }
+                match next.as_mut().poll(cx) {
+                    Poll::Ready(result) => Poll::Ready(result),
+                    Poll::Pending => {
+                        // Register only when the read blocks. Polling the wait
+                        // also rechecks shutdown, closing the registration race.
+                        match cancelled.as_mut().poll(cx) {
+                            Poll::Ready(()) => Poll::Ready(Err(Error::Cancelled)),
+                            Poll::Pending => Poll::Pending,
+                        }
+                    }
+                }
+            })
+            .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asyncband::shutdown::Shutdown;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Context,
+    };
+
+    struct TestHandle;
+    impl ScanHandle for TestHandle {
+        fn consumer(&self) -> Box<dyn ScanConsumer> {
+            unreachable!("the test constructs its consumer directly")
+        }
+        fn finish(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct PendingThenReady {
+        polls: Arc<AtomicUsize>,
+        shutdown_during_poll: Option<Shutdown>,
+    }
+    impl ScanConsumer for PendingThenReady {
+        fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
+            Box::pin(futures::future::poll_fn(|_| {
+                if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if let Some(shutdown) = &self.shutdown_during_poll {
+                        shutdown.request_shutdown();
+                    }
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(None))
+                }
+            }))
+        }
+    }
+
+    fn executor(consumer: PendingThenReady) -> ScanExecutor {
+        ScanExecutor {
+            consumer: Box::new(consumer),
+            _global: Arc::new(ScanGlobalContext {
+                handle: Arc::new(TestHandle),
+            }),
+        }
+    }
+
+    #[test]
+    fn shutdown_keeps_priority_when_a_pending_read_becomes_ready() {
+        let (shutdown, guard) = asyncband::shutdown::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut executor = executor(PendingThenReady {
+            polls: polls.clone(),
+            shutdown_during_poll: None,
+        });
+        let mut next = executor.next_batch(&guard);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        shutdown.request_shutdown();
+        assert!(matches!(
+            next.as_mut().poll(&mut cx),
+            Poll::Ready(Err(Error::Cancelled))
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shutdown_during_data_poll_is_seen_before_returning_pending() {
+        let (shutdown, guard) = asyncband::shutdown::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut executor = executor(PendingThenReady {
+            polls: polls.clone(),
+            shutdown_during_poll: Some(shutdown),
+        });
+        let mut next = executor.next_batch(&guard);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            next.as_mut().poll(&mut cx),
+            Poll::Ready(Err(Error::Cancelled))
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
 }
