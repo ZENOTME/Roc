@@ -1,0 +1,98 @@
+[
+  {
+    "workload": "scan_only",
+    "threads": 1,
+    "old-pr4_roc_ms": 107.31475,
+    "old-pr4_datafusion_ms": 107.24362500000001,
+    "new-pr4_roc_ms": 108.029563,
+    "new-pr4_datafusion_ms": 107.75512499999999,
+    "new-final_roc_ms": 106.42904200000001,
+    "new-final_datafusion_ms": 107.68925,
+    "new_pr4_elapsed_reduction_pct": -0.6660901693383181,
+    "new_final_df_over_roc": 1.011840828182969
+  },
+  {
+    "workload": "filter_project",
+    "threads": 1,
+    "old-pr4_roc_ms": 106.3395835,
+    "old-pr4_datafusion_ms": 100.1825625,
+    "new-pr4_roc_ms": 106.617313,
+    "new-pr4_datafusion_ms": 99.1569585,
+    "new-final_roc_ms": 100.288479,
+    "new-final_datafusion_ms": 99.7801455,
+    "new_pr4_elapsed_reduction_pct": -0.2611722661110427,
+    "new_final_df_over_roc": 0.9949312871720789
+  },
+  {
+    "workload": "global_aggregate",
+    "threads": 1,
+    "old-pr4_roc_ms": 69.48124999999999,
+    "old-pr4_datafusion_ms": 38.990833499999994,
+    "new-pr4_roc_ms": 68.7386665,
+    "new-pr4_datafusion_ms": 39.1348545,
+    "new-final_roc_ms": 39.8612705,
+    "new-final_datafusion_ms": 38.6907295,
+    "new_pr4_elapsed_reduction_pct": 1.0687538004857333,
+    "new_final_df_over_roc": 0.9706346289188148
+  },
+  {
+    "workload": "grouped_aggregate",
+    "threads": 1,
+    "old-pr4_roc_ms": 155.336625,
+    "old-pr4_datafusion_ms": 70.99041700000001,
+    "new-pr4_roc_ms": 150.67037499999998,
+    "new-pr4_datafusion_ms": 71.37214600000001,
+    "new-final_roc_ms": 72.222646,
+    "new-final_datafusion_ms": 71.420542,
+    "new_pr4_elapsed_reduction_pct": 3.003959948273638,
+    "new_final_df_over_roc": 0.988894009781918
+  },
+  {
+    "workload": "scan_only",
+    "threads": 4,
+    "old-pr4_roc_ms": 29.1976665,
+    "old-pr4_datafusion_ms": 31.052083000000003,
+    "new-pr4_roc_ms": 28.9377915,
+    "new-pr4_datafusion_ms": 30.869208,
+    "new-final_roc_ms": 29.069021,
+    "new-final_datafusion_ms": 30.8841045,
+    "new_pr4_elapsed_reduction_pct": 0.8900540048294658,
+    "new_final_df_over_roc": 1.0624404757215593
+  },
+  {
+    "workload": "filter_project",
+    "threads": 4,
+    "old-pr4_roc_ms": 29.040582999999998,
+    "old-pr4_datafusion_ms": 29.347187,
+    "new-pr4_roc_ms": 29.3297915,
+    "new-pr4_datafusion_ms": 29.180145500000002,
+    "new-final_roc_ms": 27.733520499999997,
+    "new-final_datafusion_ms": 29.3162705,
+    "new_pr4_elapsed_reduction_pct": -0.9958770455813504,
+    "new_final_df_over_roc": 1.0570699273465842
+  },
+  {
+    "workload": "global_aggregate",
+    "threads": 4,
+    "old-pr4_roc_ms": 18.7020835,
+    "old-pr4_datafusion_ms": 11.329771000000001,
+    "new-pr4_roc_ms": 18.517417000000002,
+    "new-pr4_datafusion_ms": 11.14825,
+    "new-final_roc_ms": 11.149916999999999,
+    "new-final_datafusion_ms": 11.469083,
+    "new_pr4_elapsed_reduction_pct": 0.9874113758501779,
+    "new_final_df_over_roc": 1.0286249664459386
+  },
+  {
+    "workload": "grouped_aggregate",
+    "threads": 4,
+    "old-pr4_roc_ms": 41.564271000000005,
+    "old-pr4_datafusion_ms": 20.634917,
+    "new-pr4_roc_ms": 40.209479,
+    "new-pr4_datafusion_ms": 20.6657705,
+    "new-final_roc_ms": 19.4819795,
+    "new-final_datafusion_ms": 20.437520499999998,
+    "new_pr4_elapsed_reduction_pct": 3.259511035331286,
+    "new_final_df_over_roc": 1.0490474286763312
+  }
+]

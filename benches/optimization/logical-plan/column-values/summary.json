@@ -1,0 +1,338 @@
+[
+  {
+    "rows": 8192,
+    "nullable": false,
+    "case": 0,
+    "before_us": 5.923917,
+    "after_us": 5.235677,
+    "time_change_pct": -11.617988570737914,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 5.851719,
+        "after_us": 5.255063,
+        "time_change_pct": -10.196251733892215
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 5.923917,
+        "after_us": 5.235677,
+        "time_change_pct": -11.617988570737914
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 6.009594,
+        "after_us": 5.220187,
+        "time_change_pct": -13.135779222356781
+      }
+    ]
+  },
+  {
+    "rows": 8192,
+    "nullable": false,
+    "case": 1,
+    "before_us": 11.391948,
+    "after_us": 5.190437,
+    "time_change_pct": -54.43766948374413,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 11.315865,
+        "after_us": 5.190437,
+        "time_change_pct": -54.13132800718283
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 11.480927,
+        "after_us": 5.209354,
+        "time_change_pct": -54.62601582607397
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 11.391948,
+        "after_us": 5.183573,
+        "time_change_pct": -54.49792256776453
+      }
+    ]
+  },
+  {
+    "rows": 8192,
+    "nullable": false,
+    "case": 2,
+    "before_us": 11.153636,
+    "after_us": 9.801573,
+    "time_change_pct": -12.12217253638187,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 11.043156,
+        "after_us": 9.691417,
+        "time_change_pct": -12.240513490889748
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 11.153636,
+        "after_us": 9.801573,
+        "time_change_pct": -12.12217253638187
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 11.286281,
+        "after_us": 9.873917,
+        "time_change_pct": -12.513989329168751
+      }
+    ]
+  },
+  {
+    "rows": 8192,
+    "nullable": true,
+    "case": 0,
+    "before_us": 6.45576,
+    "after_us": 5.73426,
+    "time_change_pct": -11.17606602475928,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 6.428531,
+        "after_us": 5.705854,
+        "time_change_pct": -11.241712920105694
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 6.45576,
+        "after_us": 5.783875,
+        "time_change_pct": -10.407527541296446
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 6.469094,
+        "after_us": 5.73426,
+        "time_change_pct": -11.359148591750257
+      }
+    ]
+  },
+  {
+    "rows": 8192,
+    "nullable": true,
+    "case": 1,
+    "before_us": 11.134354,
+    "after_us": 5.787312,
+    "time_change_pct": -48.02292077295189,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 11.225792,
+        "after_us": 5.799177,
+        "time_change_pct": -48.340598151114854
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 11.109063,
+        "after_us": 5.774011,
+        "time_change_pct": -48.02432032296514
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 11.134354,
+        "after_us": 5.787312,
+        "time_change_pct": -48.02292077295189
+      }
+    ]
+  },
+  {
+    "rows": 8192,
+    "nullable": true,
+    "case": 2,
+    "before_us": 11.359323,
+    "after_us": 10.037031,
+    "time_change_pct": -11.640588087864035,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 11.358604,
+        "after_us": 10.074958,
+        "time_change_pct": -11.301089464867331
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 11.359323,
+        "after_us": 10.037031,
+        "time_change_pct": -11.640588087864035
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 11.377167,
+        "after_us": 10.022521,
+        "time_change_pct": -11.906707530969706
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": false,
+    "case": 0,
+    "before_us": 35.760334,
+    "after_us": 35.113334,
+    "time_change_pct": -1.8092672176943325,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 35.760334,
+        "after_us": 35.111666,
+        "time_change_pct": -1.8139316036589581
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 36.186834,
+        "after_us": 35.602,
+        "time_change_pct": -1.6161513328300625
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 35.750168,
+        "after_us": 35.113334,
+        "time_change_pct": -1.7813454750758129
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": false,
+    "case": 1,
+    "before_us": 69.687082,
+    "after_us": 35.130918,
+    "time_change_pct": -49.58761797487804,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 69.27025,
+        "after_us": 35.043,
+        "time_change_pct": -49.411183011465965
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 70.418418,
+        "after_us": 35.532,
+        "time_change_pct": -49.54160998050256
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 69.687082,
+        "after_us": 35.130918,
+        "time_change_pct": -49.58761797487804
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": false,
+    "case": 2,
+    "before_us": 76.300084,
+    "after_us": 74.88675,
+    "time_change_pct": -1.8523360996561822,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 76.159584,
+        "after_us": 74.862,
+        "time_change_pct": -1.7037698105073718
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 76.300084,
+        "after_us": 74.88675,
+        "time_change_pct": -1.8523360996561822
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 76.512082,
+        "after_us": 75.693918,
+        "time_change_pct": -1.0693265411337416
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": true,
+    "case": 0,
+    "before_us": 40.776834,
+    "after_us": 40.617916,
+    "time_change_pct": -0.38972618619680377,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 40.592334,
+        "after_us": 40.617916,
+        "time_change_pct": 0.06302175184111913
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 40.776834,
+        "after_us": 40.437,
+        "time_change_pct": -0.8333996700185309
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 41.486082,
+        "after_us": 41.18975,
+        "time_change_pct": -0.7142925668420674
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": true,
+    "case": 1,
+    "before_us": 65.244832,
+    "after_us": 40.60925,
+    "time_change_pct": -37.758671828597855,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 64.767082,
+        "after_us": 40.37475,
+        "time_change_pct": -37.66161952456033
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 65.244832,
+        "after_us": 40.60925,
+        "time_change_pct": -37.758671828597855
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 65.929666,
+        "after_us": 41.025834,
+        "time_change_pct": -37.77333256928679
+      }
+    ]
+  },
+  {
+    "rows": 65536,
+    "nullable": true,
+    "case": 2,
+    "before_us": 77.545916,
+    "after_us": 76.528332,
+    "time_change_pct": -1.3122341607261445,
+    "process_medians": [
+      {
+        "process": "process-1.csv",
+        "before_us": 77.922168,
+        "after_us": 76.533334,
+        "time_change_pct": -1.7823349062875193
+      },
+      {
+        "process": "process-2.csv",
+        "before_us": 77.490166,
+        "after_us": 76.073584,
+        "time_change_pct": -1.8280797075592825
+      },
+      {
+        "process": "process-3.csv",
+        "before_us": 77.545916,
+        "after_us": 76.528332,
+        "time_change_pct": -1.3122341607261445
+      }
+    ]
+  }
+]

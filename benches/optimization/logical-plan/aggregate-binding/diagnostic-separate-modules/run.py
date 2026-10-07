@@ -1,0 +1,8 @@
+import subprocess,json,hashlib,time,platform
+from pathlib import Path
+root=Path(__file__).resolve().parent;binary=Path('/Users/zenotme/Project/Roc/target/column-value-checks/build/release/aggregate-binding-ablation');p=root/'metadata.json';d=json.loads(p.read_text());d.update({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'rustc':subprocess.check_output(['rustc','--version'],text=True).strip(),'host':platform.platform(),'cpu':subprocess.check_output(['sysctl','-n','machdep.cpu.brand_string'],text=True).strip(),'arrow':'59.3.0','build':'cargo build --release --locked; default release profile, no RUSTFLAGS override','cargo_lock_sha256':hashlib.sha256((root/'Cargo.lock').read_bytes()).hexdigest(),'benchmark_main_sha256':hashlib.sha256((root/'src/main.rs').read_bytes()).hexdigest(),'recorded_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())});p.write_text(json.dumps(d,indent=2)+'\n')
+for process in range(3):
+ start=time.monotonic();print(f'Starting independent process {process}',flush=True)
+ with (root/f'process-{process}.csv').open('w') as output,(root/f'process-{process}.log').open('w') as log:result=subprocess.run([str(binary),str(process)],stdout=output,stderr=log)
+ if result.returncode:print((root/f'process-{process}.log').read_text());raise SystemExit(result.returncode)
+ print(f'Process {process} complete; all correctness checks passed; {time.monotonic()-start:.1f} seconds',flush=True)

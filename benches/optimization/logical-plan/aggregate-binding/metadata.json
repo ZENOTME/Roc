@@ -1,0 +1,106 @@
+{
+  "heads": {
+    "before": "0a69952f69816a5c4ca6fd96f13c88746af37bfd",
+    "after": "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca",
+    "runtime_reference": "7985dace8669503a7ae0054ab67871e6c86236c8"
+  },
+  "variants": [
+    "enum_dynamic",
+    "enum_static",
+    "bound_dynamic",
+    "bound_static",
+    "before",
+    "after"
+  ],
+  "rows": [
+    128,
+    8192,
+    65536
+  ],
+  "groups": 256,
+  "null_fraction": [
+    0,
+    0.058823529411764705
+  ],
+  "samples_per_process": 12,
+  "processes": 3,
+  "target_sample_ms": 15,
+  "timing_scope": "Accumulator::update only, including casts and existing row encoding; binding, resize, input creation, group-ID generation, state/output materialization, storage and pipeline scheduling excluded",
+  "control_layout": "All four factorial controls share the same enum state, runtime minimum field and update pointer. Exact before/after modules retain their own production layouts.",
+  "order": "Six-way balanced cyclic order, two cycles per case; case order shuffled per process",
+  "summary_method": "median of three process medians; retain each process and paired round ratios",
+  "generated_sha256": {
+    "after.rs": "b6ff237c446ccc9812c31c2732f0cc328f740f59d7a89d4c05d1d1b8d8760f3a",
+    "before.rs": "317bbd534d4f12de5898181ebf91a21fab124e14848a00c06ae94822d1701ff4",
+    "shared.rs": "f8cfa94dfd3b987ac2085259ad65204eab16efb35d33bfd11400b001adaa6471"
+  },
+  "distinct_hash_control": "All variants clone a shared RandomState per process during resize (outside timing), using the same hash algorithm and seed; each process receives a fresh seed.",
+  "production_module_note": "Before/after update kernels are copied without algorithm changes; only resize uses the shared hash-seed constructor to control DISTINCT hash collisions. black_box on mutable accumulator prevents constant propagation of the selected type/function at the timed call site.",
+  "binary_sha256": "743f5ee513c53056f2e909d95a5f045a68bc022c36557357d2356b1f117f7e78",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "host": "macOS-26.6.2-arm64-arm-64bit",
+  "cpu": "Apple M1 Pro",
+  "arrow": "59.3.0",
+  "build": "cargo build --release --locked; default release profile, no RUSTFLAGS override",
+  "cargo_lock_sha256": "9097a96a8bd45fe0b8808a2f12681a2a29f2ff8455a2894420777e9649943713",
+  "benchmark_main_sha256": "f550219520b237f072f2baa80c8c65e97896d7f0bc81cfe281cfee7978319eee",
+  "recorded_at_utc": "2026-10-05T13:46:51Z",
+  "design_revision": 2,
+  "factorial_kernel_control": "Four controls share one module, one state type and one copy of each loop. Shared count/distinct/avg/covar/extremum kernels use inline(never), preventing re-embedding into dispatch wrappers; before/after snapshot modules retain default inlining. Allocator construction order rotates across case/process. Typed SUM update loops also use inline(never) in the shared control module.",
+  "discarded_design": "The initial independent-module factorial showed non-extremum differences in direction-only comparisons; that design cannot identify direction causally. Preserved under diagnostic-separate-modules, excluded from final causal conclusions.",
+  "compiled_modules": [
+    "before.rs",
+    "after.rs",
+    "shared.rs"
+  ],
+  "prepare_sha256": "a99f029969666bf92b688f080dbf879cbe3df1fc6524b5c2631f95ff4ec03359",
+  "run_sha256": "dbe3ed0fcfc7efd1c6670a5ca1fe623c841c0e9b481b909dceeba4b75479b3b5",
+  "summarize_sha256": "0fdb19e5cff12cfcf6d5c63ea8e75cf8ea8e15ba13b3c5f03b593dc523a8d292",
+  "rustflags_at_measurement": null,
+  "encoded_rustflags_at_measurement": null,
+  "cpu_physical_cores": 10,
+  "memory_bytes": 34359738368,
+  "snapshot_sources": {
+    "0a69952f69816a5c4ca6fd96f13c88746af37bfd::src/expr/agg/accumulator.rs": {
+      "file": "source-snapshots/before-accumulator.rs",
+      "sha256": "04f2bdc73614c650e252be142708268323f7819677d1ac838c014cbf10ad4998",
+      "git_blob": "99ee664cd6b9698de61ba5c61cce1f77c7393a87"
+    },
+    "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca::src/expr/agg/accumulator.rs": {
+      "file": "source-snapshots/after-accumulator.rs",
+      "sha256": "e29112cf79379ae83b17076889e35d307aa1f4958b1481333f71e5ed77a353a3",
+      "git_blob": "2636c1516ba7124df7f3710644a83a3bea0e81e5"
+    },
+    "7985dace8669503a7ae0054ab67871e6c86236c8::src/expr/agg/accumulator.rs": {
+      "file": "source-snapshots/runtime-accumulator.rs",
+      "sha256": "4414ec0573faaf0a9672467d57780aec9847fd75f4fc43c4d0c6c7da391ad718",
+      "git_blob": "d3c15086e8edb7726c87b96c0fad02d6c083eaa2"
+    },
+    "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca::src/error.rs": {
+      "file": "source-snapshots/error.rs",
+      "sha256": "2daf65fc9dd5a7dcc0512e569a2518f9bbd69b82386b87b01c85a8890bec2060",
+      "git_blob": "4a8f33bf9d9d3b17bdaf7b6bd8b4a443391e5a16"
+    },
+    "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca::src/expr/agg/aggregate.rs": {
+      "file": "source-snapshots/aggregate.rs",
+      "sha256": "873c4a758dfce1e43bf63add84a23ab2fa6ec882a84090cdcf56718e85f428a5",
+      "git_blob": "f608dc234f2ac79cc61c2ad952f726663ed90b3a"
+    }
+  },
+  "allocated_state_groups": 257,
+  "cases": [
+    "count_star",
+    "count_i64",
+    "count_distinct_i64",
+    "sum_i64",
+    "sum_u64",
+    "sum_f64",
+    "avg_i64",
+    "covar_i64",
+    "min_i64",
+    "max_i64",
+    "min_utf8",
+    "max_utf8",
+    "mixed_7"
+  ]
+}

@@ -1,0 +1,10 @@
+[package]
+name = "roc_column_value_bench"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+roc_before = { path = ".sources/before" }
+roc_after = { path = ".sources/after" }
+arrow = { version = "=59.3.0", default-features = false }
+
+[workspace]

@@ -1,0 +1,109 @@
+{
+  "method": "Single thread; 4 Boolean inputs, deterministic mixed values; nullable inputs have 25% NULLs; slice offsets 0/7/14/21; warmed inputs; 3 independent processes, 9 samples each, alternating kernel order; 4000 iterations at 8192 rows, 500 at 65536; exact output equality checked. Bitmap merging only: excludes expression evaluation, planning and input preparation. df_arrow_kleene is the general Arrow kernel sequence used by DataFusion, not full DataFusion or its short-circuit/preselection paths. No end-to-end query speedup claimed.",
+  "before_core": "a68b1a8f55eeae81da5cd85c39e9d14e55a50267",
+  "after_core": "490e29bbcf47ad328f727ab48f4d4e1712393920",
+  "results": [
+    {
+      "rows": 8192,
+      "nullable": false,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 413.396,
+        "arrow_composed": 405.448,
+        "df_arrow_kleene": 541.24
+      },
+      "new_vs_before_pct": -1.9226117330598314,
+      "new_vs_df_arrow_pct": -25.08905476313651
+    },
+    {
+      "rows": 8192,
+      "nullable": false,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 379.865,
+        "arrow_composed": 370.021,
+        "df_arrow_kleene": 538.031
+      },
+      "new_vs_before_pct": -2.591446961420507,
+      "new_vs_df_arrow_pct": -31.226825220108122
+    },
+    {
+      "rows": 8192,
+      "nullable": true,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 1011.375,
+        "arrow_composed": 1407.031,
+        "df_arrow_kleene": 1615.01
+      },
+      "new_vs_before_pct": 39.12060313929055,
+      "new_vs_df_arrow_pct": -12.877876917170795
+    },
+    {
+      "rows": 8192,
+      "nullable": true,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 990.125,
+        "arrow_composed": 1388.333,
+        "df_arrow_kleene": 1621.948
+      },
+      "new_vs_before_pct": 40.21795227875269,
+      "new_vs_df_arrow_pct": -14.403359417194627
+    },
+    {
+      "rows": 65536,
+      "nullable": false,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 1544.334,
+        "arrow_composed": 1548.834,
+        "df_arrow_kleene": 1604.918
+      },
+      "new_vs_before_pct": 0.2913877438429857,
+      "new_vs_df_arrow_pct": -3.4945087537182506
+    },
+    {
+      "rows": 65536,
+      "nullable": false,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 1414.916,
+        "arrow_composed": 1407.334,
+        "df_arrow_kleene": 1614.334
+      },
+      "new_vs_before_pct": -0.535862199593462,
+      "new_vs_df_arrow_pct": -12.822625305543955
+    },
+    {
+      "rows": 65536,
+      "nullable": true,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 6404.666,
+        "arrow_composed": 5410.666,
+        "df_arrow_kleene": 7854.166
+      },
+      "new_vs_before_pct": -15.51993499739096,
+      "new_vs_df_arrow_pct": -31.110877972276118
+    },
+    {
+      "rows": 65536,
+      "nullable": true,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 6439.582,
+        "arrow_composed": 5294.584,
+        "df_arrow_kleene": 7894.0
+      },
+      "new_vs_before_pct": -17.780626133808074,
+      "new_vs_df_arrow_pct": -32.92900937420826
+    }
+  ],
+  "environment": {
+    "cpu": "Apple M1 Pro",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "arrow": "59.3.0"
+  }
+}

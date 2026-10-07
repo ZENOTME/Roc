@@ -1,0 +1,26 @@
+{
+  "source_commits": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "pr11": "6ee7251da77e7238e44034807447ae510420b510"
+  },
+  "scope": "Actual public ScanExec next_batch path only; not full queries. 2048-row Int64 batches. 5 independent process pairs, 9 samples per mode/process, 100000 batch reads per sample; setup outside timing. pending_once is an artificial wake/re-poll, not actual I/O waiting. ready_sum includes Arrow SUM on each batch, not Roc aggregate or pipeline scheduling. Correctness and column identity assertions run in timed loop identically for both variants.",
+  "samples": 360,
+  "binaries": {
+    "main": "ee6ecd53fb9c37611bf7848da6b744369fc479a3d95db1b935cf01a57430059a",
+    "pr11": "61057ade36e41b689b656234ece55cc6973dd74f84f2c74299f21db2c8e6f86f"
+  },
+  "lockfiles": {
+    "main": "15a5b7c4a3ff02c93cd6a1cb5158f243235a98e6c6bc58e153f51b8bfd7792d2",
+    "pr11": "15a5b7c4a3ff02c93cd6a1cb5158f243235a98e6c6bc58e153f51b8bfd7792d2"
+  },
+  "machine": "Apple M1 Pro",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "build": "Cargo default release profile, --locked, no RUSTFLAGS override. Identical Cargo locks. Each source copy forced to rebuild and its Compiling roc log checked before binary capture.",
+  "source_copy_changes": "Append an empty [workspace] table to each root manifest to isolate it from the enclosing workspace; add the identical examples/ready_poll_probe.rs. Production source is unmodified at each recorded commit.",
+  "statistics": "Geometric mean of five process medians, each from nine samples. Paired process log ratios; 95% paired cluster bootstrap, 10000 resamples of five process pairs. Variant order randomized within each pair; case order reversed in odd-numbered pairs. This is not an end-to-end or multiworker benchmark.",
+  "source_archive_sha256": {
+    "main": "9922f46417165ef4b14a580d8ffa84e2a6dd18d50de41356f48e0c5869f24e45",
+    "pr11": "99fff2061a56d6c79342f01006b5543249053d05fb33f5b863c3ab7591f33a27"
+  }
+}

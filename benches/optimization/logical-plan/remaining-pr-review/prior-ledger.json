@@ -1,0 +1,84 @@
+{
+  "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+  "merged_pr": {
+    "number": 10,
+    "reviewed_head": "416a3910f6dbff231e21e3d602f8baac2245e06f",
+    "merge_commit": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "release_tests": 121,
+    "merge_tree_matches_tested_head": true
+  },
+  "records": [
+    {
+      "number": 12,
+      "branch": "codex/df-12-scalar-arrow",
+      "old_sha": "269fa0881c920c922fa1a37162f6dbf73ecaf2d7",
+      "new_sha": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+      "all_targets_check": true
+    },
+    {
+      "number": 15,
+      "branch": "codex/df-15-global-sum-local",
+      "old_sha": "ed79a248f33aba1de6e3a601abb9d4ec3d8ea892",
+      "new_sha": "07919a785169557521d188860ee2c78f50b3a62d",
+      "all_targets_check": true
+    },
+    {
+      "number": 16,
+      "branch": "codex/df-16-filter-projection",
+      "old_sha": "c08db4cdbf355413f47c1eb9103e8374c571435e",
+      "new_sha": "b308030a737e2b705a0bde2ba6b2e1cec0f1f390",
+      "all_targets_check": true,
+      "release_tests": 130
+    }
+  ],
+  "closed_prs": [
+    {
+      "number": 13,
+      "reason": "Superseded by single optional argument evaluation in PR #8; transformed incremental diff is empty.",
+      "old_sha": "188cc312ccdc4d1804d4017b5183cbb31eafaffd"
+    },
+    {
+      "number": 9,
+      "old_sha": "6b309ac73edee0831cdb7543a8a9a4fbf66901bd",
+      "reason": "Deferred at user request; remove NULL-density dispatch and integer first-value specialization from all later PRs."
+    },
+    {
+      "number": 11,
+      "old_sha": "6ee7251da77e7238e44034807447ae510420b510",
+      "reason": "Deferred because the isolated ready-channel path saves about 23 ns per batch with no demonstrated material query improvement; retain simpler select_biased polling."
+    }
+  ],
+  "report_old": "af9349c943f6bce17ce55c479a5c6497ee7edf8d",
+  "local_old": "a9458d66c77633016ba74471e43046fad1430e1d",
+  "published": true,
+  "pr8_current_aggregate_benchmark": {
+    "main": "1bfd41bdcc20f78a58b86957302369825a254076",
+    "head": "6504d61bca4ffc48ca18d90365c068a67a708b45",
+    "samples": 5760,
+    "report": "https://github.com/ZENOTME/Roc/blob/fb97b60a314ab71394421714c596230ea04af2cc/benches/optimization/logical-plan/pr8-current/README.md",
+    "scope": "AggregateOperator sink/grouping/update/combine/merge/output only; excludes storage, pipeline scheduling and DataFusion."
+  },
+  "local_new": "1c2af64854fe30baca4ee149260a8ffc3e3271f3",
+  "core_test_trees_match_local": true,
+  "local_workspace_release_tests": 146,
+  "report_new": "2eec23b8dd0bf207135b16371f3b2e4f1ba9fd44",
+  "descriptions_and_bases_verified": true,
+  "other_incremental_diffs_preserved": true,
+  "previous_merged_pr": {
+    "number": 8,
+    "reviewed_head": "6504d61bca4ffc48ca18d90365c068a67a708b45",
+    "merge_commit": "67d39dc33cdd2d614441f77c457c930b387ac289",
+    "release_tests": 120,
+    "merge_tree_matches_tested_head": true
+  },
+  "pr11_current_scan_benchmark": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "head": "6ee7251da77e7238e44034807447ae510420b510",
+    "samples": 360,
+    "report": "https://github.com/ZENOTME/Roc/blob/af9349c943f6bce17ce55c479a5c6497ee7edf8d/benches/optimization/logical-plan/pr11-current/README.md",
+    "scope": "ScanExec next_batch only; ready source, queued channel, synthetic scan-plus-Arrow-SUM and one artificial Pending. No SQL-query or real I/O measurements.",
+    "ready_channel_main_ns": 108.0427608820483,
+    "ready_channel_pr11_ns": 85.00769766204463,
+    "status": "Historical measurement of closed PR #11; optimization removed from later source heads."
+  }
+}

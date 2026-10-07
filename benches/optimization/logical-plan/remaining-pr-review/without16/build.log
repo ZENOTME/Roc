@@ -1,0 +1,12 @@
+   Compiling roc v0.1.0 (/Users/zenotme/Project/Roc/target/remaining-pr-review/without16)
+   Compiling roc-datafusion v0.1.0 (/Users/zenotme/Project/Roc/target/remaining-pr-review/without16/integrations/datafusion)
+warning: function `referenced_columns` is never used
+   --> integrations/datafusion/src/converter.rs:477:4
+    |
+477 | fn referenced_columns(expr: &Arc<dyn PhysicalExpr>, output: &mut BTreeSet<usize>) {
+    |    ^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `roc-datafusion` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 24.90s
