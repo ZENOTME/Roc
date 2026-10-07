@@ -2288,6 +2288,23 @@
     "local_workspace_release_tests": 138,
     "core_test_trees_match_local": true,
     "validation": "The squash merge tree equals the reviewed PR #12 tree validated by 121 release tests and all-target compilation. Remaining core and local-only harness source trees and incremental diffs are unchanged, preserving their earlier compilation checks, 122 final-core and 138 local-workspace release tests. No checks were repeated for ancestry-only changes.",
+    "performance": "Historical benchmark snapshots and samples retain their measured identities. All prior benchmark samples and measured identities remain unchanged. No timings were collected for the ancestry-only update.",
+    "superseded_by": "after_pr16_merge"
+  },
+  "after_pr16_merge": {
+    "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+    "merged_pr": {
+      "number": 16,
+      "reviewed_head": "f4c4d5bdd3653717960503fd447ef5e1cf8db255",
+      "merge_commit": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+      "release_tests": 122,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [],
+    "local_harness": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+    "local_workspace_release_tests": 138,
+    "core_test_trees_match_local": true,
+    "validation": "The squash merge tree equals the reviewed PR #16 tree validated by 122 release tests and all-target compilation. The local-only harness source tree is unchanged, and the documentation PR has no production source changes, preserving their earlier compilation checks, 122 final-core and 138 local-workspace release tests. No checks were repeated for ancestry-only changes.",
     "performance": "Historical benchmark snapshots and samples retain their measured identities. All prior benchmark samples and measured identities remain unchanged. No timings were collected for the ancestry-only update."
   }
 }
