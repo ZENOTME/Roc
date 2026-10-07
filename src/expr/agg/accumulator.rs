@@ -117,6 +117,51 @@ where
         Ok(())
     }
 
+    /// All rows belong to group zero. Keep the running value in a local variable
+    /// and visit contiguous valid slices, preserving sequential checked addition.
+    fn update_global(
+        &mut self,
+        array: &PrimitiveArray<T>,
+        add_value: impl Fn(T::Native, T::Native) -> Option<T::Native>,
+    ) -> Result<()> {
+        debug_assert_eq!(self.values.len(), 1);
+        if array.len() == array.null_count() {
+            return Ok(());
+        }
+        let values = array.values();
+        let mut total = self.values[0];
+        let mut start = 0;
+        if !self.valid[0] {
+            let first = array
+                .nulls()
+                .map_or(0, |nulls| nulls.valid_indices().next().unwrap());
+            total = values[first];
+            self.valid[0] = true;
+            start = first + 1;
+        }
+        let result = (|| {
+            let mut add = |slice: &[T::Native]| -> Result<()> {
+                for &value in slice {
+                    total = add_value(total, value).ok_or_else(overflow)?;
+                }
+                Ok(())
+            };
+            if array.null_count() == 0 {
+                add(&values[start..])?;
+            } else {
+                for (lo, hi) in array.nulls().unwrap().valid_slices() {
+                    if hi > start {
+                        add(&values[lo.max(start)..hi])?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+        // An error leaves exactly the successfully accumulated prefix, like add().
+        self.values[0] = total;
+        result
+    }
+
     fn state(&self) -> ArrayRef {
         Arc::new(PrimitiveArray::<T>::new(
             self.values.clone().into(),
@@ -265,6 +310,15 @@ impl Accumulator {
     pub fn bind_global_count(&mut self) {
         if matches!(self.state, AccumulatorState::Count(_)) {
             self.update_fn = update_global_count;
+        }
+    }
+    pub fn bind_global_sum(&mut self) {
+        if let AccumulatorState::Sum { groups, .. } = &self.state {
+            self.update_fn = match groups {
+                SumGroups::Signed(_) => update_global_sum_i64,
+                SumGroups::Unsigned(_) => update_global_sum_u64,
+                SumGroups::Float(_) => update_global_sum_f64,
+            };
         }
     }
     pub fn state_types(&self) -> Vec<DataType> {
@@ -471,6 +525,29 @@ fn update_global_count(
     Ok(())
 }
 
+macro_rules! global_sum_update {
+    ($name:ident, $groups:ident, $array:ident, $add:expr) => {
+        fn $name(
+            state: &mut AccumulatorState,
+            value: Option<&ArrayRef>,
+            ids: &[usize],
+        ) -> Result<()> {
+            debug_assert!(ids.iter().all(|&id| id == 0));
+            let (groups, data_type) = state.as_sum_mut();
+            let argument =
+                value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+            debug_assert_eq!(argument.len(), ids.len());
+            let values = cast_argument(argument, data_type)?;
+            groups.$groups().update_global($array(&values), $add)
+        }
+    };
+}
+global_sum_update!(update_global_sum_i64, as_i64_mut, as_i64, i64::checked_add);
+global_sum_update!(update_global_sum_u64, as_u64_mut, as_u64, u64::checked_add);
+global_sum_update!(update_global_sum_f64, as_f64_mut, as_f64, |a, b| Some(
+    a + b
+));
+
 fn update_distinct(
     state: &mut AccumulatorState,
     value: Option<&ArrayRef>,
@@ -659,5 +736,147 @@ mod cast_argument_tests {
         let converted = cast_argument(&narrow, &DataType::Int64).unwrap();
         assert!(matches!(&converted, Cow::Owned(_)));
         assert_eq!(converted.to_data(), source.to_data());
+    }
+}
+
+#[cfg(test)]
+mod global_sum_tests {
+    use super::*;
+    use arrow::array::{Float32Array, Int32Array, UInt32Array};
+
+    fn pair(input: &DataType, output: &DataType) -> (Accumulator, Accumulator) {
+        let mut row = Accumulator::new(AggregateFunction::Sum, false, Some(input), output).unwrap();
+        let mut global =
+            Accumulator::new(AggregateFunction::Sum, false, Some(input), output).unwrap();
+        row.resize(1);
+        global.resize(1);
+        global.bind_global_sum();
+        (row, global)
+    }
+
+    fn compare(row: &Accumulator, global: &Accumulator) {
+        let a = row.evaluate().unwrap();
+        let b = global.evaluate().unwrap();
+        assert_eq!(a.null_count(), b.null_count());
+        if a.data_type() == &DataType::Float64 {
+            assert_eq!(
+                as_f64(&a)
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                as_f64(&b)
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            assert_eq!(a.to_data(), b.to_data());
+        }
+    }
+
+    #[test]
+    fn global_sum_matches_row_order_for_sliced_null_patterns_and_empty_batches() {
+        for step in [1, 2, 7, 17, 151] {
+            let nulls = NullBuffer::from((0..151).map(|i| i % step != 0).collect::<Vec<_>>());
+            for array in [
+                Arc::new(Int64Array::new(
+                    (0..151).map(|i| i as i64 - 70).collect::<Vec<_>>().into(),
+                    Some(nulls.clone()),
+                )) as ArrayRef,
+                Arc::new(UInt64Array::new(
+                    (0..151).map(|i| i as u64).collect::<Vec<_>>().into(),
+                    Some(nulls.clone()),
+                )),
+                Arc::new(Float64Array::new(
+                    (0..151)
+                        .map(|i| (i as f64 - 70.0) / 3.0)
+                        .collect::<Vec<_>>()
+                        .into(),
+                    Some(nulls.clone()),
+                )),
+            ] {
+                let (mut row, mut global) = pair(array.data_type(), array.data_type());
+                for value in [array.slice(3, 0), array.slice(3, 143), array.slice(7, 100)] {
+                    let ids = vec![0; value.len()];
+                    row.update(Some(&value), &ids).unwrap();
+                    global.update(Some(&value), &ids).unwrap();
+                    compare(&row, &global);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_sum_checks_each_prefix_and_preserves_state_on_error() {
+        for batches in [
+            vec![
+                Arc::new(Int64Array::from(vec![i64::MAX - 1])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![Some(1), None, Some(1), Some(-1)])),
+            ],
+            vec![
+                Arc::new(Int64Array::from(vec![i64::MIN])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![None, Some(-1), Some(1)])),
+            ],
+            vec![
+                Arc::new(UInt64Array::from(vec![u64::MAX - 1])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![Some(1), None, Some(1)])),
+            ],
+        ] {
+            let (mut row, mut global) = pair(batches[0].data_type(), batches[0].data_type());
+            for (index, value) in batches.iter().enumerate() {
+                let ids = vec![0; value.len()];
+                assert_eq!(row.update(Some(value), &ids).is_err(), index == 1);
+                assert_eq!(global.update(Some(value), &ids).is_err(), index == 1);
+                compare(&row, &global);
+            }
+        }
+    }
+
+    #[test]
+    fn global_float_sum_preserves_first_signed_zero_null_payloads_and_addition_order() {
+        let (mut row, mut global) = pair(&DataType::Float64, &DataType::Float64);
+        for value in [
+            Arc::new(Float64Array::new(
+                vec![f64::NAN, -0.0, f64::INFINITY].into(),
+                Some(NullBuffer::from(vec![false, true, false])),
+            )) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1e16, -1e16, 1.0])),
+            Arc::new(Float64Array::from(vec![f64::NAN])),
+        ] {
+            let ids = vec![0; value.len()];
+            row.update(Some(&value), &ids).unwrap();
+            global.update(Some(&value), &ids).unwrap();
+            compare(&row, &global);
+        }
+    }
+
+    #[test]
+    fn global_sum_keeps_numeric_casts_and_partial_merges() {
+        for (value, output) in [
+            (
+                Arc::new(Int32Array::from(vec![Some(3), None, Some(-3)])) as ArrayRef,
+                DataType::Int64,
+            ),
+            (
+                Arc::new(UInt32Array::from(vec![Some(3), None, Some(4)])) as ArrayRef,
+                DataType::UInt64,
+            ),
+            (
+                Arc::new(Float32Array::from(vec![Some(-0.0), None, Some(4.0)])) as ArrayRef,
+                DataType::Float64,
+            ),
+        ] {
+            let (mut row, mut global) = pair(value.data_type(), &output);
+            let ids = vec![0; value.len()];
+            row.update(Some(&value), &ids).unwrap();
+            global.update(Some(&value), &ids).unwrap();
+            compare(&row, &global);
+            let partial = row.state().unwrap();
+            row.merge(&partial, &[0]).unwrap();
+            global.merge(&partial, &[0]).unwrap();
+            compare(&row, &global);
+        }
     }
 }

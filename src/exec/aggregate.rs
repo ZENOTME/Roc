@@ -83,6 +83,7 @@ impl AggregateState {
             if !grouped {
                 executor.resize(1);
                 executor.bind_global_count();
+                executor.bind_global_sum();
             }
             accumulators.push(executor);
         }
