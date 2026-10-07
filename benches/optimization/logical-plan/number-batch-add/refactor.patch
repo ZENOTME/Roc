@@ -1,0 +1,262 @@
+diff --git a/src/expr/agg/accumulator.rs b/src/expr/agg/accumulator.rs
+index 613ba20..8bc196b 100644
+--- a/src/expr/agg/accumulator.rs
++++ b/src/expr/agg/accumulator.rs
+@@ -525,99 +525,170 @@ fn update_global_count(
+     Ok(())
+ }
+ 
+-macro_rules! global_sum_update {
+-    ($name:ident, $groups:ident, $array:ident, $add:expr) => {
+-        fn $name(
+-            state: &mut AccumulatorState,
+-            value: Option<&ArrayRef>,
+-            ids: &[usize],
+-        ) -> Result<()> {
+-            debug_assert!(ids.iter().all(|&id| id == 0));
+-            let (groups, data_type) = state.as_sum_mut();
+-            let argument =
+-                value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+-            debug_assert_eq!(argument.len(), ids.len());
+-            let values = cast_argument(argument, data_type)?;
+-            groups.$groups().update_global($array(&values), $add)
+-        }
+-    };
++/// Integer arithmetic used to prove that every valid addition prefix fits.
++/// Only the two integer SUM state types implement this private trait.
++trait BatchInteger: ArrowNativeTypeOp {
++    fn checked_add(self, rhs: Self) -> Option<Self>;
++    fn magnitude_bits(self) -> u64;
++    fn magnitude_bound(bits: u64) -> u128;
++    fn remaining_range(self) -> u128;
+ }
+-// Compute a conservative magnitude bound and wrapping subtotal in one scan.
+-// Only a bound proving that *every* valid prefix fits enables the fast path.
+-macro_rules! global_integer_sum_update {
+-    ($name:ident, $native:ty, $groups:ident, $array:ident, $magnitude:expr, $bound:expr, $room:expr, $add:expr) => {
+-        fn $name(
+-            state: &mut AccumulatorState,
+-            value: Option<&ArrayRef>,
+-            ids: &[usize],
+-        ) -> Result<()> {
+-            debug_assert!(ids.iter().all(|&id| id == 0));
+-            let (groups, data_type) = state.as_sum_mut();
+-            let argument =
+-                value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+-            debug_assert_eq!(argument.len(), ids.len());
+-            let values = cast_argument(argument, data_type)?;
+-            let array = $array(&values);
+-            let groups = groups.$groups();
+-            let count = array.len() - array.null_count();
+-            if count == 0 {
+-                return Ok(());
+-            }
+-            let total = groups.values[0];
+-            let (bits, raw_sum) = array
+-                .values()
+-                .iter()
+-                .fold((0u64, 0 as $native), |(bits, sum), &v| {
+-                    (bits | ($magnitude)(v), sum.wrapping_add(v))
++
++impl BatchInteger for i64 {
++    #[inline]
++    fn checked_add(self, rhs: Self) -> Option<Self> {
++        i64::checked_add(self, rhs)
++    }
++    #[inline]
++    fn magnitude_bits(self) -> u64 {
++        (self ^ (self >> 63)) as u64
++    }
++    #[inline]
++    fn magnitude_bound(bits: u64) -> u128 {
++        u128::from(bits) + 1
++    }
++    #[inline]
++    fn remaining_range(self) -> u128 {
++        (i64::MAX as i128 - self as i128).min(self as i128 - i64::MIN as i128) as u128
++    }
++}
++
++impl BatchInteger for u64 {
++    #[inline]
++    fn checked_add(self, rhs: Self) -> Option<Self> {
++        u64::checked_add(self, rhs)
++    }
++    #[inline]
++    fn magnitude_bits(self) -> u64 {
++        self
++    }
++    #[inline]
++    fn magnitude_bound(bits: u64) -> u128 {
++        u128::from(bits)
++    }
++    #[inline]
++    fn remaining_range(self) -> u128 {
++        u128::from(u64::MAX - self)
++    }
++}
++
++/// One batch's wrapping subtotal and conservative magnitude bound, computed
++/// together so the dense scan can vectorize. The array is borrowed, not copied.
++struct NumberBatchAdd<'a, T: ArrowPrimitiveType> {
++    array: &'a PrimitiveArray<T>,
++    raw_sum: T::Native,
++    magnitude_bits: u64,
++}
++
++impl<'a, T: ArrowPrimitiveType> NumberBatchAdd<'a, T>
++where
++    T::Native: BatchInteger,
++{
++    #[inline]
++    fn new(array: &'a PrimitiveArray<T>) -> Self {
++        let (magnitude_bits, raw_sum) = array
++            .values()
++            .iter()
++            .fold((0u64, T::Native::ZERO), |(bits, sum), &value| {
++                (bits | value.magnitude_bits(), sum.add_wrapping(value))
++            });
++        Self {
++            array,
++            raw_sum,
++            magnitude_bits,
++        }
++    }
++
++    /// None means the bound cannot prove safety; it does not mean overflow.
++    /// Only a proof covering every valid prefix permits the fast result.
++    #[inline]
++    fn try_add(self, total: T::Native) -> Result<Option<T::Native>> {
++        let count = self.array.len() - self.array.null_count();
++        if T::Native::magnitude_bound(self.magnitude_bits) * count as u128 > total.remaining_range()
++        {
++            return Ok(None);
++        }
++        // NULL payloads can make the bound conservative. Cancel their raw
++        // contribution modulo 2^64 even if the temporary subtotals wrapped.
++        let ignored =
++            self.array
++                .nulls()
++                .filter(|n| n.null_count() != 0)
++                .map_or(T::Native::ZERO, |nulls| {
++                    (!nulls.inner())
++                        .set_indices()
++                        .fold(T::Native::ZERO, |sum, i| {
++                            sum.add_wrapping(self.array.value(i))
++                        })
+                 });
+-            // NULL payloads participate only in this conservative bound. They
+-            // may reject a fast path, but can never cause an arithmetic error.
+-            if ($bound)(bits) * count as u128 <= ($room)(total) {
+-                let ignored = array
+-                    .nulls()
+-                    .filter(|n| n.null_count() != 0)
+-                    .map_or(0, |nulls| {
+-                        (!nulls.inner())
+-                            .set_indices()
+-                            .fold(0 as $native, |sum, i| sum.wrapping_add(array.value(i)))
+-                    });
+-                // Wrapping subtraction cancels arbitrary NULL payloads even if
+-                // the raw subtotals wrapped. The bound proves the valid sum fits.
+-                groups.values[0] =
+-                    ($add)(total, raw_sum.wrapping_sub(ignored)).ok_or_else(overflow)?;
+-                groups.valid[0] = true;
++        total
++            .checked_add(self.raw_sum.sub_wrapping(ignored))
++            .map(Some)
++            .ok_or_else(overflow)
++    }
++}
++
++impl<T: ArrowPrimitiveType> TypedSum<T> {
++    #[inline]
++    fn update_global_integer(&mut self, array: &PrimitiveArray<T>) -> Result<()>
++    where
++        T::Native: BatchInteger,
++    {
++        if array.len() == array.null_count() {
++            return Ok(());
++        }
++        match NumberBatchAdd::new(array).try_add(self.values[0])? {
++            Some(total) => {
++                self.values[0] = total;
++                self.valid[0] = true;
+                 Ok(())
+-            } else {
+-                // Retain addition order, overflow detection and the successful
+-                // prefix in the original native checked loop.
+-                groups.update_global(array, $add)
+             }
++            // Preserve addition order, overflow errors and successful prefix.
++            None => self.update_global(array, BatchInteger::checked_add),
+         }
+-    };
++    }
++}
++
++fn update_global_sum_i64(
++    state: &mut AccumulatorState,
++    value: Option<&ArrayRef>,
++    ids: &[usize],
++) -> Result<()> {
++    debug_assert!(ids.iter().all(|&id| id == 0));
++    let (groups, data_type) = state.as_sum_mut();
++    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
++    debug_assert_eq!(argument.len(), ids.len());
++    let values = cast_argument(argument, data_type)?;
++    groups.as_i64_mut().update_global_integer(as_i64(&values))
++}
++
++fn update_global_sum_u64(
++    state: &mut AccumulatorState,
++    value: Option<&ArrayRef>,
++    ids: &[usize],
++) -> Result<()> {
++    debug_assert!(ids.iter().all(|&id| id == 0));
++    let (groups, data_type) = state.as_sum_mut();
++    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
++    debug_assert_eq!(argument.len(), ids.len());
++    let values = cast_argument(argument, data_type)?;
++    groups.as_u64_mut().update_global_integer(as_u64(&values))
++}
++
++fn update_global_sum_f64(
++    state: &mut AccumulatorState,
++    value: Option<&ArrayRef>,
++    ids: &[usize],
++) -> Result<()> {
++    debug_assert!(ids.iter().all(|&id| id == 0));
++    let (groups, data_type) = state.as_sum_mut();
++    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
++    debug_assert_eq!(argument.len(), ids.len());
++    let values = cast_argument(argument, data_type)?;
++    groups
++        .as_f64_mut()
++        .update_global(as_f64(&values), |a, b| Some(a + b))
+ }
+-global_integer_sum_update!(
+-    update_global_sum_i64,
+-    i64,
+-    as_i64_mut,
+-    as_i64,
+-    |v: i64| (v ^ (v >> 63)) as u64,
+-    |bits| u128::from(bits) + 1,
+-    |total: i64| (i64::MAX as i128 - total as i128).min(total as i128 - i64::MIN as i128) as u128,
+-    i64::checked_add
+-);
+-global_integer_sum_update!(
+-    update_global_sum_u64,
+-    u64,
+-    as_u64_mut,
+-    as_u64,
+-    |v: u64| v,
+-    u128::from,
+-    |total: u64| u128::from(u64::MAX - total),
+-    u64::checked_add
+-);
+-global_sum_update!(update_global_sum_f64, as_f64_mut, as_f64, |a, b| Some(
+-    a + b
+-));
+ 
+ fn update_distinct(
+     state: &mut AccumulatorState,
