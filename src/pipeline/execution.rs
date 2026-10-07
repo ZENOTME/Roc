@@ -290,10 +290,16 @@ impl PipelineExecutor {
                     continue;
                 }
                 let rows = config.batch_rows.min(input.num_rows() - offset);
-                pending.push((0, input.slice(offset, rows)));
-                offset += rows;
-                if offset == input.num_rows() {
-                    morsel = None;
+                if offset == 0 && rows == input.num_rows() {
+                    // The whole morsel already has the required shape. Moving
+                    // it preserves the existing array wrappers and ownership.
+                    pending.push((0, morsel.take().unwrap()));
+                } else {
+                    pending.push((0, input.slice(offset, rows)));
+                    offset += rows;
+                    if offset == input.num_rows() {
+                        morsel = None;
+                    }
                 }
                 continue;
             }
@@ -712,6 +718,25 @@ mod tests {
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn whole_morsels_preserve_array_identity() {
+        let inputs = vec![batch(&[1]), batch(&[2, 3])];
+        let mut arrays = inputs
+            .iter()
+            .map(|input| input.column(0).clone())
+            .collect::<VecDeque<_>>();
+        let check_identity = processor(move |input| {
+            assert!(Arc::ptr_eq(input.column(0), &arrays.pop_front().unwrap()));
+            Ok(ProcessResult::NeedMoreInput(input.clone()))
+        });
+        let (exec, observed) = executor(inputs, vec![check_identity], None);
+        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
+        assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
+        assert_eq!(*observed.batch_sizes.lock().unwrap(), [1, 2]);
+        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
 
     #[test]
