@@ -58,5 +58,5 @@ The four-thread probe configuration shows a lower microbenchmark time. The one-t
 - `summary.json`, `kernels.json`: aggregate results and process medians.
 - `macro/process-*.json`, `helper/process-*.json`: every raw timed sample.
 - `macro/update_global_sum_i64.asm`, `helper/update_global_sum_i64.asm`: actual core disassembly.
-- `refactor.patch`: exact source change from the old core.
+- The pinned old/new core commits above identify the exact source change; the raw refactor patch is also retained in the local artifact directory.
 - `build.py`, `run.py`: isolated builds and paired measurement procedure. The local source extraction uses the pinned full local commits listed above; DataFusion integration remains local.
