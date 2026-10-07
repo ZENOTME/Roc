@@ -25,10 +25,18 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct FilterExec {
     predicate: ScalarExprRef,
+    output_projection: Option<Vec<usize>>,
 }
 impl FilterExec {
     pub fn new(predicate: ScalarExprRef) -> Self {
-        Self { predicate }
+        Self {
+            predicate,
+            output_projection: None,
+        }
+    }
+    pub fn with_output_projection(mut self, indices: Vec<usize>) -> Self {
+        self.output_projection = Some(indices);
+        self
     }
 }
 impl ProcessExec for FilterExec {
@@ -38,6 +46,7 @@ impl ProcessExec for FilterExec {
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
         Ok(Box::new(FilterExecutor {
             predicate: self.predicate.to_evaluation()?,
+            output_projection: self.output_projection.clone(),
         }))
     }
 }
@@ -45,6 +54,7 @@ impl ProcessExec for FilterExec {
 /// Built once from the description, then retained across batches.
 struct FilterExecutor {
     predicate: ScalarExpressionEvaluation,
+    output_projection: Option<Vec<usize>>,
 }
 impl ProcessExecutor for FilterExecutor {
     fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
@@ -57,6 +67,15 @@ impl ProcessExecutor for FilterExecutor {
         // Arrow applies validity as part of the filter: only valid TRUE rows
         // pass. Keep that bitmap instead of expanding it to row indices and
         // rebuilding the same bitmap before filtering every column.
+        // Predicate-only columns must remain available until its evaluation,
+        // but do not need allocation/copying by the row filter kernel.
+        let projected;
+        let input = if let Some(indices) = &self.output_projection {
+            projected = input.project(indices)?;
+            &projected
+        } else {
+            input
+        };
         let output = filter_record_batch(input, mask)?;
         Ok(ProcessResult::NeedMoreInput(output))
     }
@@ -81,6 +100,7 @@ mod tests {
     fn filter(input: &RecordBatch, predicate: ScalarExprRef) -> Result<RecordBatch> {
         let mut filter = FilterExecutor {
             predicate: predicate.to_evaluation()?,
+            output_projection: None,
         };
         let ProcessResult::NeedMoreInput(output) = filter.execute(input)? else {
             unreachable!()
@@ -144,5 +164,62 @@ mod tests {
             filter(&input, ConstantExpression::int64(Some(1)).into_ref()),
             Err(Error::Execution(_))
         ));
+    }
+    #[test]
+    fn projection_filters_selected_columns_after_reading_full_predicate_input() {
+        let input = batch(BooleanArray::from(vec![
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+        ]));
+        for (indices, columns) in [(vec![0], 1), (vec![], 0), (vec![0, 0], 2)] {
+            let mut filter = FilterExecutor {
+                predicate: ReferenceExpression::new(
+                    1,
+                    ExpressionResultType::new(DataType::Boolean, true),
+                )
+                .to_evaluation()
+                .unwrap(),
+                output_projection: Some(indices),
+            };
+            let ProcessResult::NeedMoreInput(output) = filter.execute(&input).unwrap() else {
+                unreachable!()
+            };
+            assert_eq!(output.num_columns(), columns);
+            assert_eq!(output.num_rows(), 2);
+            for array in output.columns() {
+                assert_eq!(
+                    array
+                        .as_primitive::<arrow::datatypes::Int64Type>()
+                        .values()
+                        .as_ref(),
+                    &[0, 3]
+                );
+            }
+        }
+        for indices in [vec![0], vec![], vec![0, 0]] {
+            for (value, rows) in [(Some(true), 4), (Some(false), 0), (None, 0)] {
+                let mut filter = FilterExecutor {
+                    predicate: ConstantExpression::boolean(value).to_evaluation().unwrap(),
+                    output_projection: Some(indices.clone()),
+                };
+                let ProcessResult::NeedMoreInput(output) = filter.execute(&input).unwrap() else {
+                    unreachable!()
+                };
+                let expected = input.project(&indices).unwrap().slice(0, rows);
+                assert_eq!(output.schema(), expected.schema());
+                assert_eq!(output.num_columns(), indices.len());
+                assert_eq!(output.num_rows(), rows);
+                assert_eq!(output, expected);
+            }
+        }
+        let mut invalid = FilterExecutor {
+            predicate: ConstantExpression::boolean(Some(true))
+                .to_evaluation()
+                .unwrap(),
+            output_projection: Some(vec![2]),
+        };
+        assert!(invalid.execute(&input).is_err());
     }
 }
