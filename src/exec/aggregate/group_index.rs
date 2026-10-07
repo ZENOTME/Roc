@@ -139,7 +139,13 @@ macro_rules! group_index {
 
             pub(super) fn intern(&mut self, columns: &[ArrayRef], rows: usize, ids: &mut Vec<usize>) -> Result<()> {
                 match self {
-                    Self::Global => { ids.clear(); ids.resize(rows, 0); Ok(()) }
+                    Self::Global => {
+                        // AggregateState owns this ID buffer for a fixed index.
+                        // Its existing entries are already zero; initialize only growth.
+                        debug_assert!(ids.iter().all(|&id| id == 0));
+                        ids.resize(rows, 0);
+                        Ok(())
+                    }
                     $(Self::$variant(index) => index.intern(&columns[0], ids),)*
                     Self::Rows(index) => {
                         let rows = index.converter.convert_columns(columns)?;
@@ -192,6 +198,16 @@ group_index! {
 mod tests {
     use super::*;
     use arrow::array::{Int64Array, StringArray, UInt64Array};
+
+    #[test]
+    fn global_ids_remain_zero_across_input_and_merge_batch_sizes() {
+        let mut index = GroupIndex::new(&Schema::empty()).unwrap();
+        let mut ids = vec![];
+        for rows in [8192, 8192, 0, 1, 65536, 3, 8192] {
+            index.intern(&[], rows, &mut ids).unwrap();
+            assert_eq!(ids, vec![0; rows]);
+        }
+    }
 
     #[test]
     fn signed_keys_keep_null_extremes_and_reuse_ids_across_batches() {
