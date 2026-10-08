@@ -1,26 +1,71 @@
 # Roc
 
-Roc is a composable execution engine for relational workloads, provided as a
-Rust library. It executes physical operator trees over Apache Arrow data and
-provides extensible components for building data processing systems.
+Roc is a high-performance execution runtime for relational workloads, provided
+as a Rust library.
 
-Host systems supply query planning, catalog and metadata lookup, and expression
-type resolution. Roc provides APIs for constructing physical plans and their
-physical expressions, along with an execution engine that splits those plans
-into pipelines and executes them. Hosts integrate their storage, data exchange,
-and task scheduling through Roc's interfaces.
+Roc executes a fully specified physical IR over Apache Arrow data. It assumes
+that query analysis and optimization have already been performed by the host
+system. The host lowers its optimized plan into Roc's IR, specifying the
+physical operators, expressions, types, column indices, and other information
+required for execution.
 
-## Components
+Roc does not provide query analysis or optimization. It focuses solely on
+executing physical plans efficiently.
 
-- **Operators**: scans, filtering, projection, aggregation, and data exchange,
-  with support for custom operators.
-- **Expressions**: vectorized scalar expression evaluation and aggregate
-  functions, including arithmetic, comparisons, casts, Boolean operations,
-  conditional expressions, and common aggregates.
-- **Pipelines**: operator-tree conversion into pipelines, dependency scheduling,
-  and parallel execution with cancellation support.
-- **Integration**: interfaces for storage adapters, exchange services, result
-  sinks, and task executors.
+## Features
+
+- **Executable physical IR** — a low-level representation of physical
+  operators and expressions designed for direct execution.
+- **Vectorized execution** — operators and expressions process data in Apache
+  Arrow batches.
+- **Ahead-of-time specialization** — operators and expressions are bound to
+  type-specific implementations before execution, reducing dynamic dispatch
+  and branching in hot paths.
+- **Parallel execution** — operators use worker-local execution state together
+  with shared global state to support parallel pipelines.
+- **Pipeline scheduling** — operator trees are decomposed into pipelines and
+  scheduled according to their dependencies, with cooperative execution and
+  cancellation.
+- **Embeddable and extensible** — hosts provide storage, exchange, result
+  sinks, and task execution through Roc's interfaces, and can implement custom
+  physical operators.
+
+## Architecture
+
+```text
+            Host System
+                 │
+      Analysis / Optimization
+                 │
+                 ▼
+      Optimized Physical Plan
+                 │
+              lowering
+                 ▼
+   ┌───────────────────────────┐
+   │          Roc IR           │
+   │                           │
+   │  Physical Operators       │
+   │  Physical Expressions     │
+   │  Physical Information     │
+   └─────────────┬─────────────┘
+                 │
+                 ▼
+          Specialization
+                 │
+                 ▼
+        Pipeline Formation
+                 │
+                 ▼
+          Task Scheduling
+                 │
+                 ▼
+       Vectorized Execution
+```
+
+The boundary is simple:
+
+**The host decides what to execute. Roc executes it efficiently.**
 
 ## Getting Started
 
