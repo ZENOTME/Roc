@@ -2,7 +2,7 @@ use arrow::{
     array::{ArrayRef, Int64Array},
     datatypes::DataType,
 };
-use roc::expr::{ExpressionResultType, scalar::executor::ScalarExpressionExecutor, scalar::*};
+use roc::expr::{ExpressionResultType, scalar::*};
 use std::sync::Arc;
 
 #[test]
@@ -16,21 +16,21 @@ fn nested_scalar_functions_stay_scalar_until_consumed_by_an_array() {
     )
     .into_ref();
     let batch: ArrayRef = Arc::new(Int64Array::from(vec![Some(10), None, Some(20)]));
-    let input = ScalarExpressionExecutor::new(std::slice::from_ref(&batch), 3);
+    let input = Value::input(std::slice::from_ref(&batch), 3);
     assert!(matches!(
-        pair.to_evaluation().unwrap().evaluate(&input).unwrap(),
+        pair.program().unwrap().run_value(&input).unwrap(),
         ColumnValue::Scalar(ScalarValue::Int64(Some(3)))
     ));
-    let add = FunctionExpression::binary(
+    let mut add = FunctionExpression::binary(
         FunctionKind::Add,
         ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true)).into_ref(),
         pair,
         DataType::Int64,
         true,
     )
-    .to_evaluation()
+    .program()
     .unwrap();
-    let ColumnValue::Array(output) = add.evaluate(&input).unwrap() else {
+    let ColumnValue::Array(output) = add.run_value(&input).unwrap() else {
         panic!("expected array")
     };
     assert_eq!(
@@ -46,7 +46,7 @@ fn nested_scalar_functions_stay_scalar_until_consumed_by_an_array() {
 
 #[test]
 fn scalar_cast_not_null_tests_and_conjunction_keep_scalar_results() {
-    let input = ScalarExpressionExecutor::new(&[], 4096);
+    let input = Value::input(&[], 4096);
     let cast = CastExpression::new(
         ConstantExpression::string(Some("42")).into_ref(),
         DataType::Int64,
@@ -54,7 +54,7 @@ fn scalar_cast_not_null_tests_and_conjunction_keep_scalar_results() {
         false,
     );
     assert!(matches!(
-        cast.to_evaluation().unwrap().evaluate(&input).unwrap(),
+        cast.program().unwrap().run_value(&input).unwrap(),
         ColumnValue::Scalar(ScalarValue::Int64(Some(42)))
     ));
     let cast = CastExpression::new(
@@ -64,13 +64,13 @@ fn scalar_cast_not_null_tests_and_conjunction_keep_scalar_results() {
         true,
     );
     assert!(matches!(
-        cast.to_evaluation().unwrap().evaluate(&input).unwrap(),
+        cast.program().unwrap().run_value(&input).unwrap(),
         ColumnValue::Scalar(ScalarValue::Int64(None))
     ));
     for value in [Some(false), Some(true), None] {
         let not = NotExpression::new(ConstantExpression::boolean(value).into_ref(), true);
         assert!(
-            matches!(not.to_evaluation().unwrap().evaluate(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(v)) if v == value.map(|v| !v))
+            matches!(not.program().unwrap().run_value(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(v)) if v == value.map(|v| !v))
         );
         for function in [FunctionKind::IsNull, FunctionKind::IsNotNull] {
             let expression = FunctionExpression::unary(
@@ -80,7 +80,7 @@ fn scalar_cast_not_null_tests_and_conjunction_keep_scalar_results() {
                 false,
             );
             assert!(
-                matches!(expression.to_evaluation().unwrap().evaluate(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(Some(v))) if v == (value.is_none() != (function == FunctionKind::IsNotNull)))
+                matches!(expression.program().unwrap().run_value(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(Some(v))) if v == (value.is_none() != (function == FunctionKind::IsNotNull)))
             );
         }
         for other in [Some(false), Some(true), None] {
@@ -106,9 +106,13 @@ fn scalar_cast_not_null_tests_and_conjunction_keep_scalar_results() {
                 };
                 let expected = expected.iter().next().unwrap();
                 assert!(
-                    matches!(expression.to_evaluation().unwrap().evaluate(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(v)) if v == expected)
+                    matches!(expression.program().unwrap().run_value(&input).unwrap(), ColumnValue::Scalar(ScalarValue::Boolean(v)) if v == expected)
                 );
             }
         }
     }
 }
+
+#[path = "support/program.rs"]
+mod program_support;
+use program_support::*;

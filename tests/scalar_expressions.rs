@@ -23,7 +23,7 @@ use arrow::{
 };
 use roc::{
     error::Error, expr::ExpressionResultType, expr::predicate::select_true,
-    expr::scalar::ScalarExprRef, expr::scalar::executor::ScalarExpressionExecutor, expr::scalar::*,
+    expr::scalar::ScalarExprRef, expr::scalar::*,
 };
 use std::sync::Arc;
 
@@ -71,12 +71,9 @@ fn integers(values: Vec<Option<i64>>) -> RecordBatch {
 }
 
 fn evaluate(expr: ScalarExprRef, batch: &RecordBatch) -> ArrayRef {
-    let executor = expr.to_evaluation().unwrap();
+    let mut executor = expr.program().unwrap();
     executor
-        .evaluate(&ScalarExpressionExecutor::new(
-            batch.columns(),
-            batch.num_rows(),
-        ))
+        .run_value(&Value::input(batch.columns(), batch.num_rows()))
         .and_then(|value| value.into_array(batch.num_rows()))
         .unwrap()
 }
@@ -102,18 +99,18 @@ fn bools(array: &ArrayRef) -> Vec<Option<bool>> {
 
 #[test]
 fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
-    let evaluation = reference(0).to_evaluation().unwrap();
-    let mut executor = ScalarExpressionExecutor::default();
+    let mut evaluation = reference(0).program().unwrap();
+    let mut executor = Value::Column(ColumnValue::Scalar(ScalarValue::Int64(None)));
     assert!(
-        matches!(evaluation.evaluate(&executor).and_then(|value| value.into_array(executor.num_rows()?)), Err(Error::Execution(message)) if message.contains("input"))
+        matches!(evaluation.run_value(&executor).and_then(|value| value.into_array(executor.num_rows()?)), Err(Error::Execution(message)) if message.contains("input"))
     );
 
     let (first_result, first_input) = {
         let batch = integers(vec![Some(2), None, Some(4)]);
         let input = Arc::downgrade(batch.column(0));
-        executor.set_input(batch.columns(), batch.num_rows());
+        executor = Value::input(batch.columns(), batch.num_rows());
         let view = evaluation
-            .evaluate(&executor)
+            .run_value(&executor)
             .and_then(|value| value.into_array(executor.num_rows()?))
             .unwrap();
 
@@ -123,18 +120,18 @@ fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
     assert_eq!(
         ints(
             &evaluation
-                .evaluate(&executor)
+                .run_value(&executor)
                 .and_then(|value| value.into_array(executor.num_rows()?))
                 .unwrap()
         ),
         vec![Some(2), None, Some(4)]
     );
     let next = integers(vec![Some(7)]);
-    executor.set_input(next.columns(), next.num_rows());
+    executor = Value::input(next.columns(), next.num_rows());
     assert_eq!(
         ints(
             &evaluation
-                .evaluate(&executor)
+                .run_value(&executor)
                 .and_then(|value| value.into_array(executor.num_rows()?))
                 .unwrap()
         ),
@@ -147,7 +144,7 @@ fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
 
 #[test]
 fn multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors() {
-    let evaluations = [
+    let mut evaluations = [
         reference(0),
         call(
             FunctionKind::Add,
@@ -157,29 +154,29 @@ fn multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors
         ),
     ]
     .iter()
-    .map(|e| e.to_evaluation().unwrap())
+    .map(|e| e.program().unwrap())
     .collect::<Vec<_>>();
-    let mut executor = ScalarExpressionExecutor::default();
-    assert!(evaluations.iter().all(|e| {
-        e.evaluate(&executor)
+    let mut executor = Value::Column(ColumnValue::Scalar(ScalarValue::Int64(None)));
+    assert!(evaluations.iter_mut().all(|e| {
+        e.run_value(&executor)
             .and_then(|value| value.into_array(executor.num_rows()?))
             .is_err()
     }));
     let batch = integers(vec![Some(2), None, Some(4)]);
-    executor.set_input(batch.columns(), batch.num_rows());
+    executor = Value::input(batch.columns(), batch.num_rows());
     let values = evaluations
-        .iter()
+        .iter_mut()
         .map(|e| {
-            e.evaluate(&executor)
+            e.run_value(&executor)
                 .and_then(|value| value.into_array(executor.num_rows()?))
                 .unwrap()
         })
         .collect::<Vec<_>>();
     assert!(Arc::ptr_eq(&values[0], batch.column(0)));
     assert_eq!(ints(&values[1]), vec![Some(5), None, Some(7)]);
-    executor.set_input(&[batch.column(0).slice(0, 0)], 0);
-    assert!(evaluations.iter().all(|e| {
-        e.evaluate(&executor)
+    executor = Value::input(&[batch.column(0).slice(0, 0)], 0);
+    assert!(evaluations.iter_mut().all(|e| {
+        e.run_value(&executor)
             .and_then(|value| value.into_array(executor.num_rows()?))
             .unwrap()
             .is_empty()
@@ -206,8 +203,8 @@ fn multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors
         true,
     )
     .into_ref();
-    let evaluation = guarded.to_evaluation().unwrap();
-    executor.set_input(
+    let mut evaluation = guarded.program().unwrap();
+    executor = Value::input(
         &[Arc::new(Int64Array::from(vec![
             Some(2),
             Some(0),
@@ -219,17 +216,17 @@ fn multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors
     // AND evaluates both children on the same batch, including x=0.
     assert!(
         evaluation
-            .evaluate(&executor)
+            .run_value(&executor)
             .and_then(|value| value.into_array(executor.num_rows()?))
             .is_err()
     );
-    executor.set_input(
+    executor = Value::input(
         &[Arc::new(Int64Array::from(vec![Some(2), None, Some(4)]))],
         3,
     );
     assert_eq!(
         evaluation
-            .evaluate(&executor)
+            .run_value(&executor)
             .and_then(|value| value.into_array(executor.num_rows()?))
             .and_then(select_true)
             .unwrap(),
@@ -318,9 +315,9 @@ fn compare_bound_binary_kernels(left: ArrayRef, right: ArrayRef) {
                         result_type,
                         nullable,
                     );
-                    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+                    let mut executor = build_program(expr).unwrap();
                     let actual = executor
-                        .evaluate(&ScalarExpressionExecutor::new(&columns, rows))
+                        .run_value(&Value::input(&columns, rows))
                         .and_then(|value| value.into_array(rows));
                     let context = format!(
                         "{:?} {function:?}, scalar=({left_scalar},{right_scalar}), index={scalar_index}",
@@ -437,10 +434,10 @@ fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
         true,
     )
     .into_ref();
-    let filter = ScalarExpressionEvaluation::try_new(filter_predicate).unwrap();
+    let mut filter = build_program(filter_predicate).unwrap();
     assert_eq!(
         filter
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows))
             .and_then(select_true)
             .unwrap(),
@@ -449,11 +446,11 @@ fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
 
     let expr =
         CaseExpression::new(vec![(guarded, int(1))], int(0), DataType::Int64, false).into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+    let mut executor = build_program(expr).unwrap();
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -475,11 +472,9 @@ fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
         true,
     )
     .into_ref();
-    let executor =
-        ScalarExpressionEvaluation::try_new(call(Add, vec![case, int(3)], DataType::Int64, true))
-            .unwrap();
+    let mut executor = build_program(call(Add, vec![case, int(3)], DataType::Int64, true)).unwrap();
     let first = executor
-        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .run_value(&Value::input(columns, num_rows))
         .and_then(|value| value.into_array(num_rows))
         .unwrap();
     assert_eq!(
@@ -490,10 +485,7 @@ fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(
-                    one.columns(),
-                    one.num_rows()
-                ))
+                .run_value(&Value::input(one.columns(), one.num_rows()))
                 .and_then(|value| value.into_array(one.num_rows()))
                 .unwrap()
         ),
@@ -502,7 +494,7 @@ fn nested_branches_and_predicates_preserve_input_order_and_duplicates() {
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -546,9 +538,9 @@ fn nested_case_selects_original_rows_and_recovers_after_branch_errors() {
         ])),
         Arc::new(Int64Array::from(vec![100, 10, 100, 6, 0, 10])),
     ];
-    let executor = expr.to_evaluation().unwrap();
+    let mut executor = expr.program().unwrap();
     let result = executor
-        .evaluate(&ScalarExpressionExecutor::new(&columns, 6))
+        .run_value(&Value::input(&columns, 6))
         .and_then(|value| value.into_array(6))
         .unwrap();
     assert_eq!(
@@ -564,14 +556,14 @@ fn nested_case_selects_original_rows_and_recovers_after_branch_errors() {
     ];
     assert!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(&bad_columns, 2))
+            .run_value(&Value::input(&bad_columns, 2))
             .and_then(|value| value.into_array(2))
             .is_err()
     );
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(&columns, 6))
+                .run_value(&Value::input(&columns, 6))
                 .and_then(|value| value.into_array(6))
                 .unwrap()
         ),
@@ -580,7 +572,7 @@ fn nested_case_selects_original_rows_and_recovers_after_branch_errors() {
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+                .run_value(&Value::input(&[], 0))
                 .and_then(|value| value.into_array(0))
                 .unwrap()
         ),
@@ -613,23 +605,23 @@ fn zero_column_inputs_keep_row_counts_through_branches_and_predicates() {
         false,
     )
     .into_ref();
-    let executors = [case, coalesce]
+    let mut executors = [case, coalesce]
         .iter()
-        .map(|e| e.to_evaluation().unwrap())
+        .map(|e| e.program().unwrap())
         .collect::<Vec<_>>();
-    let input = ScalarExpressionExecutor::new(&[], 3);
+    let input = Value::input(&[], 3);
     let values = executors
-        .iter()
+        .iter_mut()
         .map(|e| {
-            e.evaluate(&input)
+            e.run_value(&input)
                 .and_then(|value| value.into_array(input.num_rows()?))
                 .unwrap()
         })
         .collect::<Vec<_>>();
     assert_eq!(ints(&values[0]), vec![Some(5); 3]);
     assert_eq!(ints(&values[1]), vec![Some(7); 3]);
-    assert!(executors.iter().all(|e| {
-        e.evaluate(&ScalarExpressionExecutor::new(&[], 0))
+    assert!(executors.iter_mut().all(|e| {
+        e.run_value(&Value::input(&[], 0))
             .and_then(|value| value.into_array(0))
             .unwrap()
             .is_empty()
@@ -644,10 +636,10 @@ fn zero_column_inputs_keep_row_counts_through_branches_and_predicates() {
         true,
     )
     .into_ref();
-    let predicate = predicate.to_evaluation().unwrap();
+    let mut predicate = predicate.program().unwrap();
     assert_eq!(
         predicate
-            .evaluate(&ScalarExpressionExecutor::new(&[], 3))
+            .run_value(&Value::input(&[], 3))
             .and_then(|value| value.into_array(3))
             .and_then(select_true)
             .unwrap(),
@@ -655,7 +647,7 @@ fn zero_column_inputs_keep_row_counts_through_branches_and_predicates() {
     );
     assert!(
         predicate
-            .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+            .run_value(&Value::input(&[], 0))
             .and_then(|value| value.into_array(0))
             .and_then(select_true)
             .unwrap()
@@ -684,11 +676,11 @@ fn coalesce_preserves_outputs_and_recovers_after_branch_errors() {
         true,
     )
     .into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(expr).unwrap();
+    let mut executor = build_program(expr).unwrap();
     let columns = columns.as_slice();
     let num_rows = 5;
     let result = executor
-        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .run_value(&Value::input(columns, num_rows))
         .and_then(|value| value.into_array(num_rows))
         .unwrap();
     assert_eq!(
@@ -701,14 +693,14 @@ fn coalesce_preserves_outputs_and_recovers_after_branch_errors() {
     ];
     assert!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(&error_columns, 2))
+            .run_value(&Value::input(&error_columns, 2))
             .and_then(|value| value.into_array(2))
             .is_err()
     );
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -750,19 +742,19 @@ fn constant_only_expressions_return_full_columns_for_each_batch_size() {
         ConstantExpression::string(Some("value")).into_ref(),
         ConstantExpression::null(&DataType::Utf8).into_ref(),
     ];
-    let executors = expressions
+    let mut executors = expressions
         .iter()
-        .map(|e| e.to_evaluation().unwrap())
+        .map(|e| e.program().unwrap())
         .collect::<Vec<_>>();
     // Reuse the same evaluations across changing row counts with no input columns.
     for num_rows in [3, 0, 1, 3] {
-        let input = ScalarExpressionExecutor::new(&[], num_rows);
+        let input = Value::input(&[], num_rows);
         let values = executors
-            .iter()
+            .iter_mut()
             .zip(&expressions)
             .map(|(e, expression)| {
                 let value = e
-                    .evaluate(&input)
+                    .run_value(&input)
                     .and_then(|value| value.into_array(input.num_rows()?))
                     .unwrap();
                 arrow::compute::cast(value.as_ref(), expression.result_type().data_type()).unwrap()
@@ -789,7 +781,7 @@ fn constant_only_expressions_return_full_columns_for_each_batch_size() {
 
 #[test]
 fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
-    let executor = ScalarExpressionEvaluation::try_new(int(3)).unwrap();
+    let mut executor = build_program(int(3)).unwrap();
     let wrong_type: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![1, 2]))];
     // Constants do not inspect unrelated columns.
     let columns = wrong_type.as_slice();
@@ -797,7 +789,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -805,7 +797,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     );
     assert_eq!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(&[], 0))
+            .run_value(&Value::input(&[], 0))
             .and_then(|value| value.into_array(0))
             .unwrap()
             .len(),
@@ -813,7 +805,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     );
     // The host declared column 0 as Int64 (the real schema), but the input
     // carries Int32; the typed kernel reports the mismatch at run time.
-    let addition = ScalarExpressionEvaluation::try_new(call(
+    let mut addition = build_program(call(
         FunctionKind::Add,
         vec![column(0, DataType::Int64, false), int(1)],
         DataType::Int64,
@@ -821,7 +813,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     ))
     .unwrap();
     assert!(
-        matches!(addition.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)).and_then(|value| value.into_array(num_rows)), Err(Error::Execution(message)) if message == "expected Int64 array")
+        matches!(addition.run_value(&Value::input(columns, num_rows)).and_then(|value| value.into_array(num_rows)), Err(Error::Execution(message)) if message == "expected Int64 array")
     );
 }
 
@@ -830,24 +822,24 @@ fn each_description_builds_an_evaluation() {
     let batch = integers(vec![Some(2), None, Some(4)]);
     let columns = batch.columns();
     let num_rows = batch.num_rows();
-    let column_executor =
+    let mut column_executor =
         ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
-            .to_evaluation()
+            .program()
             .unwrap();
     assert_eq!(
         ints(
             &column_executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
         vec![Some(2), None, Some(4)]
     );
-    let constant_executor = ConstantExpression::int64(Some(3)).to_evaluation().unwrap();
+    let mut constant_executor = ConstantExpression::int64(Some(3)).program().unwrap();
     assert_eq!(
         ints(
             &constant_executor
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -861,11 +853,11 @@ fn each_description_builds_an_evaluation() {
         DataType::Int64,
         true,
     );
-    let binary = add.to_evaluation().unwrap();
+    let mut binary = add.program().unwrap();
     assert_eq!(
         ints(
             &binary
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -874,28 +866,28 @@ fn each_description_builds_an_evaluation() {
     // Binding a unary Add still rejects the unsupported function arity.
     assert!(
         FunctionExpression::unary(FunctionKind::Add, reference(0), DataType::Int64, true,)
-            .to_evaluation()
+            .program()
             .is_err()
     );
 
     let negate =
         FunctionExpression::unary(FunctionKind::Negate, reference(0), DataType::Int64, true);
-    let unary = negate.to_evaluation().unwrap();
+    let mut unary = negate.program().unwrap();
     assert_eq!(
         ints(
             &unary
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
         vec![Some(-2), None, Some(-4)]
     );
 
-    let cast = CastExpression::new(reference(0), DataType::Int32, CastMode::Strict, true)
-        .to_evaluation()
+    let mut cast = CastExpression::new(reference(0), DataType::Int32, CastMode::Strict, true)
+        .program()
         .unwrap();
     let cast_output = cast
-        .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+        .run_value(&Value::input(columns, num_rows))
         .and_then(|value| value.into_array(num_rows))
         .unwrap();
     assert_eq!(
@@ -909,18 +901,16 @@ fn each_description_builds_an_evaluation() {
     );
 
     let is_null = predicate(FunctionKind::IsNull, vec![reference(0)], false);
-    let not = NotExpression::new(is_null.clone(), true)
-        .to_evaluation()
-        .unwrap();
+    let mut not = NotExpression::new(is_null.clone(), true).program().unwrap();
     assert_eq!(
         bools(
-            &not.evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            &not.run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
         vec![Some(true), Some(false), Some(true)]
     );
-    let conjunction = ConjunctionExpression::new(
+    let mut conjunction = ConjunctionExpression::new(
         Conjunction::And,
         vec![
             NotExpression::new(is_null.clone(), true).into_ref(),
@@ -928,36 +918,37 @@ fn each_description_builds_an_evaluation() {
         ],
         true,
     )
-    .to_evaluation()
+    .program()
     .unwrap();
     assert_eq!(
         conjunction
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows))
             .and_then(select_true)
             .unwrap(),
         vec![2]
     );
 
-    let case = CaseExpression::new(vec![(is_null, int(7))], reference(0), DataType::Int64, true)
-        .to_evaluation()
-        .unwrap();
+    let mut case =
+        CaseExpression::new(vec![(is_null, int(7))], reference(0), DataType::Int64, true)
+            .program()
+            .unwrap();
     assert_eq!(
         ints(
             &case
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
         vec![Some(2), Some(7), Some(4)]
     );
-    let coalesce = CoalesceExpression::new(vec![reference(0), int(7)], DataType::Int64, true)
-        .to_evaluation()
+    let mut coalesce = CoalesceExpression::new(vec![reference(0), int(7)], DataType::Int64, true)
+        .program()
         .unwrap();
     assert_eq!(
         ints(
             &coalesce
-                .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+                .run_value(&Value::input(columns, num_rows))
                 .and_then(|value| value.into_array(num_rows))
                 .unwrap()
         ),
@@ -971,29 +962,23 @@ fn each_description_builds_an_evaluation() {
         DataType::Int64,
         false,
     );
-    let case = CaseExpression::new(vec![], error.clone(), DataType::Int64, false)
-        .to_evaluation()
+    let mut case = CaseExpression::new(vec![], error.clone(), DataType::Int64, false)
+        .program()
         .unwrap();
-    let coalesce = CoalesceExpression::new(vec![error], DataType::Int64, false)
-        .to_evaluation()
+    let mut coalesce = CoalesceExpression::new(vec![error], DataType::Int64, false)
+        .program()
         .unwrap();
     let empty = batch.slice(0, 0);
     assert_eq!(
-        case.evaluate(&ScalarExpressionExecutor::new(
-            empty.columns(),
-            empty.num_rows()
-        ))
-        .and_then(|value| value.into_array(empty.num_rows()))
-        .unwrap()
-        .len(),
+        case.run_value(&Value::input(empty.columns(), empty.num_rows()))
+            .and_then(|value| value.into_array(empty.num_rows()))
+            .unwrap()
+            .len(),
         0
     );
     assert_eq!(
         coalesce
-            .evaluate(&ScalarExpressionExecutor::new(
-                empty.columns(),
-                empty.num_rows()
-            ))
+            .run_value(&Value::input(empty.columns(), empty.num_rows()))
             .and_then(|value| value.into_array(empty.num_rows()))
             .unwrap()
             .len(),
@@ -1043,7 +1028,7 @@ fn checked_integer_errors_and_null_rows_match_arrow() {
         .into_ref();
     // The host declared the operand type UInt64, which has no negation kernel.
     assert!(
-        ScalarExpressionEvaluation::try_new(call(
+        build_program(call(
             FunctionKind::Negate,
             vec![unsigned],
             DataType::UInt64,
@@ -1079,20 +1064,12 @@ fn numeric_kernels_evaluate_constants_per_row_and_preserve_nulls() {
         )),
         vec![Some(-6), None, Some(3)]
     );
-    let executor = ScalarExpressionEvaluation::try_new(call(
-        Add,
-        vec![int(2), int(3)],
-        DataType::Int64,
-        false,
-    ))
-    .unwrap();
+    let mut executor =
+        build_program(call(Add, vec![int(2), int(3)], DataType::Int64, false)).unwrap();
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(
-                    batch.columns(),
-                    batch.num_rows()
-                ))
+                .run_value(&Value::input(batch.columns(), batch.num_rows()))
                 .and_then(|value| value.into_array(batch.num_rows()))
                 .unwrap()
         ),
@@ -1100,12 +1077,9 @@ fn numeric_kernels_evaluate_constants_per_row_and_preserve_nulls() {
     );
     let overflow = call(Add, vec![int(i64::MAX), int(1)], DataType::Int64, false);
     assert!(
-        ScalarExpressionEvaluation::try_new(overflow)
+        build_program(overflow)
             .unwrap()
-            .evaluate(&ScalarExpressionExecutor::new(
-                batch.columns(),
-                batch.num_rows()
-            ))
+            .run_value(&Value::input(batch.columns(), batch.num_rows()))
             .and_then(|value| value.into_array(batch.num_rows()))
             .is_err()
     );
@@ -1234,12 +1208,9 @@ fn boolean_value_execution_preserves_three_valued_logic() {
         a.iter().map(|v| v.map(|v| !v)).collect::<Vec<_>>()
     );
     for (expr, expected) in [(and, expected_and), (or, expected_or)] {
-        let evaluation = expr.to_evaluation().unwrap();
+        let mut evaluation = expr.program().unwrap();
         let mask = evaluation
-            .evaluate(&ScalarExpressionExecutor::new(
-                batch.columns(),
-                batch.num_rows(),
-            ))
+            .run_value(&Value::input(batch.columns(), batch.num_rows()))
             .and_then(|value| value.into_array(batch.num_rows()))
             .and_then(select_true)
             .unwrap();
@@ -1271,12 +1242,9 @@ fn case_executes_only_matching_rows_in_original_order() {
         true,
     )
     .into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(expr.clone()).unwrap();
+    let mut executor = build_program(expr.clone()).unwrap();
     let result = executor
-        .evaluate(&ScalarExpressionExecutor::new(
-            batch.columns(),
-            batch.num_rows(),
-        ))
+        .run_value(&Value::input(batch.columns(), batch.num_rows()))
         .and_then(|value| value.into_array(batch.num_rows()))
         .unwrap();
     assert_eq!(
@@ -1289,10 +1257,7 @@ fn case_executes_only_matching_rows_in_original_order() {
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(
-                    next.columns(),
-                    next.num_rows()
-                ))
+                .run_value(&Value::input(next.columns(), next.num_rows()))
                 .and_then(|value| value.into_array(next.num_rows()))
                 .unwrap()
         ),
@@ -1389,10 +1354,10 @@ fn filter_selection_uses_the_boolean_value_result() {
         true,
     )
     .into_ref();
-    let evaluation = expr.to_evaluation().unwrap();
-    let executor = ScalarExpressionExecutor::new(batch.columns(), batch.num_rows());
+    let mut evaluation = expr.program().unwrap();
+    let executor = Value::input(batch.columns(), batch.num_rows());
     let result = evaluation
-        .evaluate(&executor)
+        .run_value(&executor)
         .and_then(|value| value.into_array(executor.num_rows()?))
         .unwrap();
     assert_eq!(
@@ -1403,7 +1368,7 @@ fn filter_selection_uses_the_boolean_value_result() {
     assert_eq!(
         select_true(
             evaluation
-                .evaluate(&executor)
+                .run_value(&executor)
                 .and_then(|value| value.into_array(executor.num_rows()?))
                 .unwrap()
         )
@@ -1434,26 +1399,20 @@ fn cast_modes_result_metadata_and_empty_inputs() {
     )
     .into_ref();
     assert!(try_cast.result_type().is_nullable());
-    let executor = ScalarExpressionEvaluation::try_new(try_cast).unwrap();
+    let mut executor = build_program(try_cast).unwrap();
     assert_eq!(
         ints(
             &executor
-                .evaluate(&ScalarExpressionExecutor::new(
-                    batch.columns(),
-                    batch.num_rows()
-                ))
+                .run_value(&Value::input(batch.columns(), batch.num_rows()))
                 .and_then(|value| value.into_array(batch.num_rows()))
                 .unwrap()
         ),
         vec![Some(42), None]
     );
     assert!(
-        ScalarExpressionEvaluation::try_new(strict)
+        build_program(strict)
             .unwrap()
-            .evaluate(&ScalarExpressionExecutor::new(
-                batch.columns(),
-                batch.num_rows()
-            ))
+            .run_value(&Value::input(batch.columns(), batch.num_rows()))
             .and_then(|value| value.into_array(batch.num_rows()))
             .is_err()
     );
@@ -1491,7 +1450,7 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
     // `Add` has no unary kernel, so the unary entry point rejects the
     // description while selecting a kernel.
     assert!(matches!(
-        call(FunctionKind::Add, vec![reference(0)], DataType::Int64, true).to_evaluation(),
+        call(FunctionKind::Add, vec![reference(0)], DataType::Int64, true).program(),
         Err(Error::InvalidPlan(_))
     ));
     // The binary entry point likewise rejects a unary-only kind.
@@ -1503,13 +1462,13 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         false,
     );
     assert!(matches!(
-        binary_is_null.to_evaluation(),
+        binary_is_null.program(),
         Err(Error::InvalidPlan(_))
     ));
 
     // COALESCE has no value without at least one argument.
     assert!(matches!(
-        CoalesceExpression::new(vec![], DataType::Int64, true).to_evaluation(),
+        CoalesceExpression::new(vec![], DataType::Int64, true).program(),
         Err(Error::InvalidPlan(message)) if message.contains("coalesce")
     ));
 
@@ -1520,15 +1479,15 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
     // only reads the column when the executor runs.
     let out_of_range =
         ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, true)).into_ref();
-    assert!(ScalarExpressionEvaluation::try_new(out_of_range).is_ok());
+    assert!(build_program(out_of_range).is_ok());
 
     // NOT of a non-Boolean argument is accepted at plan time and fails when the
     // executor downcasts the value.
     let not_integer = NotExpression::new(reference(0), true).into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(not_integer).unwrap();
+    let mut executor = build_program(not_integer).unwrap();
     assert!(matches!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
         Err(Error::Execution(_))
     ));
@@ -1541,10 +1500,10 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         DataType::Int64,
         true,
     );
-    let executor = ScalarExpressionEvaluation::try_new(mismatched_operands).unwrap();
+    let mut executor = build_program(mismatched_operands).unwrap();
     assert!(matches!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
         Err(Error::Execution(_))
     ));
@@ -1552,10 +1511,10 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
     // A non-Boolean CASE condition is likewise not validated up front.
     let non_boolean_condition =
         CaseExpression::new(vec![(int(1), int(2))], int(3), DataType::Int64, false).into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(non_boolean_condition).unwrap();
+    let mut executor = build_program(non_boolean_condition).unwrap();
     assert!(matches!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
         Err(Error::Execution(_))
     ));
@@ -1572,10 +1531,10 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         true,
     )
     .into_ref();
-    let executor = ScalarExpressionEvaluation::try_new(mixed_branches).unwrap();
+    let mut executor = build_program(mixed_branches).unwrap();
     assert!(
         executor
-            .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
+            .run_value(&Value::input(columns, num_rows))
             .and_then(|value| value.into_array(num_rows))
             .is_err()
     );
@@ -1590,7 +1549,7 @@ fn scalar_boolean_constants_match_arrow_kleene_in_both_operand_positions() {
         Some(true),
     ]));
     let column = column.slice(0, 3);
-    let input = ScalarExpressionExecutor::new(std::slice::from_ref(&column), 3);
+    let input = Value::input(std::slice::from_ref(&column), 3);
     for constant in [Some(false), Some(true), None] {
         for conjunction in [Conjunction::And, Conjunction::Or] {
             let flat_constant = BooleanArray::from(vec![constant; 3]);
@@ -1611,9 +1570,9 @@ fn scalar_boolean_constants_match_arrow_kleene_in_both_operand_positions() {
                 };
                 let result = ConjunctionExpression::new(conjunction, args, true)
                     .into_ref()
-                    .to_evaluation()
+                    .program()
                     .unwrap()
-                    .evaluate(&input)
+                    .run_value(&input)
                     .and_then(|value| value.into_array(input.num_rows()?))
                     .unwrap();
                 assert_eq!(bools(&result), expected.iter().collect::<Vec<_>>());
@@ -1621,11 +1580,15 @@ fn scalar_boolean_constants_match_arrow_kleene_in_both_operand_positions() {
         }
         let not = NotExpression::new(ConstantExpression::boolean(constant).into_ref(), true)
             .into_ref()
-            .to_evaluation()
+            .program()
             .unwrap()
-            .evaluate(&input)
+            .run_value(&input)
             .and_then(|value| value.into_array(input.num_rows()?))
             .unwrap();
         assert_eq!(bools(&not), vec![constant.map(|v| !v); 3]);
     }
 }
+
+#[path = "support/program.rs"]
+mod program_support;
+use program_support::*;

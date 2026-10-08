@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! Aggregate descriptions are separate from scalar expressions.
-mod accumulator;
+pub(crate) mod accumulator;
 mod aggregate;
-pub mod executor;
+mod state;
+pub use state::AggregateAccumulator;
 pub use aggregate::{AggregateExpression, AggregateFunction};

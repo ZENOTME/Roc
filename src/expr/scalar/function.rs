@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::kernels::EvalFn;
-use super::{ColumnValue, ScalarExprRef};
-use super::{ExpressionResultType, kernels};
-use crate::error::Result;
-use arrow::{array::new_empty_array, datatypes::DataType};
+use super::ExpressionResultType;
+use super::ScalarExprRef;
+use arrow::datatypes::DataType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKind {
@@ -93,104 +90,6 @@ impl FunctionExpression {
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
     }
-
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        match &self.arguments[..] {
-            [argument] => Ok(UnaryFunctionExpressionEvaluation::try_new(self, argument)?.into()),
-            [left, right] => {
-                Ok(BinaryFunctionExpressionEvaluation::try_new(self, left, right)?.into())
-            }
-            _ => unreachable!("function expressions are built as unary or binary"),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct UnaryFunctionExpressionEvaluation {
-    data_type: DataType,
-    argument: Box<ScalarExpressionEvaluation>,
-    eval_fn: EvalFn,
-}
-impl UnaryFunctionExpressionEvaluation {
-    pub(super) fn try_new(
-        expression: &FunctionExpression,
-        argument: &ScalarExprRef,
-    ) -> Result<Self> {
-        let argument_evaluation = argument.to_evaluation()?;
-        // Kernels are keyed by the declared operand type; the result type only
-        // describes the output of e.g. a comparison.
-        let eval_fn = kernels::bind_unary(expression.function, &argument.result_type().data_type)?;
-        Ok(Self {
-            data_type: expression.result_type.data_type.clone(),
-            argument: Box::new(argument_evaluation),
-            eval_fn,
-        })
-    }
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
-        }
-        let argument = self.argument.evaluate(executor)?;
-        self.eval(executor, &[argument])
-    }
-    fn eval(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        Ok(if executor.num_rows()? == 0 {
-            ColumnValue::Array(new_empty_array(&self.data_type))
-        } else {
-            (self.eval_fn)(input)?
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct BinaryFunctionExpressionEvaluation {
-    data_type: DataType,
-    left: Box<ScalarExpressionEvaluation>,
-    right: Box<ScalarExpressionEvaluation>,
-    eval_fn: EvalFn,
-}
-
-impl BinaryFunctionExpressionEvaluation {
-    pub(super) fn try_new(
-        expression: &FunctionExpression,
-        left: &ScalarExprRef,
-        right: &ScalarExprRef,
-    ) -> Result<Self> {
-        let left_evaluation = left.to_evaluation()?;
-        let right_evaluation = right.to_evaluation()?;
-        // Kernels are keyed by the declared operand type, which for arithmetic
-        // is also the result type but for comparisons is not.
-        let eval_fn = kernels::bind_binary(expression.function, &left.result_type().data_type)?;
-        Ok(Self {
-            data_type: expression.result_type.data_type.clone(),
-            left: Box::new(left_evaluation),
-            right: Box::new(right_evaluation),
-            eval_fn,
-        })
-    }
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
-        }
-        let left = self.left.evaluate(executor)?;
-        let right = self.right.evaluate(executor)?;
-        self.eval(executor, &[left, right])
-    }
-    fn eval(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        Ok(if executor.num_rows()? == 0 {
-            ColumnValue::Array(new_empty_array(&self.data_type))
-        } else {
-            (self.eval_fn)(input)?
-        })
-    }
 }
 
 #[cfg(test)]
@@ -199,13 +98,10 @@ mod tests {
     use crate::expr::scalar::{
         CaseExpression, CoalesceExpression, ConstantExpression, ReferenceExpression,
     };
-    use arrow::{
-        array::{
-            Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
-            Int32Array, Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        },
-        datatypes::{Field, Schema},
-        record_batch::RecordBatch,
+    use crate::expr::scalar::{ColumnValue, kernels};
+    use arrow::array::{
+        Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+        Int32Array, Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use std::sync::Arc;
 
@@ -223,49 +119,13 @@ mod tests {
             .to_vec()
     }
     #[test]
-    fn eval_consumes_supplied_arrays_without_executing_children() {
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
-            vec![Arc::new(Int64Array::from(vec![1, 2, 0, 4]))],
-        )
-        .unwrap();
-        let input = batch.slice(0, 3);
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        // This child cannot read its column. Supplied-input eval must use the
-        // two argument arrays instead of recursively touching the bound child.
-        let missing =
-            ReferenceExpression::new(99, ExpressionResultType::new(DataType::Int64, false))
-                .into_ref();
-        let ScalarExpressionEvaluation::BinaryFunction(evaluation) = FunctionExpression::binary(
-            FunctionKind::Add,
-            missing,
-            ConstantExpression::int64(Some(1000)).into_ref(),
-            DataType::Int64,
-            false,
-        )
-        .to_evaluation()
-        .unwrap() else {
-            unreachable!()
-        };
+    fn bound_kernel_consumes_supplied_values() {
+        let eval = kernels::bind_binary(FunctionKind::Add, &DataType::Int64).unwrap();
         let left: ArrayRef = Arc::new(Int64Array::from(vec![30, 10, 30]));
         let right: ArrayRef = Arc::new(Int64Array::from(vec![2, 2, 1]));
         let input = [ColumnValue::Array(left), ColumnValue::Array(right)];
-        let output = evaluation.eval(&executor, &input).unwrap();
-
-        assert_eq!(ints(&output), vec![32, 12, 31]);
-        assert!(evaluation.eval(&executor, &input[..1]).is_err());
-        assert_eq!(ints(&output), vec![32, 12, 31]);
-        // Zero rows skip arguments and kernels, even with invalid children.
-        let empty = ScalarExpressionExecutor::new(&[], 0);
-        assert!(
-            evaluation
-                .eval(&empty, &[])
-                .unwrap()
-                .into_array(0)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(evaluation.evaluate(&executor).is_err());
+        assert_eq!(ints(&eval(&input).unwrap()), vec![32, 12, 31]);
+        assert!(eval(&input[..1]).is_err());
     }
 
     fn compare_scalar_with_broadcast(
@@ -274,7 +134,7 @@ mod tests {
         functions: &[FunctionKind],
     ) {
         let data_type = array.data_type().clone();
-        let executor = ScalarExpressionExecutor::new(std::slice::from_ref(&array), array.len());
+        let executor = Value::input(std::slice::from_ref(&array), array.len());
         let broadcast = arrow::compute::take(
             scalar.as_ref(),
             &arrow::array::UInt64Array::from(vec![0; array.len()]),
@@ -302,9 +162,9 @@ mod tests {
                 } else {
                     (reference, constant)
                 };
-                let evaluation =
+                let mut evaluation =
                     FunctionExpression::binary(function, left, right, output_type.clone(), true)
-                        .to_evaluation()
+                        .program()
                         .unwrap();
                 let baseline = kernels::bind_binary(function, &data_type).unwrap();
                 let expected = if left_scalar {
@@ -318,7 +178,7 @@ mod tests {
                         ColumnValue::Array(broadcast.clone()),
                     ])
                 };
-                let actual = evaluation.evaluate(&executor);
+                let actual = evaluation.run_value(&executor);
                 let context = format!(
                     "{data_type:?} {function:?} left_scalar={left_scalar} scalar={scalar:?}"
                 );
@@ -473,20 +333,20 @@ mod tests {
             .into_ref()
         };
         let dangerous = add(i64::MAX, 1);
-        let evaluation = dangerous.to_evaluation().unwrap();
-        let empty = ScalarExpressionExecutor::new(&[], 0);
+        let mut evaluation = dangerous.program().unwrap();
+        let empty = Value::input(&[], 0);
         assert!(
             evaluation
-                .evaluate(&empty)
+                .run_value(&empty)
                 .unwrap()
                 .into_array(0)
                 .unwrap()
                 .is_empty()
         );
-        let input = ScalarExpressionExecutor::new(&[], 4);
-        assert!(evaluation.evaluate(&input).is_err());
+        let input = Value::input(&[], 4);
+        assert!(evaluation.run_value(&input).is_err());
 
-        let case = CaseExpression::new(
+        let mut case = CaseExpression::new(
             vec![(
                 ConstantExpression::boolean(Some(false)).into_ref(),
                 dangerous.clone(),
@@ -495,22 +355,22 @@ mod tests {
             DataType::Int64,
             false,
         )
-        .to_evaluation()
+        .program()
         .unwrap();
-        let coalesce = CoalesceExpression::new(vec![add(3, 4), dangerous], DataType::Int64, false)
-            .to_evaluation()
-            .unwrap();
-        let first = case.evaluate(&input).unwrap();
+        let mut coalesce =
+            CoalesceExpression::new(vec![add(3, 4), dangerous], DataType::Int64, false)
+                .program()
+                .unwrap();
+        let first = case.run_value(&input).unwrap();
         assert_eq!(ints(&first), vec![5; 4]);
-        assert_eq!(ints(&coalesce.evaluate(&input).unwrap()), vec![7; 4]);
+        assert_eq!(ints(&coalesce.run_value(&input).unwrap()), vec![7; 4]);
         assert_eq!(
-            ints(
-                &case
-                    .evaluate(&ScalarExpressionExecutor::new(&[], 2))
-                    .unwrap()
-            ),
+            ints(&case.run_value(&Value::input(&[], 2)).unwrap()),
             vec![5; 2]
         );
         assert_eq!(ints(&first), vec![5; 4]);
     }
 }
+
+#[cfg(test)]
+use crate::program::test_support::*;

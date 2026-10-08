@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::{ColumnValue, ExpressionResultType, ScalarValue};
+use super::{ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
 use arrow::{array::ArrayRef, datatypes::DataType};
 
@@ -22,11 +21,6 @@ use arrow::{array::ArrayRef, datatypes::DataType};
 pub struct ConstantExpression {
     value: ScalarValue,
     result_type: ExpressionResultType,
-}
-
-#[derive(Debug)]
-pub struct ConstantExpressionEvaluation {
-    value: ScalarValue,
 }
 
 impl ConstantExpression {
@@ -52,12 +46,7 @@ impl ConstantExpression {
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
     }
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ConstantExpressionEvaluation {
-            value: self.value.clone(),
-        }
-        .into())
-    }
+
     pub fn null(data_type: &DataType) -> Self {
         Self::new(ScalarValue::Null(data_type.clone()))
     }
@@ -74,24 +63,17 @@ impl ConstantExpression {
         Self::new(ScalarValue::Utf8(value.map(str::to_owned)))
     }
 }
-impl ConstantExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        executor.num_rows()?;
-        Ok(ColumnValue::Scalar(self.value.clone()))
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::scalar::ColumnValue;
     #[test]
     fn constant_stays_scalar_at_every_batch_length() {
         for value in [Some(7), None] {
-            let expression = ConstantExpression::int64(value).to_evaluation().unwrap();
+            let mut expression = ConstantExpression::int64(value).program().unwrap();
             for len in [0, 1, 3, 4096] {
-                let output = expression
-                    .evaluate(&ScalarExpressionExecutor::new(&[], len))
-                    .unwrap();
+                let output = expression.run_value(&Value::input(&[], len)).unwrap();
                 assert!(matches!(output, ColumnValue::Scalar(ScalarValue::Int64(v)) if v == value));
                 let array = output.into_array(len).unwrap();
                 assert_eq!(array.len(), len);
@@ -100,3 +82,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+use crate::program::test_support::*;

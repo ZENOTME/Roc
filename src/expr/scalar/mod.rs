@@ -13,37 +13,30 @@
 // limitations under the License.
 
 //! Typed, stateless descriptions of scalar expressions.
-use crate::error::Result;
 use crate::expr::ExpressionResultType;
-pub use executor::ScalarExpressionEvaluation;
 use std::sync::Arc;
 
 mod case;
 mod cast;
 mod coalesce;
-mod conjunction;
+pub(crate) mod conjunction;
 mod constant;
-pub mod executor;
 mod function;
-mod kernels;
+pub(crate) mod kernels;
 mod not;
 mod reference;
+pub(crate) mod selected;
 mod value;
 pub use value::{ColumnValue, ScalarValue};
 
-pub use case::{CaseExpression, CaseExpressionEvaluation};
-pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};
-pub use coalesce::{CoalesceExpression, CoalesceExpressionEvaluation};
-pub use conjunction::{
-    AndExpressionEvaluation, Conjunction, ConjunctionExpression, OrExpressionEvaluation,
-};
-pub use constant::{ConstantExpression, ConstantExpressionEvaluation};
-pub use function::{
-    BinaryFunctionExpressionEvaluation, FunctionExpression, FunctionKind,
-    UnaryFunctionExpressionEvaluation,
-};
-pub use not::{NotExpression, NotExpressionEvaluation};
-pub use reference::{ReferenceExpression, ReferenceExpressionEvaluation};
+pub use case::CaseExpression;
+pub use cast::{CastExpression, CastMode};
+pub use coalesce::CoalesceExpression;
+pub use conjunction::{Conjunction, ConjunctionExpression};
+pub use constant::ConstantExpression;
+pub use function::{FunctionExpression, FunctionKind};
+pub use not::NotExpression;
+pub use reference::ReferenceExpression;
 
 pub type ScalarExprRef = Arc<ScalarExpression>;
 
@@ -72,20 +65,6 @@ impl ScalarExpression {
             Self::Coalesce(e) => e.result_type(),
         }
     }
-
-    /// Bind kernels and build an immutable evaluation for this expression.
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        match self {
-            Self::Reference(e) => e.to_evaluation(),
-            Self::Constant(e) => e.to_evaluation(),
-            Self::Function(e) => e.to_evaluation(),
-            Self::Cast(e) => e.to_evaluation(),
-            Self::Conjunction(e) => e.to_evaluation(),
-            Self::Not(e) => e.to_evaluation(),
-            Self::Case(e) => e.to_evaluation(),
-            Self::Coalesce(e) => e.to_evaluation(),
-        }
-    }
 }
 
 macro_rules! scalar_node {
@@ -105,24 +84,4 @@ scalar_node! {
     Function(FunctionExpression), Cast(CastExpression),
     Conjunction(ConjunctionExpression), Not(NotExpression),
     Case(CaseExpression), Coalesce(CoalesceExpression),
-}
-
-macro_rules! scalar_evaluation {
-    ($($variant:ident($evaluation:ty)),* $(,)?) => {$(
-        impl From<$evaluation> for ScalarExpressionEvaluation {
-            fn from(evaluation: $evaluation) -> Self { Self::$variant(evaluation) }
-        }
-    )*};
-}
-scalar_evaluation! {
-    Reference(ReferenceExpressionEvaluation),
-    Constant(ConstantExpressionEvaluation),
-    UnaryFunction(UnaryFunctionExpressionEvaluation),
-    BinaryFunction(BinaryFunctionExpressionEvaluation),
-    Cast(CastExpressionEvaluation),
-    And(AndExpressionEvaluation),
-    Or(OrExpressionEvaluation),
-    Not(NotExpressionEvaluation),
-    Case(CaseExpressionEvaluation),
-    Coalesce(CoalesceExpressionEvaluation),
 }

@@ -20,12 +20,20 @@ rust-version = "1.95"
 description = "Extensible Arrow execution engine with pipeline scheduling"
 license = "Apache-2.0"
 
+[features]
+default = []
+jit = ["dep:cranelift-codegen", "dep:cranelift-frontend", "dep:cranelift-jit", "dep:cranelift-module"]
+
 [dependencies]
 arrow = { version = "59.2.0", default-features = false }
 asyncband = { version = "0.7.3", default-features = false, features = ["shutdown", "mpmc"] }
 futures = "0.3"
 foldhash = "0.2"
 thiserror = "2"
+cranelift-codegen = { version = "0.135.5", optional = true }
+cranelift-frontend = { version = "0.135.5", optional = true }
+cranelift-jit = { version = "0.135.5", optional = true }
+cranelift-module = { version = "0.135.5", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
@@ -37,4 +45,13 @@ harness = false
 
 [[bench]]
 name = "add_nullable"
+harness = false
+
+[[bench]]
+name = "query_compilation"
+harness = false
+required-features = ["jit"]
+
+[[bench]]
+name = "program_execution"
 harness = false

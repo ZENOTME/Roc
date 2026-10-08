@@ -12,13 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
-use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use crate::{
-    error::{Error, Result},
-    expr::scalar::ScalarExprRef,
-};
-use arrow::{array::AsArray, compute::filter_record_batch, record_batch::RecordBatch};
+use super::{GlobalExecContextRef, ProcessExec};
+use crate::{error::Result, expr::scalar::ScalarExprRef};
 use asyncband::shutdown::ShutdownGuard;
 use std::sync::Arc;
 
@@ -43,44 +38,13 @@ impl ProcessExec for FilterExec {
     fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(()))
     }
-    fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>> {
-        Ok(Box::new(FilterExecutor {
-            predicate: self.predicate.to_evaluation()?,
-            output_projection: self.output_projection.clone(),
-        }))
-    }
-}
-
-/// Built once from the description, then retained across batches.
-struct FilterExecutor {
-    predicate: ScalarExpressionEvaluation,
-    output_projection: Option<Vec<usize>>,
-}
-impl ProcessExecutor for FilterExecutor {
-    fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        let predicate = self.predicate.evaluate(&executor)?;
-        let predicate = predicate.into_array(input.num_rows())?;
-        let mask = predicate
-            .as_boolean_opt()
-            .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
-        // Arrow applies validity as part of the filter: only valid TRUE rows
-        // pass. Keep that bitmap instead of expanding it to row indices and
-        // rebuilding the same bitmap before filtering every column.
-        // Predicate-only columns must remain available until its evaluation,
-        // but do not need allocation/copying by the row filter kernel.
-        let projected;
-        let input = if let Some(indices) = &self.output_projection {
-            projected = input.project(indices)?;
-            &projected
-        } else {
-            input
-        };
-        let output = filter_record_batch(input, mask)?;
-        Ok(ProcessResult::NeedMoreInput(output))
-    }
-    fn finish(&mut self) -> Result<Option<RecordBatch>> {
-        Ok(None)
+    fn emit_program(
+        &self,
+        _global: GlobalExecContextRef,
+        builder: &mut crate::program::ProgramBuilder,
+        input: crate::program::ValueId,
+    ) -> Result<crate::program::ValueId> {
+        builder.emit_filter(input, &self.predicate, self.output_projection.clone())
     }
 }
 
@@ -91,21 +55,26 @@ mod tests {
         ExpressionResultType,
         scalar::{ConstantExpression, ReferenceExpression},
     };
+    use crate::{error::Error, exec::ProcessResult};
+    use arrow::array::AsArray;
     use arrow::{
         array::{BooleanArray, Int64Array},
         buffer::{BooleanBuffer, NullBuffer},
         datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
     };
 
     fn filter(input: &RecordBatch, predicate: ScalarExprRef) -> Result<RecordBatch> {
-        let mut filter = FilterExecutor {
-            predicate: predicate.to_evaluation()?,
+        let mut filter = FilterExec {
+            predicate: predicate,
             output_projection: None,
-        };
-        let ProcessResult::NeedMoreInput(output) = filter.execute(input)? else {
+        }
+        .new_executor(Arc::new(()))
+        .unwrap();
+        let ProcessResult::NeedMoreInput(output) = filter.execute(&input.clone().into())? else {
             unreachable!()
         };
-        Ok(output)
+        output.into_record_batch()
     }
 
     fn batch(mask: BooleanArray) -> RecordBatch {
@@ -174,21 +143,24 @@ mod tests {
             Some(true),
         ]));
         for (indices, columns) in [(vec![0], 1), (vec![], 0), (vec![0, 0], 2)] {
-            let mut filter = FilterExecutor {
+            let mut filter = FilterExec {
                 predicate: ReferenceExpression::new(
                     1,
                     ExpressionResultType::new(DataType::Boolean, true),
                 )
-                .to_evaluation()
-                .unwrap(),
+                .into_ref(),
                 output_projection: Some(indices),
-            };
-            let ProcessResult::NeedMoreInput(output) = filter.execute(&input).unwrap() else {
+            }
+            .new_executor(Arc::new(()))
+            .unwrap();
+            let ProcessResult::NeedMoreInput(output) =
+                filter.execute(&input.clone().into()).unwrap()
+            else {
                 unreachable!()
             };
             assert_eq!(output.num_columns(), columns);
             assert_eq!(output.num_rows(), 2);
-            for array in output.columns() {
+            for array in output.materialize().unwrap().columns() {
                 assert_eq!(
                     array
                         .as_primitive::<arrow::datatypes::Int64Type>()
@@ -200,26 +172,30 @@ mod tests {
         }
         for indices in [vec![0], vec![], vec![0, 0]] {
             for (value, rows) in [(Some(true), 4), (Some(false), 0), (None, 0)] {
-                let mut filter = FilterExecutor {
-                    predicate: ConstantExpression::boolean(value).to_evaluation().unwrap(),
+                let mut filter = FilterExec {
+                    predicate: ConstantExpression::boolean(value).into_ref(),
                     output_projection: Some(indices.clone()),
-                };
-                let ProcessResult::NeedMoreInput(output) = filter.execute(&input).unwrap() else {
+                }
+                .new_executor(Arc::new(()))
+                .unwrap();
+                let ProcessResult::NeedMoreInput(output) =
+                    filter.execute(&input.clone().into()).unwrap()
+                else {
                     unreachable!()
                 };
                 let expected = input.project(&indices).unwrap().slice(0, rows);
                 assert_eq!(output.schema(), expected.schema());
                 assert_eq!(output.num_columns(), indices.len());
                 assert_eq!(output.num_rows(), rows);
-                assert_eq!(output, expected);
+                assert_eq!(output.into_record_batch().unwrap(), expected);
             }
         }
-        let mut invalid = FilterExecutor {
-            predicate: ConstantExpression::boolean(Some(true))
-                .to_evaluation()
-                .unwrap(),
+        let mut invalid = FilterExec {
+            predicate: ConstantExpression::boolean(Some(true)).into_ref(),
             output_projection: Some(vec![2]),
-        };
-        assert!(invalid.execute(&input).is_err());
+        }
+        .new_executor(Arc::new(()))
+        .unwrap();
+        assert!(invalid.execute(&input.into()).is_err());
     }
 }

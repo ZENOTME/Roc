@@ -1,0 +1,47 @@
+--- a/src/jit/emit.rs
++++ b/src/jit/emit.rs
+@@ -150,8 +150,7 @@
+     let byte_base = b.ins().ishl_imm_u(base, 3);
+     let mut mask = zero;
+     for lane in 0..64 {
+-        let offset = b.ins().iadd_imm_u(byte_base, lane * 8);
+-        let pass = emit_expr(b, predicate, references, &bases, offset, overflow);
++        let pass = emit_expr_displaced(b, predicate, references, &bases, byte_base, (lane * 8) as i32, overflow);
+         let bit = b.ins().uextend(types::I64, pass);
+         let bit = b.ins().ishl_imm_u(bit, lane);
+         mask = b.ins().bor(mask, bit);
+@@ -327,25 +326,30 @@
+         .collect()
+ }
+ 
+-fn emit_expr(
++fn emit_expr(b: &mut FunctionBuilder<'_>, expr: &Expr, references: &[usize], bases: &[Value], offset: Value, overflow: Block) -> Value {
++    emit_expr_displaced(b, expr, references, bases, offset, 0, overflow)
++}
++
++fn emit_expr_displaced(
+     b: &mut FunctionBuilder<'_>,
+     expr: &Expr,
+     references: &[usize],
+     bases: &[Value],
+     offset: Value,
++    displacement: i32,
+     overflow: Block,
+ ) -> Value {
+     match expr {
+         Expr::Column(index) => {
+             let base = bases[references.binary_search(index).unwrap()];
+             let address = b.ins().iadd(base, offset);
+-            b.ins().load(types::I64, MemFlagsData::new(), address, 0)
++            b.ins().load(types::I64, MemFlagsData::new(), address, displacement)
+         }
+         Expr::Int(value) => b.ins().iconst(types::I64, *value),
+         Expr::Bool(value) => b.ins().iconst(types::I8, i64::from(*value)),
+         Expr::Binary(kind, left, right) => {
+-            let left = emit_expr(b, left, references, bases, offset, overflow);
+-            let right = emit_expr(b, right, references, bases, offset, overflow);
++            let left = emit_expr_displaced(b, left, references, bases, offset, displacement, overflow);
++            let right = emit_expr_displaced(b, right, references, bases, offset, displacement, overflow);
+             use FunctionKind::*;
+             let arithmetic = match kind {
+                 Add => Some(b.ins().sadd_overflow(left, right)),

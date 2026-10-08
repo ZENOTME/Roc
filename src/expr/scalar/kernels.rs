@@ -31,7 +31,7 @@ use arrow::{
 };
 use std::sync::Arc;
 
-pub(super) type EvalFn = fn(&[ColumnValue]) -> Result<ColumnValue>;
+pub(crate) type EvalFn = fn(&[ColumnValue]) -> Result<ColumnValue>;
 
 fn unary_input(input: &[ColumnValue]) -> Result<&ColumnValue> {
     let [value] = input else {
@@ -67,7 +67,7 @@ fn null_test<const NOT: bool>(input: &[ColumnValue]) -> Result<ColumnValue> {
     })
 }
 
-pub(super) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<EvalFn> {
+pub(crate) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<EvalFn> {
     use FunctionKind::*;
     Ok(match function {
         IsNull => null_test::<false>,
@@ -115,7 +115,7 @@ fn negate<T: ScalarPrimitiveType, const FLOAT: bool>(input: &[ColumnValue]) -> R
     })
 }
 
-pub(super) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Result<EvalFn> {
+pub(crate) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Result<EvalFn> {
     use FunctionKind::*;
     match function {
         Add => bind_arithmetic::<AddOp>(data_type),

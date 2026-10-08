@@ -10,7 +10,7 @@ use arrow::{
 };
 use roc::expr::{
     ExpressionResultType,
-    agg::{AggregateExpression, AggregateFunction, executor::AggregateExpressionExecutor},
+    agg::{AggregateExpression, AggregateFunction},
     scalar::ReferenceExpression,
 };
 
@@ -39,8 +39,8 @@ fn expression(
     )
 }
 
-fn executor(expression: AggregateExpression) -> AggregateExpressionExecutor {
-    AggregateExpressionExecutor::try_new(Arc::new(expression)).unwrap()
+fn executor(expression: AggregateExpression) -> AggregateHarness {
+    AggregateHarness::try_new(Arc::new(expression)).unwrap()
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn unsupported_sum_result_types_are_rejected_during_construction() {
         DataType::Utf8,
         DataType::Null,
     ] {
-        let result = AggregateExpressionExecutor::try_new(Arc::new(expression(
+        let result = AggregateHarness::try_new(Arc::new(expression(
             AggregateFunction::Sum,
             DataType::Int64,
             output.clone(),
@@ -302,3 +302,7 @@ fn sum_result_type_validation_preserves_narrow_input_casts() {
         assert_eq!(sum.evaluate().unwrap().to_data(), expected.to_data());
     }
 }
+
+#[path="support/aggregate.rs"]
+mod aggregate_support;
+use aggregate_support::AggregateHarness;

@@ -18,9 +18,7 @@ use arrow::{
     compute::{cast, take},
     datatypes::*,
 };
-use roc::expr::scalar::{
-    ColumnValue, ConstantExpression, ScalarValue, executor::ScalarExpressionExecutor,
-};
+use roc::expr::scalar::{ColumnValue, ConstantExpression, ScalarValue};
 use std::sync::Arc;
 
 fn decoded(array: &ArrayRef) -> ArrayRef {
@@ -449,10 +447,8 @@ fn sparse_and_dense_unions_preserve_active_child_and_nulls() {
 #[test]
 fn typed_constants_stay_scalar_and_broadcast_at_array_consumers() {
     let value = ScalarValue::TimestampNanosecond(Some(42), Some(Arc::from("UTC")));
-    let evaluation = ConstantExpression::new(value).to_evaluation().unwrap();
-    let result = evaluation
-        .evaluate(&ScalarExpressionExecutor::new(&[], 7))
-        .unwrap();
+    let mut evaluation = ConstantExpression::new(value).program().unwrap();
+    let result = evaluation.run_value(&Value::input(&[], 7)).unwrap();
     assert!(
         matches!(&result, ColumnValue::Scalar(ScalarValue::TimestampNanosecond(Some(42), timezone)) if timezone.as_deref() == Some("UTC"))
     );
@@ -469,3 +465,7 @@ fn typed_constants_stay_scalar_and_broadcast_at_array_consumers() {
         &[42; 7]
     );
 }
+
+#[path = "support/program.rs"]
+mod program_support;
+use program_support::*;

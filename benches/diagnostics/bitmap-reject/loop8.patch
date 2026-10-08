@@ -1,0 +1,37 @@
+--- a/src/jit/emit.rs
++++ b/src/jit/emit.rs
+@@ -148,14 +148,29 @@
+     // exposes independent comparisons to Cranelift without relying on a loop
+     // vectorizer. No per-lane data-dependent branch for simple comparisons.
+     let byte_base = b.ins().ishl_imm_u(base, 3);
+-    let mut mask = zero;
+-    for lane in 0..64 {
+-        let offset = b.ins().iadd_imm_u(byte_base, lane * 8);
++    let groups = block(b, 2);
++    let packed = block(b, 1);
++    b.ins().jump(groups, &[zero.into(), zero.into()]);
++    b.switch_to_block(groups);
++    let group_lane = b.block_params(groups)[0];
++    let previous = b.block_params(groups)[1];
++    let group_bytes = b.ins().ishl_imm_u(group_lane, 3);
++    let group_base = b.ins().iadd(byte_base, group_bytes);
++    let mut partial = zero;
++    for lane in 0..8 {
++        let offset = b.ins().iadd_imm_u(group_base, lane * 8);
+         let pass = emit_expr(b, predicate, references, &bases, offset, overflow);
+         let bit = b.ins().uextend(types::I64, pass);
+         let bit = b.ins().ishl_imm_u(bit, lane);
+-        mask = b.ins().bor(mask, bit);
+-    }
++        partial = b.ins().bor(partial, bit);
++    }
++    let shifted = b.ins().ishl(partial, group_lane);
++    let mask = b.ins().bor(previous, shifted);
++    let next_group = b.ins().iadd_imm_u(group_lane, 8);
++    let has_group = b.ins().icmp_imm_s(IntCC::UnsignedLessThan, next_group, 64);
++    b.ins().brif(has_group, groups, &[next_group.into(), mask.into()], packed, &[mask.into()]);
++    b.switch_to_block(packed);
++    let mask = b.block_params(packed)[0];
+     let mask_offset = b.ins().ushr_imm_u(base, 3); // (base / 64) * 8
+     let address = b.ins().iadd(args[2], mask_offset);
+     b.ins().store(MemFlagsData::new(), mask, address, 0);

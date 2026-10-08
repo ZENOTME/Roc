@@ -13,10 +13,12 @@
 // limitations under the License.
 
 mod group_index;
+mod program;
 
-use super::ProjectionExecutor;
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
-use crate::expr::agg::executor::AggregateExpressionExecutor;
+use crate::expr::agg::AggregateAccumulator;
+#[cfg(test)]
+use crate::program::{ProcessProgram, ProgramBuilder};
 use crate::{
     error::{Error, Result},
     operator::AggregateOperator,
@@ -42,9 +44,14 @@ const AGGREGATE_MORSEL_ROWS: usize = 2048;
 struct AggregateState {
     index: GroupIndex,
     group_ids: Vec<usize>,
-    groups: ProjectionExecutor,
+    #[cfg(test)]
+    groups: ProcessProgram,
+    #[cfg(test)]
+    update_inputs:Vec<aggregate_test_support::AggregateInput>,
+    #[cfg(test)]
+    group_schema: SchemaRef,
     output_schema: SchemaRef,
-    accumulators: Vec<AggregateExpressionExecutor>,
+    accumulators: Vec<AggregateAccumulator>,
 }
 
 /// Each aggregate keeps its own state arrays; there is no flattened
@@ -73,13 +80,17 @@ impl PartialAggregate {
 
 impl AggregateState {
     fn new(operator: &AggregateOperator) -> Result<Self> {
-        let groups = ProjectionExecutor::try_new(operator.groups().clone())?;
-        let index = GroupIndex::new(groups.output_schema())?;
-        let grouped = !groups.output_schema().fields().is_empty();
+        #[cfg(test)]
+        let groups={let mut builder=ProgramBuilder::default();let input=builder.value();let output=builder.emit_project(input,operator.groups())?;builder.build_batch(input,Some(output))?};
+        #[cfg(test)]
+        let update_inputs=operator.aggregates().iter().map(|e|aggregate_test_support::AggregateInput::new(e)).collect::<Result<_>>()?;
+        let group_schema = operator.groups().output_schema();
+        let index = GroupIndex::new(&group_schema)?;
+        let grouped = !group_schema.fields().is_empty();
         let output_schema = operator.output_schema();
         let mut accumulators = vec![];
         for aggregate in operator.aggregates() {
-            let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())?;
+            let mut executor = AggregateAccumulator::try_new(aggregate.clone())?;
             if !grouped {
                 executor.resize(1);
                 executor.bind_global_count();
@@ -90,7 +101,12 @@ impl AggregateState {
         Ok(Self {
             index,
             group_ids: vec![],
+            #[cfg(test)]
             groups,
+            #[cfg(test)]
+            update_inputs,
+            #[cfg(test)]
+            group_schema,
             output_schema,
             accumulators,
         })
@@ -100,18 +116,17 @@ impl AggregateState {
         self.index.len()
     }
 
+    #[cfg(test)]
     fn update(&mut self, batch: &RecordBatch) -> Result<()> {
         if batch.num_rows() == 0 {
             return Ok(());
         }
-        let groups = self.groups.project_batch(batch)?;
+        let groups = self.groups.run_batch(&batch.clone().into())?;
         self.index
             .intern(groups.columns(), batch.num_rows(), &mut self.group_ids)?;
         let count = self.group_count();
-        for accumulator in &mut self.accumulators {
-            // GroupIndex creates one in-range ID per input row. Validate once
-            // at that boundary instead of rescanning IDs for every aggregate.
-            accumulator.update_validated(batch, &self.group_ids, count)?;
+        for (accumulator,input) in self.accumulators.iter_mut().zip(&mut self.update_inputs) {
+            input.apply(accumulator,batch,&self.group_ids,count)?;
         }
         Ok(())
     }
@@ -136,10 +151,11 @@ impl AggregateState {
         self.index.columns()
     }
 
+    #[cfg(test)]
     fn finish_partial(self) -> Result<PartialAggregate> {
         let count = self.group_count();
         let groups = RecordBatch::try_new_with_options(
-            self.groups.output_schema().clone(),
+            self.group_schema.clone(),
             self.group_columns()?,
             &RecordBatchOptions::new().with_row_count(Some(count)),
         )?;
@@ -203,11 +219,6 @@ struct AggregateSinkGlobalContext {
     partials: Mutex<Vec<PartialAggregate>>,
 }
 
-struct AggregateExecutor {
-    global: Arc<AggregateSinkGlobalContext>,
-    local: AggregateState,
-}
-
 impl SinkExec for AggregateSinkExec {
     fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         Ok(Arc::new(AggregateSinkGlobalContext {
@@ -215,15 +226,15 @@ impl SinkExec for AggregateSinkExec {
         }))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        let global = global
-            .downcast::<AggregateSinkGlobalContext>()
-            .map_err(|_| {
-                Error::Execution("aggregate sink received an invalid global context".into())
-            })?;
-        Ok(Box::new(AggregateExecutor {
-            global,
-            local: AggregateState::new(&self.operator)?,
-        }))
+        self.standalone(global)
+    }
+    fn emit_program(
+        &self,
+        global: GlobalExecContextRef,
+        builder: &mut crate::program::ProgramBuilder,
+        input: crate::program::ValueId,
+    ) -> Result<(Box<dyn SinkExecutor>, Option<crate::program::ValueId>)> {
+        Ok((self.emit_updates(global, builder, input)?, None))
     }
 
     fn finalize<'a>(
@@ -259,28 +270,6 @@ impl SinkExec for AggregateSinkExec {
         })
     }
 }
-impl SinkExecutor for AggregateExecutor {
-    fn sink<'a>(
-        &'a mut self,
-        _shutdown_guard: &'a ShutdownGuard,
-        input: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
-        Box::pin(async move {
-            self.local.update(input)?;
-            Ok(SinkResult::NeedMoreInput)
-        })
-    }
-
-    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        let Self { global, local } = *self;
-        Box::pin(async move {
-            let partial = local.finish_partial()?;
-            global.partials.lock().unwrap().push(partial);
-            Ok(())
-        })
-    }
-}
-
 struct AggregateSourceGlobalContext {
     batch: RecordBatch,
     next_row: AtomicUsize,
@@ -602,7 +591,7 @@ mod tests {
             assert_eq!(partial.num_rows(), 0);
             assert_eq!(partial.groups.schema(), operator.groups().output_schema());
             for (arrays, aggregate) in partial.states.iter().zip(operator.aggregates()) {
-                let fields = AggregateExpressionExecutor::try_new(aggregate.clone())
+                let fields = AggregateAccumulator::try_new(aggregate.clone())
                     .unwrap()
                     .state_types();
                 assert_eq!(arrays.len(), fields.len());
@@ -939,7 +928,7 @@ mod tests {
         ] {
             let expression = AggregateExpression::new(function, None, DataType::Float64, true);
             assert!(matches!(
-                AggregateExpressionExecutor::try_new(Arc::new(expression)),
+                AggregateAccumulator::try_new(Arc::new(expression)),
                 Err(Error::InvalidPlan(_))
             ));
         }
@@ -1090,3 +1079,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path="../../../tests/support/aggregate.rs"]
+mod aggregate_test_support;

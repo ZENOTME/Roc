@@ -12,26 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::ExpressionResultType;
 use super::ScalarExprRef;
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::{ColumnValue, ExpressionResultType, ScalarValue};
-use crate::error::{Error, Result};
-use arrow::{
-    array::new_empty_array,
-    compute::{CastOptions, cast_with_options},
-    datatypes::DataType,
-};
+use arrow::datatypes::DataType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CastMode {
     Strict,
     Try,
-}
-
-#[derive(Debug)]
-pub struct CastExpressionEvaluation {
-    argument: Box<ScalarExpressionEvaluation>,
-    target: DataType,
-    options: CastOptions<'static>,
 }
 
 /// An expression that converts its input to the target type.
@@ -64,56 +51,5 @@ impl CastExpression {
     }
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
-    }
-
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ScalarExpressionEvaluation::Cast(self.bind()?))
-    }
-
-    pub(super) fn bind(&self) -> Result<CastExpressionEvaluation> {
-        Ok(CastExpressionEvaluation {
-            argument: Box::new(self.input.to_evaluation()?),
-            target: self.result_type.data_type.clone(),
-            options: CastOptions {
-                safe: self.mode == CastMode::Try,
-                ..Default::default()
-            },
-        })
-    }
-}
-
-impl CastExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
-        }
-        let argument = self.argument.evaluate(executor)?;
-        self.eval(executor, &[argument])
-    }
-    fn eval(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        Ok(if executor.num_rows()? == 0 {
-            ColumnValue::Array(new_empty_array(&self.target))
-        } else {
-            let [argument] = input else {
-                return Err(Error::Execution("cast requires one input result".into()));
-            };
-
-            match argument {
-                ColumnValue::Array(value) => ColumnValue::Array(cast_with_options(
-                    value.as_ref(),
-                    &self.target,
-                    &self.options,
-                )?),
-                ColumnValue::Scalar(value) => {
-                    let output =
-                        cast_with_options(value.to_array()?.as_ref(), &self.target, &self.options)?;
-                    ColumnValue::Scalar(ScalarValue::try_from_array(&output, 0)?)
-                }
-            }
-        })
     }
 }

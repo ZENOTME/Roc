@@ -14,13 +14,12 @@
 
 //! Pipeline task execution and pipeline-graph scheduling.
 use super::{Pipeline, PipelineGraph};
+use crate::exec::Batch;
+use crate::program::{ProcessProgram, ProgramBuilder};
 use crate::{
     Shutdown,
     error::{Error, Result},
-    exec::{
-        GlobalExecContextRef, ProcessExecutor, ProcessResult, SinkExecutor, SinkResult,
-        SourceExecutor,
-    },
+    exec::{GlobalExecContextRef, ProcessResult, SinkExecutor, SinkResult, SourceExecutor},
 };
 use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
@@ -48,6 +47,8 @@ pub trait Executor: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineExecutionConfig {
     pub batch_rows: usize,
+    /// Compile eligible synchronous Program regions. Requires the `jit` feature.
+    pub compilation: bool,
     /// Maximum execute/finish/sink calls between yields, including empty outputs.
     pub yield_batches: usize,
 }
@@ -56,6 +57,7 @@ impl Default for PipelineExecutionConfig {
     fn default() -> Self {
         Self {
             batch_rows: 2048,
+            compilation: false,
             yield_batches: 16,
         }
     }
@@ -154,7 +156,7 @@ impl Pipeline {
         }
         let global = self.init_global_context(&shutdown_guard)?;
         let executors = (0..parallelism)
-            .map(|_| self.new_executor(&global))
+            .map(|_| self.new_executor(&global, config.compilation))
             .collect::<Result<Vec<_>>>()?;
         let mut tasks = FuturesUnordered::new();
         for executor in executors {
@@ -185,15 +187,27 @@ impl Pipeline {
         })
     }
 
-    fn new_executor(&self, global: &PipelineGlobalContext) -> Result<PipelineExecutor> {
+    fn new_executor(
+        &self,
+        global: &PipelineGlobalContext,
+        compilation: bool,
+    ) -> Result<PipelineExecutor> {
         let source = self.source.new_executor(global.source.clone())?;
-        let processors = self
-            .processors
-            .iter()
-            .zip(&global.processors)
-            .map(|(operator, global)| operator.new_executor(global.clone()))
-            .collect::<Result<Vec<_>>>()?;
-        let sink = self.sink.new_executor(global.sink.clone())?;
+        let mut builder = ProgramBuilder::default();
+        let input = builder.value();
+        let mut value = self
+            .source
+            .emit_program(global.source.clone(), &mut builder, input)?;
+        for (operator, global) in self.processors.iter().zip(&global.processors) {
+            value = operator.emit_program(global.clone(), &mut builder, value)?;
+        }
+        let (sink, output) = self
+            .sink
+            .emit_program(global.sink.clone(), &mut builder, value)?;
+        if compilation {
+            builder.fuse()?;
+        }
+        let processors = vec![builder.build_batch(input, output)?];
         Ok(PipelineExecutor {
             source,
             processors,
@@ -218,7 +232,7 @@ impl Pipeline {
 /// Task-local execution state. Every task gets a fully initialized executor.
 struct PipelineExecutor {
     source: Box<dyn SourceExecutor>,
-    processors: Vec<Box<dyn ProcessExecutor>>,
+    processors: Vec<ProcessProgram>,
     sink: Box<dyn SinkExecutor>,
 }
 impl PipelineExecutor {
@@ -230,7 +244,7 @@ impl PipelineExecutor {
         let mut work_since_yield = 0;
         // Pending calls form a depth-first stack. A MoreResult continuation stays
         // below its output so downstream drains before the input is reused.
-        let mut pending: Vec<(usize, RecordBatch)> = Vec::with_capacity(self.processors.len() + 1);
+        let mut pending: Vec<(usize, Batch)> = Vec::with_capacity(self.processors.len() + 1);
         let mut morsel: Option<RecordBatch> = None;
         let mut offset = 0;
         // Once input ends, finish processors in order. Their outputs must drain
@@ -242,11 +256,26 @@ impl PipelineExecutor {
             }
             if let Some((index, input)) = pending.pop() {
                 if index == self.processors.len() {
-                    if self.sink.sink(&shutdown_guard, &input).await? == SinkResult::Finished {
+                    // Storage/exchange/aggregate sinks still consume dense Arrow batches.
+                    // Keep selection through the processor chain and compact at this boundary.
+                    if self
+                        .sink
+                        .sink(&shutdown_guard, input.materialize()?.as_ref())
+                        .await?
+                        == SinkResult::Finished
+                    {
                         break;
                     }
                 } else {
                     let output = match self.processors[index].execute(&input)? {
+                        ProcessResult::Consumed => {
+                            work_since_yield += 1;
+                            if work_since_yield >= config.yield_batches {
+                                work_since_yield = 0;
+                                yield_now().await;
+                            }
+                            continue;
+                        }
                         ProcessResult::NeedMoreInput(output) => output,
                         ProcessResult::MoreResult(output) => {
                             pending.push((index, input));
@@ -267,7 +296,7 @@ impl PipelineExecutor {
                 if index == self.processors.len() {
                     break;
                 }
-                match self.processors[index].finish()? {
+                match self.processors[index].finish_batch()? {
                     Some(output) => {
                         if output.num_rows() > 0 {
                             pending.push((index + 1, output));
@@ -293,9 +322,9 @@ impl PipelineExecutor {
                 if offset == 0 && rows == input.num_rows() {
                     // The whole morsel already has the required shape. Moving
                     // it preserves the existing array wrappers and ownership.
-                    pending.push((0, morsel.take().unwrap()));
+                    pending.push((0, morsel.take().unwrap().into()));
                 } else {
-                    pending.push((0, input.slice(offset, rows)));
+                    pending.push((0, input.slice(offset, rows).into()));
                     offset += rows;
                     if offset == input.num_rows() {
                         morsel = None;
@@ -484,41 +513,56 @@ mod tests {
         }
     }
 
-    struct Processor<F, G>(F, G);
+    struct Processor<F, G>(F, G, [crate::program::ValueId; 1]);
 
-    impl<F, G> ProcessExecutor for Processor<F, G>
+    impl<F, G> crate::program::Program for Processor<F, G>
     where
-        F: FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-        G: FnMut() -> Result<Option<RecordBatch>> + Send + 'static,
+        F: FnMut(&Batch) -> Result<ProcessResult> + Send + 'static,
+        G: FnMut() -> Result<Option<Batch>> + Send + 'static,
     {
-        fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
-            (self.0)(input)
+        fn inputs(&self) -> &[crate::program::ValueId] {
+            &self.2
         }
-
-        fn finish(&mut self) -> Result<Option<RecordBatch>> {
+        fn outputs(&self) -> &[crate::program::ValueId] {
+            &[]
+        }
+        fn call(&mut self, context: &mut crate::program::ProgramContext) -> Result<()> {
+            context.control = Some((self.0)(context.batch(self.2[0])?)?);
+            Ok(())
+        }
+        fn finish_batch(
+            &mut self,
+            _: &mut crate::program::ProgramContext,
+        ) -> Result<Option<Batch>> {
             (self.1)()
         }
     }
 
     fn processor(
-        f: impl FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-    ) -> Box<dyn ProcessExecutor> {
+        f: impl FnMut(&Batch) -> Result<ProcessResult> + Send + 'static,
+    ) -> ProcessProgram {
         processor_with_finish(f, || Ok(None))
     }
 
     fn processor_with_finish(
-        execute: impl FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-        finish: impl FnMut() -> Result<Option<RecordBatch>> + Send + 'static,
-    ) -> Box<dyn ProcessExecutor> {
-        Box::new(Processor(execute, finish))
+        execute: impl FnMut(&Batch) -> Result<ProcessResult> + Send + 'static,
+        finish: impl FnMut() -> Result<Option<Batch>> + Send + 'static,
+    ) -> ProcessProgram {
+        let mut builder = ProgramBuilder::default();
+        let input = builder.value();
+        builder.emit(Processor(execute, finish, [input]));
+        builder.build_batch(input, None).unwrap()
     }
 
-    fn buffering(finish_rows: usize) -> Box<dyn ProcessExecutor> {
+    fn buffering(finish_rows: usize) -> ProcessProgram {
         let buffered = Arc::new(Mutex::new(VecDeque::new()));
         let input_buffer = buffered.clone();
         processor_with_finish(
             move |input| {
-                input_buffer.lock().unwrap().extend(values(input));
+                input_buffer
+                    .lock()
+                    .unwrap()
+                    .extend(values(input.materialize()?.as_ref()));
                 Ok(ProcessResult::NeedMoreInput(input.slice(0, 0)))
             },
             move || {
@@ -527,7 +571,9 @@ mod tests {
                     return Ok(None);
                 }
                 let rows = finish_rows.min(buffered.len());
-                Ok(Some(batch(&buffered.drain(..rows).collect::<Vec<_>>())))
+                Ok(Some(
+                    batch(&buffered.drain(..rows).collect::<Vec<_>>()).into(),
+                ))
             },
         )
     }
@@ -556,7 +602,7 @@ mod tests {
 
     fn executor(
         batches: Vec<RecordBatch>,
-        processors: Vec<Box<dyn ProcessExecutor>>,
+        processors: Vec<ProcessProgram>,
         stop_after: Option<usize>,
     ) -> (PipelineExecutor, Arc<Observed>) {
         let observed = Arc::new(Observed::default());
@@ -578,6 +624,7 @@ mod tests {
 
     fn config() -> PipelineExecutionConfig {
         PipelineExecutionConfig {
+            compilation: false,
             batch_rows: 2,
             yield_batches: 2,
         }
@@ -589,7 +636,10 @@ mod tests {
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let calls = inputs.clone();
         let split = processor(move |input| {
-            calls.lock().unwrap().push(values(input));
+            calls
+                .lock()
+                .unwrap()
+                .push(values(input.materialize()?.as_ref()));
             let output = input.slice(position, 1);
             position += 1;
             if position == input.num_rows() {
@@ -636,11 +686,13 @@ mod tests {
         });
         let filter = processor(|input| {
             assert!(input.num_rows() > 0);
-            Ok(ProcessResult::NeedMoreInput(if values(input)[0] == 1 {
-                input.slice(0, 0)
-            } else {
-                input.clone()
-            }))
+            Ok(ProcessResult::NeedMoreInput(
+                if values(input.materialize()?.as_ref())[0] == 1 {
+                    input.slice(0, 0)
+                } else {
+                    input.clone()
+                },
+            ))
         });
         let (exec, observed) =
             executor(vec![batch(&[1]), batch(&[2])], vec![produce, filter], None);
@@ -728,7 +780,10 @@ mod tests {
             .map(|input| input.column(0).clone())
             .collect::<VecDeque<_>>();
         let check_identity = processor(move |input| {
-            assert!(Arc::ptr_eq(input.column(0), &arrays.pop_front().unwrap()));
+            assert!(Arc::ptr_eq(
+                input.physical().column(0),
+                &arrays.pop_front().unwrap()
+            ));
             Ok(ProcessResult::NeedMoreInput(input.clone()))
         });
         let (exec, observed) = executor(inputs, vec![check_identity], None);
@@ -777,7 +832,7 @@ mod tests {
         let mut tail = VecDeque::from([batch(&[]), batch(&[1]), batch(&[]), batch(&[2])]);
         let generate = processor_with_finish(
             |_| panic!("empty source must not execute"),
-            move || Ok(tail.pop_front()),
+            move || Ok(tail.pop_front().map(Into::into)),
         );
         let (exec, observed) = executor(vec![], vec![generate, buffering(2)], None);
         block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
@@ -824,7 +879,7 @@ mod tests {
             |_| panic!("empty source must not execute"),
             move || {
                 assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
-                Ok(Some(batch(&[1, 2])))
+                Ok(Some(batch(&[1, 2]).into()))
             },
         );
         let limit = processor_with_finish(
@@ -855,7 +910,7 @@ mod tests {
             move || {
                 assert!(first, "sink stopped accepting input");
                 first = false;
-                Ok(Some(batch(&[1])))
+                Ok(Some(batch(&[1]).into()))
             },
         );
         let expand = processor_with_finish(
@@ -876,7 +931,7 @@ mod tests {
             move || {
                 if first {
                     first = false;
-                    Ok(Some(batch(&[1])))
+                    Ok(Some(batch(&[1]).into()))
                 } else {
                     Err(Error::Execution("finish failed".into()))
                 }
@@ -898,7 +953,7 @@ mod tests {
     fn empty_finish_outputs_yield_and_can_be_cancelled_without_a_runtime() {
         let infinite = processor_with_finish(
             |_| panic!("empty source must not execute"),
-            || Ok(Some(batch(&[]))),
+            || Ok(Some(batch(&[]).into())),
         );
         let (exec, observed) = executor(vec![], vec![infinite], None);
         let (shutdown, shutdown_guard) = asyncband::shutdown::new();
@@ -911,5 +966,49 @@ mod tests {
         assert!(matches!(result, Err(Error::Cancelled)));
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn selected_continuations_and_finish_outputs_reach_dense_sink_in_order() {
+        use arrow::{array::BooleanArray, buffer::BooleanBuffer};
+        let selected = processor_with_finish(
+            |input| {
+                Ok(ProcessResult::NeedMoreInput(input.filter(
+                    &BooleanArray::from(vec![true, false, true, false]),
+                )?))
+            },
+            {
+                let mut tail = Some(
+                    Batch::try_new(
+                        batch(&[7, 8, 9]),
+                        BooleanBuffer::from(vec![false, true, false]),
+                    )
+                    .unwrap(),
+                );
+                move || Ok(tail.take())
+            },
+        );
+        let mut again = false;
+        let duplicate = processor(move |input| {
+            assert!(input.selection().is_some());
+            again = !again;
+            Ok(if again {
+                ProcessResult::MoreResult(input.clone())
+            } else {
+                ProcessResult::NeedMoreInput(input.clone())
+            })
+        });
+        let (exec, observed) =
+            executor(vec![batch(&[1, 2, 3, 4])], vec![selected, duplicate], None);
+        let (_shutdown, guard) = asyncband::shutdown::new();
+        block_on(exec.execute(
+            guard,
+            PipelineExecutionConfig {
+                compilation: false,
+                batch_rows: 4,
+                yield_batches: 2,
+            },
+        ))
+        .unwrap();
+        assert_eq!(*observed.values.lock().unwrap(), vec![1, 3, 1, 3, 8, 8]);
     }
 }

@@ -19,15 +19,17 @@ use futures::future::BoxFuture;
 use std::{any::Any, sync::Arc};
 
 mod aggregate;
+mod batch;
 mod exchange;
 mod filter;
 mod project;
 mod scan;
 
 pub use aggregate::{AggregateSinkExec, AggregateSourceExec};
+pub use batch::Batch;
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
 pub use filter::FilterExec;
-pub use project::{ProjectExec, ProjectionExecutor};
+pub use project::ProjectExec;
 pub use scan::ScanExec;
 
 /// Type-erased global state of executor.
@@ -35,6 +37,15 @@ pub type GlobalExecContextRef = Arc<dyn Any + Send + Sync>;
 
 /// Global executor for source operator.
 pub trait SourceExec: Send + Sync + 'static {
+    fn emit_program(
+        &self,
+        _global: GlobalExecContextRef,
+        _builder: &mut crate::program::ProgramBuilder,
+        input: crate::program::ValueId,
+    ) -> Result<crate::program::ValueId> {
+        Ok(input)
+    }
+
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef>;
 
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>>;
@@ -58,29 +69,44 @@ pub trait SourceExecutor: Send + 'static {
 pub trait ProcessExec: Send + Sync + 'static {
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef>;
 
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn ProcessExecutor>>;
+    fn emit_program(
+        &self,
+        global: GlobalExecContextRef,
+        builder: &mut crate::program::ProgramBuilder,
+        input: crate::program::ValueId,
+    ) -> Result<crate::program::ValueId>;
+    fn new_executor(&self, global: GlobalExecContextRef) -> Result<crate::program::ProcessProgram> {
+        let mut builder = crate::program::ProgramBuilder::default();
+        let input = builder.value();
+        let output = self.emit_program(global, &mut builder, input)?;
+        builder.build_batch(input, Some(output))
+    }
 }
 
 /// Result of a process call.
 #[derive(Debug)]
 pub enum ProcessResult {
+    /// Input consumed by state updates; no downstream batch.
+    Consumed,
     /// Deliver this output, then accept a new input batch. Empty output is valid.
-    NeedMoreInput(RecordBatch),
+    NeedMoreInput(Batch),
     /// Deliver this output, then call again with the same input. Empty output is valid.
-    MoreResult(RecordBatch),
-    /// Deliver this output, then complete the pipeline exeuctor in advanced.
-    Finished(RecordBatch),
-}
-
-/// Local executor for process operator.
-pub trait ProcessExecutor: Send + 'static {
-    fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult>;
-
-    fn finish(&mut self) -> Result<Option<RecordBatch>>;
+    MoreResult(Batch),
+    /// Deliver this output, then complete this pipeline executor early.
+    Finished(Batch),
 }
 
 /// Global executor for sink operator.
 pub trait SinkExec: Send + Sync + 'static {
+    fn emit_program(
+        &self,
+        global: GlobalExecContextRef,
+        _builder: &mut crate::program::ProgramBuilder,
+        input: crate::program::ValueId,
+    ) -> Result<(Box<dyn SinkExecutor>, Option<crate::program::ValueId>)> {
+        Ok((self.new_executor(global)?, Some(input)))
+    }
+
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef>;
 
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>>;

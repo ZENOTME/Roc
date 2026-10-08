@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use super::ScalarExprRef;
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use super::{ColumnValue, ExpressionResultType, ScalarValue};
 use crate::error::{Error, Result};
 use arrow::{
@@ -37,16 +36,6 @@ pub struct ConjunctionExpression {
     result_type: ExpressionResultType,
 }
 
-#[derive(Debug)]
-pub struct AndExpressionEvaluation {
-    arguments: Vec<ScalarExpressionEvaluation>,
-}
-
-#[derive(Debug)]
-pub struct OrExpressionEvaluation {
-    arguments: Vec<ScalarExpressionEvaluation>,
-}
-
 impl ConjunctionExpression {
     pub fn new(conjunction: Conjunction, arguments: Vec<ScalarExprRef>, nullable: bool) -> Self {
         Self {
@@ -67,83 +56,75 @@ impl ConjunctionExpression {
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
     }
-
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        let arguments = self
-            .arguments
-            .iter()
-            .map(|argument| argument.to_evaluation())
-            .collect::<Result<Vec<_>>>()?;
-        Ok(match self.conjunction {
-            Conjunction::And => {
-                ScalarExpressionEvaluation::And(AndExpressionEvaluation { arguments })
-            }
-            Conjunction::Or => ScalarExpressionEvaluation::Or(OrExpressionEvaluation { arguments }),
-        })
-    }
 }
 
-impl AndExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        evaluate::<true>(&self.arguments, executor)
-    }
+/// Per-invocation Boolean workspace, passed between explicit fold instructions.
+#[derive(Debug)]
+pub struct FoldState {
+    scalar: Option<bool>,
+    col: Option<ConjunctionBuffer>,
+    rows: usize,
+    and: bool,
 }
-
-impl OrExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        evaluate::<false>(&self.arguments, executor)
+impl FoldState {
+    pub fn new(rows: usize, and: bool) -> Self {
+        Self {
+            scalar: Some(and),
+            col: None,
+            rows,
+            and,
+        }
     }
-}
-
-fn evaluate<const AND: bool>(
-    arguments: &[ScalarExpressionEvaluation],
-    executor: &ScalarExpressionExecutor,
-) -> Result<ColumnValue> {
-    let rows = executor.num_rows()?;
-    if rows == 0 {
-        return Ok(ColumnValue::Array(new_empty_array(&DataType::Boolean)));
+    pub fn push(&mut self, value: ColumnValue) -> Result<()> {
+        if self.and {
+            self.push_inner::<true>(value)
+        } else {
+            self.push_inner::<false>(value)
+        }
     }
-    let mut scalar = Some(AND);
-    let mut col = None;
-    for argument in arguments {
-        let value = argument.evaluate(executor)?;
+    fn push_inner<const AND: bool>(&mut self, value: ColumnValue) -> Result<()> {
         match value {
             ColumnValue::Scalar(value) => {
-                if let Some(col) = &mut col {
+                if let Some(col) = &mut self.col {
                     update_scalar::<AND>(col, &value)?;
                 } else {
                     let value = value.as_boolean()?;
-                    scalar = match (scalar, value) {
-                        (Some(left), Some(right)) => {
-                            Some(if AND { left && right } else { left || right })
-                        }
-                        (Some(value), None) | (None, Some(value)) if value != AND => Some(value),
+                    self.scalar = match (self.scalar, value) {
+                        (Some(l), Some(r)) => Some(if AND { l && r } else { l || r }),
+                        (Some(v), None) | (None, Some(v)) if v != AND => Some(v),
                         _ => None,
                     };
                 }
             }
             ColumnValue::Array(value) => {
-                if let Some(col) = &mut col {
+                if let Some(col) = &mut self.col {
                     update_array::<AND>(col, &value)?;
                 } else {
-                    let mut buffer = ConjunctionBuffer::new::<AND>(rows);
-                    if scalar != Some(AND) {
-                        update_scalar::<AND>(&mut buffer, &ScalarValue::Boolean(scalar))?;
+                    let mut col = ConjunctionBuffer::new::<AND>(self.rows);
+                    if self.scalar != Some(AND) {
+                        update_scalar::<AND>(&mut col, &ScalarValue::Boolean(self.scalar))?;
                     }
-                    update_array::<AND>(&mut buffer, &value)?;
-                    col = Some(buffer);
+                    update_array::<AND>(&mut col, &value)?;
+                    self.col = Some(col);
                 }
             }
         }
+        Ok(())
     }
-    Ok(match col {
-        Some(col) => ColumnValue::Array(Arc::new(col.finish())),
-        None => ColumnValue::Scalar(ScalarValue::Boolean(scalar)),
-    })
+    pub fn finish(self) -> ColumnValue {
+        if self.rows == 0 {
+            return ColumnValue::Array(new_empty_array(&DataType::Boolean));
+        }
+        match self.col {
+            Some(c) => ColumnValue::Array(Arc::new(c.finish())),
+            None => ColumnValue::Scalar(ScalarValue::Boolean(self.scalar)),
+        }
+    }
 }
 
 /// Mutable workspace for one result, converted to an Arrow array only at the end.
 /// Validity is allocated lazily and reused thereafter.
+#[derive(Debug)]
 struct ConjunctionBuffer {
     values: MutableBuffer,
     validity: Option<MutableBuffer>,
@@ -298,13 +279,13 @@ mod tests {
     #[test]
     fn streaming_updates_report_errors_in_argument_order_without_short_circuiting() {
         let columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(vec![1]))];
-        let executor = ScalarExpressionExecutor::new(&columns, 1);
+        let executor = Value::input(&columns, 1);
         let missing =
             ReferenceExpression::new(99, ExpressionResultType::new(DataType::Boolean, false));
         for conjunction in [Conjunction::And, Conjunction::Or] {
             // An absorbing value must not skip a later argument's evaluation error.
             let absorbing = matches!(conjunction, Conjunction::Or);
-            let expression = ConjunctionExpression::new(
+            let mut expression = ConjunctionExpression::new(
                 conjunction,
                 vec![
                     ConstantExpression::boolean(Some(absorbing)).into_ref(),
@@ -312,14 +293,14 @@ mod tests {
                 ],
                 false,
             )
-            .to_evaluation()
+            .program()
             .unwrap();
             assert!(
-                matches!(expression.evaluate(&executor), Err(Error::Execution(message))
+                matches!(expression.run_value(&executor), Err(Error::Execution(message))
                 if message.contains("column index 99"))
             );
             // Process the earlier malformed result before evaluating the next argument.
-            let expression = ConjunctionExpression::new(
+            let mut expression = ConjunctionExpression::new(
                 conjunction,
                 vec![
                     ReferenceExpression::new(
@@ -331,16 +312,16 @@ mod tests {
                 ],
                 false,
             )
-            .to_evaluation()
+            .program()
             .unwrap();
             assert!(
-                matches!(expression.evaluate(&executor), Err(Error::Execution(message))
+                matches!(expression.run_value(&executor), Err(Error::Execution(message))
                 if message == "expected Boolean expression")
             );
-            let empty = ScalarExpressionExecutor::new(&[], 0);
+            let empty = Value::input(&[], 0);
             assert!(
                 expression
-                    .evaluate(&empty)
+                    .run_value(&empty)
                     .unwrap()
                     .into_array(0)
                     .unwrap()
@@ -545,3 +526,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+use crate::program::test_support::*;

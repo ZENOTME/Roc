@@ -24,8 +24,8 @@ use futures::future::BoxFuture;
 use roc::{
     error::Result,
     exec::{
-        FilterExec, GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult, ProjectExec,
-        ScanExec, SinkExec, SinkExecutor, SinkResult, SourceExec,
+        FilterExec, GlobalExecContextRef, ProcessExec, ProcessResult, ProjectExec, ScanExec,
+        SinkExec, SinkExecutor, SinkResult, SourceExec,
     },
     expr::scalar::ScalarExprRef,
     operator::{
@@ -69,7 +69,7 @@ fn binary(left: ScalarExprRef, op: ExprOp, right: i64) -> ScalarExprRef {
     };
     FunctionExpression::binary(op, left, right, data_type, nullable).into_ref()
 }
-fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
+fn filter_executor(predicate: ScalarExprRef) -> roc::program::ProcessProgram {
     let exec = FilterExec::new(predicate);
     exec.new_executor(
         exec.init_global_context(&asyncband::shutdown::new().1)
@@ -78,7 +78,7 @@ fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
     .unwrap()
 }
 
-fn project_executor(projector: Projection) -> Box<dyn ProcessExecutor> {
+fn project_executor(projector: Projection) -> roc::program::ProcessProgram {
     let exec = ProjectExec::new(projector);
     let global = exec
         .init_global_context(&asyncband::shutdown::new().1)
@@ -88,7 +88,7 @@ fn project_executor(projector: Projection) -> Box<dyn ProcessExecutor> {
 
 fn completed_batch(result: ProcessResult) -> RecordBatch {
     match result {
-        ProcessResult::NeedMoreInput(batch) => batch,
+        ProcessResult::NeedMoreInput(batch) => batch.into_record_batch().unwrap(),
         other => panic!("expected a completed input, got {other:?}"),
     }
 }
@@ -331,7 +331,7 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     .unwrap();
     for (value, rows) in [(Some(true), 3), (Some(false), 0), (None, 0)] {
         let result = filter_executor(ConstantExpression::boolean(value).into_ref())
-            .execute(&batch)
+            .execute(&batch.clone().into())
             .unwrap();
         let result = completed_batch(result);
         assert_eq!(result.num_rows(), rows);
@@ -348,7 +348,7 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         Field::new("null", DataType::Int64, true),
     ]));
     let mut executor = project_executor(projector);
-    let result = completed_batch(executor.execute(&batch).unwrap());
+    let result = completed_batch(executor.execute(&batch.clone().into()).unwrap());
     assert_eq!(result.schema(), output);
     assert_eq!(result.column(0).null_count(), 1);
     assert_eq!(
@@ -363,11 +363,15 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     );
     assert_eq!(result.column(2).null_count(), 3);
     assert_eq!(
-        completed_batch(executor.execute(&batch.slice(0, 0)).unwrap()).num_rows(),
+        completed_batch(executor.execute(&batch.slice(0, 0).into()).unwrap()).num_rows(),
         0
     );
     let empty = Projection::new(Vec::<ProjectionExpr>::new());
-    let zero_columns = completed_batch(project_executor(empty).execute(&batch).unwrap());
+    let zero_columns = completed_batch(
+        project_executor(empty)
+            .execute(&batch.clone().into())
+            .unwrap(),
+    );
     assert_eq!(
         (zero_columns.num_rows(), zero_columns.num_columns()),
         (3, 0)
@@ -383,7 +387,9 @@ fn preserves_arrow_kernel_errors() {
         binary(column(0), ExprOp::Divide, 0),
         "x",
     )]);
-    let error = project_executor(projector).execute(&batch).unwrap_err();
+    let error = project_executor(projector)
+        .execute(&batch.clone().into())
+        .unwrap_err();
     assert!(matches!(error, roc::error::Error::Arrow(_)));
 }
 
@@ -396,7 +402,7 @@ fn filter_rejects_non_boolean_results_without_an_input_schema() {
         ConstantExpression::int64(Some(1)).into_ref(),
     ] {
         assert!(matches!(
-            filter_executor(predicate).execute(&batch),
+            filter_executor(predicate).execute(&batch.clone().into()),
             Err(roc::error::Error::Execution(_))
         ));
     }

@@ -37,7 +37,7 @@ fn input_type(input: Option<&DataType>) -> Result<DataType> {
 type UpdateFn = fn(&mut AccumulatorState, Option<&ArrayRef>, &[usize]) -> Result<()>;
 
 /// Worker-local enum state paired with its update function during construction.
-pub(super) struct Accumulator {
+pub(crate) struct Accumulator {
     state: AccumulatorState,
     update_fn: UpdateFn,
 }

@@ -15,7 +15,13 @@
 pub mod error;
 pub mod exec;
 pub mod expr;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod operator;
 pub mod pipeline;
+pub mod program;
 
 pub use asyncband::shutdown::Shutdown;
+
+#[cfg(test)]
+extern crate self as roc;

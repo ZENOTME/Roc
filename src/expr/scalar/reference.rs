@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::{ColumnValue, ExpressionResultType};
-use crate::error::{Error, Result};
+use super::ExpressionResultType;
 
 /// An expression that reads one column of the input batch by index.
 #[derive(Clone, Debug)]
@@ -34,39 +32,5 @@ impl ReferenceExpression {
 
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
-    }
-
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ScalarExpressionEvaluation::Reference(self.bind()))
-    }
-
-    pub(super) fn bind(&self) -> ReferenceExpressionEvaluation {
-        ReferenceExpressionEvaluation { index: self.index }
-    }
-}
-
-#[derive(Debug)]
-pub struct ReferenceExpressionEvaluation {
-    index: usize,
-}
-
-impl ReferenceExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        self.eval(executor, &[])
-    }
-    fn eval(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        _input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        let num_rows = executor.num_rows()?;
-        let col = executor.columns()?.get(self.index).ok_or_else(|| {
-            Error::Execution(format!("column index {} out of bounds", self.index))
-        })?;
-        Ok(ColumnValue::Array(if num_rows == 0 {
-            col.slice(0, 0)
-        } else {
-            col.clone()
-        }))
     }
 }
