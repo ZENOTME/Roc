@@ -384,7 +384,13 @@ fn preserves_arrow_kernel_errors() {
         "x",
     )]);
     let error = project_executor(projector).execute(&batch).unwrap_err();
-    assert!(matches!(error, roc::error::Error::Arrow(_)));
+    assert_eq!(error.kind(), roc::error::ErrorKind::DivisionByZero);
+    assert!(matches!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<arrow::error::ArrowError>(),
+        Some(arrow::error::ArrowError::DivideByZero)
+    ));
 }
 
 #[test]
@@ -397,7 +403,7 @@ fn filter_rejects_non_boolean_results_without_an_input_schema() {
     ] {
         assert!(matches!(
             filter_executor(predicate).execute(&batch),
-            Err(roc::error::Error::Execution(_))
+            Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput
         ));
     }
 }
@@ -437,7 +443,7 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
     shutdown.request_shutdown();
     assert!(matches!(
         worker.next_batch(&shutdown_guard).await,
-        Err(roc::error::Error::Cancelled)
+        Err(ref error) if error.kind() == roc::error::ErrorKind::Cancelled
     ));
     exec.finalize(global, &shutdown_guard).await.unwrap();
 }
@@ -554,7 +560,11 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
     ));
     let collector = Collector::default();
     let service = Arc::new(MemoryExchange {
-        input: Err(roc::error::Error::Io(read_error.clone())),
+        input: Err(roc::error::Error::new(
+            roc::error::ErrorKind::Unavailable,
+            "exchange read failed",
+        )
+        .with_source(read_error.clone())),
         output: collector.clone(),
         schema: Arc::new(Schema::empty()),
         created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -569,6 +579,24 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
         .execute()
         .await
         .unwrap_err();
-    assert!(matches!(error, roc::error::Error::Io(actual) if Arc::ptr_eq(&actual, &read_error)));
+    assert_eq!(error.kind(), roc::error::ErrorKind::Unavailable);
+    let actual = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<Arc<std::io::Error>>()
+        .unwrap();
+    assert!(Arc::ptr_eq(actual, &read_error));
+    let frames = error.frames();
+    assert!(frames.iter().any(|f| f.context.operation == "exchange.next"
+        && f.context.fields.contains(&("exchange", "7".into()))));
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.context.operation == "worker.execute")
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.context.operation == "pipeline.execute")
+    );
     assert!(collector.0.lock().unwrap().is_empty());
 }

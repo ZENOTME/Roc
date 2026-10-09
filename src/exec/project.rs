@@ -14,7 +14,10 @@
 
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
 use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use crate::{error::Result, operator::Projection};
+use crate::{
+    error::{Error, ErrorContext, Result, ResultExt},
+    operator::Projection,
+};
 use arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -52,7 +55,12 @@ impl ProjectionExecutor {
         let expressions = projection
             .expressions()
             .iter()
-            .map(|e| e.expression().to_evaluation())
+            .enumerate()
+            .map(|(index, e)| {
+                e.expression()
+                    .to_evaluation()
+                    .with_context(|| ErrorContext::new("projection.bind").field("column", index))
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             expressions,
@@ -67,18 +75,27 @@ impl ProjectionExecutor {
         let columns = self
             .expressions
             .iter()
-            .map(|e| {
-                let value = e.evaluate(&executor)?;
+            .enumerate()
+            .map(|(index, e)| {
+                let value = e.evaluate(&executor).with_context(|| {
+                    ErrorContext::new("projection.evaluate").field("column", index)
+                })?;
                 // RecordBatch checks each column's concrete Arrow type against its schema.
-                let value = value.into_array(input.num_rows())?;
+                let value = value.into_array(input.num_rows()).with_context(|| {
+                    ErrorContext::new("projection.materialize").field("column", index)
+                })?;
                 Ok(value)
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(RecordBatch::try_new_with_options(
+        RecordBatch::try_new_with_options(
             self.output_schema.clone(),
             columns,
             &RecordBatchOptions::new().with_row_count(Some(input.num_rows())),
-        )?)
+        )
+        .map_err(|source| {
+            Error::invalid_input("projection output does not match its schema".into())
+                .with_source(source)
+        })
     }
 }
 impl ProcessExecutor for ProjectionExecutor {

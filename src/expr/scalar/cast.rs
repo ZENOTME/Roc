@@ -99,7 +99,7 @@ impl CastExpressionEvaluation {
             ColumnValue::Array(new_empty_array(&self.target))
         } else {
             let [argument] = input else {
-                return Err(Error::Execution("cast requires one input result".into()));
+                return Err(Error::internal("cast requires one input result".into()));
             };
 
             match argument {

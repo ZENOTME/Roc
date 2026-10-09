@@ -41,7 +41,7 @@ impl PipelineGraphBuilder {
 
     pub fn new_dependency(&mut self, dependent: PipelineId) -> Result<PipelineId> {
         if dependent >= self.pipelines.len() {
-            return Err(Error::InvalidPlan(format!("unknown pipeline {dependent}")));
+            return Err(Error::invalid_plan(format!("unknown pipeline {dependent}")));
         }
         let id = self.pipelines.len();
         self.pipelines.push(PipelineBuilder::new());
@@ -53,7 +53,7 @@ impl PipelineGraphBuilder {
     pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder> {
         self.pipelines
             .get_mut(id)
-            .ok_or_else(|| Error::InvalidPlan(format!("unknown pipeline {id}")))
+            .ok_or_else(|| Error::invalid_plan(format!("unknown pipeline {id}")))
     }
 
     pub fn finish(self) -> Result<PipelineGraph> {
@@ -71,8 +71,9 @@ impl PipelineGraphBuilder {
             .rev()
             .map(|inputs| inputs.into_iter().map(|id| count - 1 - id).collect())
             .collect();
-        PipelineGraph::new(pipelines, dependencies)
-            .map_err(|error| Error::InvalidPlan(error.to_string()))
+        PipelineGraph::new(pipelines, dependencies).map_err(|error| {
+            Error::invalid_plan("invalid pipeline graph".into()).with_source(error)
+        })
     }
 }
 
@@ -226,10 +227,10 @@ mod tests {
             &self,
             _shutdown_guard: &ShutdownGuard,
         ) -> Result<GlobalExecContextRef> {
-            Err(Error::Execution("not run by graph tests".into()))
+            Err(Error::internal("not run by graph tests".into()))
         }
         fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-            Err(Error::Execution("not run by graph tests".into()))
+            Err(Error::internal("not run by graph tests".into()))
         }
 
         fn finalize<'a>(
@@ -245,11 +246,11 @@ mod tests {
             &self,
             _shutdown_guard: &ShutdownGuard,
         ) -> Result<GlobalExecContextRef> {
-            Err(Error::Execution("not run by graph tests".into()))
+            Err(Error::internal("not run by graph tests".into()))
         }
 
         fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-            Err(Error::Execution("not run by graph tests".into()))
+            Err(Error::internal("not run by graph tests".into()))
         }
         fn finalize<'a>(
             &'a self,

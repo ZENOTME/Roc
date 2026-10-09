@@ -21,7 +21,7 @@ use arrow::array::{Array, ArrayRef, AsArray};
 pub fn select_true(result: ArrayRef) -> Result<Vec<usize>> {
     let value = result
         .as_boolean_opt()
-        .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+        .ok_or_else(|| Error::invalid_input("expected Boolean expression".into()))?;
     Ok((0..value.len())
         .filter(|&i| value.is_valid(i) && value.value(i))
         .collect())

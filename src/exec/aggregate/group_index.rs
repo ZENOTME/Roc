@@ -51,7 +51,9 @@ where
         let array = array
             .as_any()
             .downcast_ref::<PrimitiveArray<T>>()
-            .ok_or_else(|| Error::Execution("group key type changed during execution".into()))?;
+            .ok_or_else(|| {
+                Error::invalid_input("group key type changed during execution".into())
+            })?;
         ids.clear();
         ids.reserve(array.len());
         if array.null_count() == 0 {

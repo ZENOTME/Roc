@@ -82,7 +82,7 @@ impl SourceExec for EmptySource {
         if let Some(required_finishes) = self.required_finishes
             && self.prior_finishes.load(Ordering::SeqCst) != required_finishes
         {
-            return Err(Error::Execution(
+            return Err(Error::internal(
                 "dependent pipeline started too early".into(),
             ));
         }
@@ -140,7 +140,7 @@ impl SourceExecutor for WaitForCancelExecutor {
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             shutdown_guard.shutdown_requested().await;
-            Err(Error::Cancelled)
+            Err(Error::cancelled())
         })
     }
 }
@@ -189,11 +189,11 @@ impl SourceExecutor for FailingSourceExecutor {
             // next_batch before failure, so cancellation cannot skip the call.
             self.started.wait();
             if self.worker == 0 {
-                Err(Error::Execution("source failed".into()))
+                Err(Error::internal("source failed".into()))
             } else {
                 shutdown_guard.shutdown_requested().await;
                 self.cancelled_workers.fetch_add(1, Ordering::SeqCst);
-                Err(Error::Cancelled)
+                Err(Error::cancelled())
             }
         })
     }
@@ -283,7 +283,9 @@ fn caller_can_cancel_execution_without_a_tokio_runtime() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();
     shutdown.request_shutdown();
-    assert!(matches!(running.join().unwrap(), Err(Error::Cancelled)));
+    assert!(
+        matches!(running.join().unwrap(), Err(ref error) if error.kind() == roc::error::ErrorKind::Cancelled)
+    );
     futures::executor::block_on(shutdown);
 }
 
@@ -308,7 +310,9 @@ fn worker_failure_returns_without_shutdown_and_caller_stops_remaining_workers() 
         PipelineExecutionConfig::default(),
         2,
     ));
-    assert!(matches!(result, Err(Error::Execution(message)) if message == "source failed"));
+    assert!(
+        matches!(result, Err(ref error) if error.kind() == roc::error::ErrorKind::Internal && error.message() == "source failed")
+    );
     assert!(!observer.is_shutdown_requested());
     drop(observer);
     assert_eq!(cancelled_workers.load(Ordering::SeqCst), 0);
@@ -336,7 +340,9 @@ fn graph_failure_returns_before_caller_requests_shutdown() {
         .with_parallelism(2);
     let shutdown = executor.shutdown();
     let result = futures::executor::block_on(executor.execute());
-    assert!(matches!(result, Err(Error::Execution(message)) if message == "source failed"));
+    assert!(
+        matches!(result, Err(ref error) if error.kind() == roc::error::ErrorKind::Internal && error.message() == "source failed")
+    );
     assert_eq!(cancelled_workers.load(Ordering::SeqCst), 0);
     futures::executor::block_on(shutdown);
     assert_eq!(cancelled_workers.load(Ordering::SeqCst), 1);
@@ -368,4 +374,95 @@ fn dropping_graph_execution_does_not_request_shutdown() {
         drop(watch);
         shutdown.await;
     });
+}
+
+struct FaultSource(&'static str);
+impl SourceExec for FaultSource {
+    fn init_global_context(&self, _: &ShutdownGuard) -> Result<GlobalExecContextRef> {
+        if self.0 == "init" {
+            return Err(adapter_failure());
+        }
+        Ok(Arc::new(()))
+    }
+    fn new_executor(&self, _: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
+        assert_ne!(self.0, "pipeline", "injected pipeline panic");
+        Ok(Box::new(FaultSource(self.0)))
+    }
+    fn finalize<'a>(
+        &'a self,
+        _: GlobalExecContextRef,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if self.0 == "finalize" {
+                Err(adapter_failure())
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+impl SourceExecutor for FaultSource {
+    fn next_batch<'a>(
+        &'a mut self,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+        Box::pin(async move {
+            assert_ne!(self.0, "worker", "injected worker panic");
+            Ok(None)
+        })
+    }
+}
+fn adapter_failure() -> Error {
+    Error::new(roc::error::ErrorKind::Unavailable, "adapter unavailable")
+        .with_source(std::io::Error::from(std::io::ErrorKind::ConnectionReset))
+}
+
+#[tokio::test]
+async fn failures_preserve_causes_and_identify_lifecycle_or_task_boundary() {
+    use roc::error::ErrorKind;
+    for phase in ["init", "finalize", "pipeline", "worker"] {
+        let pipeline = Pipeline {
+            source: Box::new(FaultSource(phase)),
+            processors: vec![],
+            sink: Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
+        };
+        let graph = PipelineGraph::new(vec![pipeline], vec![vec![]]).unwrap();
+        let executor = PipelineGraphExecutor::new(graph)
+            .with_task_executor(TokioTaskExecutor(tokio::runtime::Handle::current()));
+        let shutdown = executor.shutdown();
+        let error = executor.execute().await.unwrap_err();
+        let cause = std::error::Error::source(&error).unwrap();
+        if phase == "pipeline" || phase == "worker" {
+            assert_eq!(error.kind(), ErrorKind::TaskFailed);
+            assert!(
+                cause
+                    .downcast_ref::<tokio::task::JoinError>()
+                    .unwrap()
+                    .is_panic()
+            );
+        } else {
+            assert_eq!(error.kind(), ErrorKind::Unavailable);
+            assert_eq!(
+                cause.downcast_ref::<std::io::Error>().unwrap().kind(),
+                std::io::ErrorKind::ConnectionReset
+            );
+        }
+        let operation = match phase {
+            "init" => "source.init",
+            "finalize" => "source.finalize",
+            "worker" => "worker.execute",
+            _ => "pipeline.execute",
+        };
+        assert!(
+            error
+                .frames()
+                .iter()
+                .any(|f| f.context.operation == operation)
+        );
+        let outer = error.frames().last().unwrap();
+        assert_eq!(outer.context.operation, "pipeline.execute");
+        assert!(outer.context.fields.contains(&("pipeline", "0".into())));
+        shutdown.await;
+    }
 }

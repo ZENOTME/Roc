@@ -208,11 +208,11 @@ fn update_scalar<const AND: bool>(col: &mut ConjunctionBuffer, input: &ScalarVal
 /// Merge an ordinary Boolean array into the existing result buffers.
 fn update_array<const AND: bool>(col: &mut ConjunctionBuffer, input: &ArrayRef) -> Result<()> {
     if input.len() != col.len {
-        return Err(Error::Execution("Boolean input lengths differ".into()));
+        return Err(Error::invalid_input("Boolean input lengths differ".into()));
     }
     let input = input
         .as_boolean_opt()
-        .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+        .ok_or_else(|| Error::invalid_input("expected Boolean expression".into()))?;
     update_bitmaps::<AND>(col, input.values(), input.nulls().map(NullBuffer::inner));
     Ok(())
 }
@@ -288,10 +288,7 @@ fn update_bitmaps<const AND: bool>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        error::Error,
-        expr::scalar::{ConstantExpression, ReferenceExpression},
-    };
+    use crate::expr::scalar::{ConstantExpression, ReferenceExpression};
     use arrow::array::ArrayRef;
     use arrow::array::Int64Array;
 
@@ -314,10 +311,8 @@ mod tests {
             )
             .to_evaluation()
             .unwrap();
-            assert!(
-                matches!(expression.evaluate(&executor), Err(Error::Execution(message))
-                if message.contains("column index 99"))
-            );
+            assert!(matches!(expression.evaluate(&executor), Err(ref error)
+                if error.kind() == crate::error::ErrorKind::InvalidInput && error.message().contains("column index 99")));
             // Process the earlier malformed result before evaluating the next argument.
             let expression = ConjunctionExpression::new(
                 conjunction,
@@ -333,10 +328,8 @@ mod tests {
             )
             .to_evaluation()
             .unwrap();
-            assert!(
-                matches!(expression.evaluate(&executor), Err(Error::Execution(message))
-                if message == "expected Boolean expression")
-            );
+            assert!(matches!(expression.evaluate(&executor), Err(ref error)
+                if error.kind() == crate::error::ErrorKind::InvalidInput && error.message() == "expected Boolean expression"));
             let empty = ScalarExpressionExecutor::new(&[], 0);
             assert!(
                 expression

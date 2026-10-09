@@ -15,7 +15,7 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
 use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     expr::scalar::ScalarExprRef,
 };
 use arrow::{array::AsArray, compute::filter_record_batch, record_batch::RecordBatch};
@@ -59,11 +59,14 @@ struct FilterExecutor {
 impl ProcessExecutor for FilterExecutor {
     fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
         let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        let predicate = self.predicate.evaluate(&executor)?;
+        let predicate = self
+            .predicate
+            .evaluate(&executor)
+            .with_context(|| ErrorContext::new("filter.predicate"))?;
         let predicate = predicate.into_array(input.num_rows())?;
         let mask = predicate
             .as_boolean_opt()
-            .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+            .ok_or_else(|| Error::invalid_input("expected Boolean expression".into()))?;
         // Arrow applies validity as part of the filter: only valid TRUE rows
         // pass. Keep that bitmap instead of expanding it to row indices and
         // rebuilding the same bitmap before filtering every column.
@@ -162,7 +165,7 @@ mod tests {
         let input = batch(BooleanArray::from(vec![true]));
         assert!(matches!(
             filter(&input, ConstantExpression::int64(Some(1)).into_ref()),
-            Err(Error::Execution(_))
+            Err(ref error) if error.kind() == crate::error::ErrorKind::InvalidInput
         ));
     }
     #[test]

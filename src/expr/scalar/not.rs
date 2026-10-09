@@ -80,7 +80,7 @@ impl NotExpressionEvaluation {
             ColumnValue::Array(new_empty_array(&DataType::Boolean))
         } else {
             let [argument] = input else {
-                return Err(Error::Execution("not requires one input result".into()));
+                return Err(Error::internal("not requires one input result".into()));
             };
 
             match argument {
@@ -88,9 +88,9 @@ impl NotExpressionEvaluation {
                     ColumnValue::Scalar(ScalarValue::Boolean(value.as_boolean()?.map(|v| !v)))
                 }
                 ColumnValue::Array(value) => {
-                    let value = value
-                        .as_boolean_opt()
-                        .ok_or_else(|| Error::Execution("expected Boolean expression".into()))?;
+                    let value = value.as_boolean_opt().ok_or_else(|| {
+                        Error::invalid_input("expected Boolean expression".into())
+                    })?;
                     ColumnValue::Array(Arc::new(not(value)?))
                 }
             }

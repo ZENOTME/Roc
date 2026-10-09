@@ -16,7 +16,7 @@ use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use super::kernels::EvalFn;
 use super::{ColumnValue, ScalarExprRef};
 use super::{ExpressionResultType, kernels};
-use crate::error::Result;
+use crate::error::{ErrorContext, Result, ResultExt};
 use arrow::{array::new_empty_array, datatypes::DataType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,13 +95,17 @@ impl FunctionExpression {
     }
 
     pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        match &self.arguments[..] {
+        let result = (|| match &self.arguments[..] {
             [argument] => Ok(UnaryFunctionExpressionEvaluation::try_new(self, argument)?.into()),
             [left, right] => {
                 Ok(BinaryFunctionExpressionEvaluation::try_new(self, left, right)?.into())
             }
             _ => unreachable!("function expressions are built as unary or binary"),
-        }
+        })();
+        result.with_context(|| {
+            ErrorContext::new("function.bind")
+                .field("function", format_args!("{:?}", self.function))
+        })
     }
 }
 
@@ -110,6 +114,7 @@ pub struct UnaryFunctionExpressionEvaluation {
     data_type: DataType,
     argument: Box<ScalarExpressionEvaluation>,
     eval_fn: EvalFn,
+    function: FunctionKind,
 }
 impl UnaryFunctionExpressionEvaluation {
     pub(super) fn try_new(
@@ -124,13 +129,18 @@ impl UnaryFunctionExpressionEvaluation {
             data_type: expression.result_type.data_type.clone(),
             argument: Box::new(argument_evaluation),
             eval_fn,
+            function: expression.function,
         })
     }
     pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         if executor.num_rows()? == 0 {
             return self.eval(executor, &[]);
         }
-        let argument = self.argument.evaluate(executor)?;
+        let argument = self.argument.evaluate(executor).with_context(|| {
+            ErrorContext::new("function.argument")
+                .field("function", format_args!("{:?}", self.function))
+                .field("argument", 0)
+        })?;
         self.eval(executor, &[argument])
     }
     fn eval(
@@ -141,7 +151,10 @@ impl UnaryFunctionExpressionEvaluation {
         Ok(if executor.num_rows()? == 0 {
             ColumnValue::Array(new_empty_array(&self.data_type))
         } else {
-            (self.eval_fn)(input)?
+            (self.eval_fn)(input).with_context(|| {
+                ErrorContext::new("function.evaluate")
+                    .field("function", format_args!("{:?}", self.function))
+            })?
         })
     }
 }
@@ -152,6 +165,7 @@ pub struct BinaryFunctionExpressionEvaluation {
     left: Box<ScalarExpressionEvaluation>,
     right: Box<ScalarExpressionEvaluation>,
     eval_fn: EvalFn,
+    function: FunctionKind,
 }
 
 impl BinaryFunctionExpressionEvaluation {
@@ -170,14 +184,23 @@ impl BinaryFunctionExpressionEvaluation {
             left: Box::new(left_evaluation),
             right: Box::new(right_evaluation),
             eval_fn,
+            function: expression.function,
         })
     }
     pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
         if executor.num_rows()? == 0 {
             return self.eval(executor, &[]);
         }
-        let left = self.left.evaluate(executor)?;
-        let right = self.right.evaluate(executor)?;
+        let left = self.left.evaluate(executor).with_context(|| {
+            ErrorContext::new("function.argument")
+                .field("function", format_args!("{:?}", self.function))
+                .field("argument", 0)
+        })?;
+        let right = self.right.evaluate(executor).with_context(|| {
+            ErrorContext::new("function.argument")
+                .field("function", format_args!("{:?}", self.function))
+                .field("argument", 1)
+        })?;
         self.eval(executor, &[left, right])
     }
     fn eval(
@@ -188,7 +211,10 @@ impl BinaryFunctionExpressionEvaluation {
         Ok(if executor.num_rows()? == 0 {
             ColumnValue::Array(new_empty_array(&self.data_type))
         } else {
-            (self.eval_fn)(input)?
+            (self.eval_fn)(input).with_context(|| {
+                ErrorContext::new("function.evaluate")
+                    .field("function", format_args!("{:?}", self.function))
+            })?
         })
     }
 }

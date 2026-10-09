@@ -56,7 +56,7 @@ impl Operator for FilterOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "filter operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

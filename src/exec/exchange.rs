@@ -14,7 +14,7 @@
 
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
     operator::{ExchangeId, ExchangeSinkOperator, ExchangeSourceOperator},
 };
@@ -43,17 +43,23 @@ impl ExchangeSourceExec {
 
 impl SourceExec for ExchangeSourceExec {
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        let handle = self.service.start_input(self.exchange, shutdown_guard)?;
+        let handle = self
+            .service
+            .start_input(self.exchange, shutdown_guard)
+            .with_context(|| {
+                ErrorContext::new("exchange.start").field("exchange", self.exchange)
+            })?;
         Ok(Arc::new(ExchangeSourceGlobalContext { handle }))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
         let global = global
             .downcast::<ExchangeSourceGlobalContext>()
             .map_err(|_| {
-                Error::Execution("exchange source received an invalid global context".into())
+                Error::internal("exchange source received an invalid global context".into())
             })?;
         Ok(Box::new(ExchangeSourceExecutor {
             consumer: global.handle.consumer(),
+            exchange: self.exchange,
             _global: global,
         }))
     }
@@ -67,9 +73,11 @@ impl SourceExec for ExchangeSourceExec {
             let global = global
                 .downcast::<ExchangeSourceGlobalContext>()
                 .map_err(|_| {
-                    Error::Execution("exchange source received an invalid global context".into())
+                    Error::internal("exchange source received an invalid global context".into())
                 })?;
-            global.handle.finish().await
+            global.handle.finish().await.with_context(|| {
+                ErrorContext::new("exchange.finish").field("exchange", self.exchange)
+            })
         })
     }
 }
@@ -79,6 +87,7 @@ struct ExchangeSourceGlobalContext {
 }
 
 struct ExchangeSourceExecutor {
+    exchange: ExchangeId,
     consumer: Box<dyn ExchangeConsumer>,
     _global: Arc<ExchangeSourceGlobalContext>,
 }
@@ -94,9 +103,9 @@ impl SourceExecutor for ExchangeSourceExecutor {
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
                 _ = cancelled => {
-                    Err(Error::Cancelled)
+                    Err(Error::cancelled())
                 },
-                batch = next => batch,
+                batch = next => batch.with_context(|| ErrorContext::new("exchange.next").field("exchange", self.exchange)),
             }
         })
     }
@@ -119,12 +128,19 @@ impl SinkExec for ExchangeSinkExec {
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
         global.downcast::<()>().map_err(|_| {
-            Error::Execution("exchange sink received an invalid global context".into())
+            Error::internal("exchange sink received an invalid global context".into())
         })?;
         let outputs = self
             .exchanges
             .iter()
-            .map(|exchange| self.service.create_sink(*exchange, &self.schema))
+            .map(|exchange| {
+                self.service
+                    .create_sink(*exchange, &self.schema)
+                    .map(|sink| (*exchange, sink))
+                    .with_context(|| {
+                        ErrorContext::new("exchange.create_sink").field("exchange", exchange)
+                    })
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(Box::new(ExchangeSinkExecutor { outputs }))
     }
@@ -136,7 +152,7 @@ impl SinkExec for ExchangeSinkExec {
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             global.downcast::<()>().map_err(|_| {
-                Error::Execution("exchange sink received an invalid global context".into())
+                Error::internal("exchange sink received an invalid global context".into())
             })?;
             Ok(())
         })
@@ -144,7 +160,7 @@ impl SinkExec for ExchangeSinkExec {
 }
 
 struct ExchangeSinkExecutor {
-    outputs: Vec<Box<dyn ExchangeSink>>,
+    outputs: Vec<(ExchangeId, Box<dyn ExchangeSink>)>,
 }
 
 impl SinkExecutor for ExchangeSinkExecutor {
@@ -154,8 +170,10 @@ impl SinkExecutor for ExchangeSinkExecutor {
         input: &'a RecordBatch,
     ) -> BoxFuture<'a, Result<SinkResult>> {
         Box::pin(async move {
-            for output in &mut self.outputs {
-                output.send(input, shutdown_guard).await?;
+            for (exchange, output) in &mut self.outputs {
+                output.send(input, shutdown_guard).await.with_context(|| {
+                    ErrorContext::new("exchange.send").field("exchange", *exchange)
+                })?;
             }
             Ok(SinkResult::NeedMoreInput)
         })

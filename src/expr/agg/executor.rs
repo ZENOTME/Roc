@@ -46,7 +46,7 @@ impl AggregateExpressionExecutor {
             .map(|argument| argument.result_type().data_type());
         // No accumulator implements it, so accepting it would silently drop DISTINCT.
         if expression.is_distinct() && expression.function() != AggregateFunction::Count {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "initial aggregate implementation supports DISTINCT only for COUNT(expr)".into(),
             ));
         }
@@ -78,7 +78,7 @@ impl AggregateExpressionExecutor {
     }
     pub fn update(&mut self, input: &RecordBatch, ids: &[usize], groups: usize) -> Result<()> {
         if ids.len() != input.num_rows() || ids.iter().any(|&id| id >= groups) {
-            return Err(Error::Execution(
+            return Err(Error::invalid_input(
                 "aggregate group IDs do not match input".into(),
             ));
         }
@@ -143,7 +143,7 @@ impl AggregateExpressionExecutor {
                 .zip(types)
                 .any(|(a, t)| a.len() != ids.len() || a.data_type() != &t)
         {
-            return Err(Error::Execution(format!(
+            return Err(Error::invalid_input(format!(
                 "invalid partial state for {:?}",
                 self.expression.function()
             )));
@@ -281,7 +281,7 @@ mod tests {
                 AggregateExpressionExecutor::try_new(Arc::new(expression.clone())).unwrap();
             for result in [grouped.update(&input, &[0, 0], 1)] {
                 assert!(
-                    matches!(result, Err(Error::Execution(message)) if message == format!("column index {index} out of bounds"))
+                    matches!(result, Err(ref error) if error.kind() == crate::error::ErrorKind::InvalidInput && error.message() == format!("column index {index} out of bounds"))
                 );
             }
             // When FILTER rejects every row, argument evaluation is skipped entirely,

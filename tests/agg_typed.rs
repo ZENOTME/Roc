@@ -264,8 +264,11 @@ fn unsupported_sum_result_types_are_rejected_during_construction() {
             output.clone(),
         )));
         match result {
-            Err(roc::error::Error::InvalidPlan(message)) => {
-                assert_eq!(message, format!("unsupported sum result type: {output}"));
+            Err(error) if error.kind() == roc::error::ErrorKind::Unsupported => {
+                assert_eq!(
+                    error.message(),
+                    format!("unsupported sum result type: {output}")
+                );
             }
             Err(error) => panic!("expected invalid plan for {output}, got {error}"),
             Ok(_) => panic!("SUM result type {output} must be rejected before execution"),

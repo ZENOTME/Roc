@@ -18,7 +18,7 @@ use super::ProjectionExecutor;
 use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
 use crate::expr::agg::executor::AggregateExpressionExecutor;
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::AggregateOperator,
 };
 use arrow::datatypes::SchemaRef;
@@ -78,8 +78,9 @@ impl AggregateState {
         let grouped = !groups.output_schema().fields().is_empty();
         let output_schema = operator.output_schema();
         let mut accumulators = vec![];
-        for aggregate in operator.aggregates() {
-            let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())?;
+        for (index, aggregate) in operator.aggregates().iter().enumerate() {
+            let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())
+                .with_context(|| ErrorContext::new("aggregate.bind").field("aggregate", index))?;
             if !grouped {
                 executor.resize(1);
                 executor.bind_global_count();
@@ -108,10 +109,12 @@ impl AggregateState {
         self.index
             .intern(groups.columns(), batch.num_rows(), &mut self.group_ids)?;
         let count = self.group_count();
-        for accumulator in &mut self.accumulators {
+        for (index, accumulator) in self.accumulators.iter_mut().enumerate() {
             // GroupIndex creates one in-range ID per input row. Validate once
             // at that boundary instead of rescanning IDs for every aggregate.
-            accumulator.update_validated(batch, &self.group_ids, count)?;
+            accumulator
+                .update_validated(batch, &self.group_ids, count)
+                .with_context(|| ErrorContext::new("aggregate.update").field("aggregate", index))?;
         }
         Ok(())
     }
@@ -126,8 +129,15 @@ impl AggregateState {
             &mut self.group_ids,
         )?;
         let count = self.group_count();
-        for (accumulator, state) in self.accumulators.iter_mut().zip(&partial.states) {
-            accumulator.merge(state, &self.group_ids, count)?;
+        for (index, (accumulator, state)) in self
+            .accumulators
+            .iter_mut()
+            .zip(&partial.states)
+            .enumerate()
+        {
+            accumulator
+                .merge(state, &self.group_ids, count)
+                .with_context(|| ErrorContext::new("aggregate.merge").field("aggregate", index))?;
         }
         Ok(())
     }
@@ -146,7 +156,12 @@ impl AggregateState {
         let states = self
             .accumulators
             .iter()
-            .map(|a| a.state())
+            .enumerate()
+            .map(|(index, a)| {
+                a.state().with_context(|| {
+                    ErrorContext::new("aggregate.partial").field("aggregate", index)
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(PartialAggregate { groups, states })
     }
@@ -158,8 +173,10 @@ impl AggregateState {
             return Ok(RecordBatch::new_empty(schema));
         }
         let mut columns = self.group_columns()?;
-        for accumulator in &self.accumulators {
-            columns.push(accumulator.evaluate()?);
+        for (index, accumulator) in self.accumulators.iter().enumerate() {
+            columns.push(accumulator.evaluate().with_context(|| {
+                ErrorContext::new("aggregate.evaluate").field("aggregate", index)
+            })?);
         }
         Ok(RecordBatch::try_new_with_options(
             schema,
@@ -218,7 +235,7 @@ impl SinkExec for AggregateSinkExec {
         let global = global
             .downcast::<AggregateSinkGlobalContext>()
             .map_err(|_| {
-                Error::Execution("aggregate sink received an invalid global context".into())
+                Error::internal("aggregate sink received an invalid global context".into())
             })?;
         Ok(Box::new(AggregateExecutor {
             global,
@@ -235,14 +252,14 @@ impl SinkExec for AggregateSinkExec {
             let global = global
                 .downcast::<AggregateSinkGlobalContext>()
                 .map_err(|_| {
-                    Error::Execution("aggregate sink received an invalid global context".into())
+                    Error::internal("aggregate sink received an invalid global context".into())
                 })?;
             let partials = std::mem::take(&mut *global.partials.lock().unwrap());
             let mut state = AggregateState::new(&self.operator)?;
             for partial in partials {
                 for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
                     if shutdown_guard.is_shutdown_requested() {
-                        return Err(Error::Cancelled);
+                        return Err(Error::cancelled());
                     }
                     state.merge(&partial.slice(
                         offset,
@@ -255,7 +272,7 @@ impl SinkExec for AggregateSinkExec {
             self.shared
                 .finalized
                 .set(batch)
-                .map_err(|_| Error::Execution("aggregate sink finalized more than once".into()))
+                .map_err(|_| Error::internal("aggregate sink finalized more than once".into()))
         })
     }
 }
@@ -289,7 +306,7 @@ struct AggregateSourceGlobalContext {
 impl SourceExec for AggregateSourceExec {
     fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
         let batch = self.shared.finalized.get().cloned().ok_or_else(|| {
-            Error::Execution("aggregate source initialized before sink finalization".into())
+            Error::internal("aggregate source initialized before sink finalization".into())
         })?;
         Ok(Arc::new(AggregateSourceGlobalContext {
             batch,
@@ -300,7 +317,7 @@ impl SourceExec for AggregateSourceExec {
         let global = global
             .downcast::<AggregateSourceGlobalContext>()
             .map_err(|_| {
-                Error::Execution("aggregate source received an invalid global context".into())
+                Error::internal("aggregate source received an invalid global context".into())
             })?;
         Ok(Box::new(AggregateSourceExecutor { global }))
     }
@@ -324,7 +341,7 @@ impl SourceExecutor for AggregateSourceExecutor {
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             let offset = self
                 .global
@@ -924,7 +941,7 @@ mod tests {
             .expect("operator construction does not validate aggregates");
             assert!(matches!(
                 AggregateState::new(&operator),
-                Err(Error::InvalidPlan(_))
+                Err(ref error) if error.kind() == crate::error::ErrorKind::InvalidPlan
             ));
         }
     }
@@ -940,7 +957,7 @@ mod tests {
             let expression = AggregateExpression::new(function, None, DataType::Float64, true);
             assert!(matches!(
                 AggregateExpressionExecutor::try_new(Arc::new(expression)),
-                Err(Error::InvalidPlan(_))
+                Err(ref error) if error.kind() == crate::error::ErrorKind::InvalidPlan
             ));
         }
 
@@ -1013,7 +1030,7 @@ mod tests {
         );
         assert!(matches!(
             AggregateState::new(&operator),
-            Err(Error::InvalidPlan(message)) if message == "unsupported sum result type: Utf8"
+            Err(ref error) if error.kind() == crate::error::ErrorKind::Unsupported && error.message() == "unsupported sum result type: Utf8"
         ));
     }
 
