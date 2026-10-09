@@ -1,0 +1,97 @@
+pr,change,workload,threads,datafusion_ms,roc_ms,previous_roc_ms,step_time_reduction_percent,baseline_time_reduction_percent
+2,Converter + main core (baseline),scan_only,1,105.879834,106.165562,106.165562,0.000000,0.000000
+2,Converter + main core (baseline),filter_project,1,98.719771,147.449770,147.449770,0.000000,0.000000
+2,Converter + main core (baseline),global_aggregate,1,37.842271,66.814875,66.814875,0.000000,0.000000
+2,Converter + main core (baseline),grouped_aggregate,1,70.628771,155.799396,155.799396,0.000000,0.000000
+2,Converter + main core (baseline),scan_only,4,30.683500,28.822146,28.822146,0.000000,0.000000
+2,Converter + main core (baseline),filter_project,4,29.464292,40.757355,40.757355,0.000000,0.000000
+2,Converter + main core (baseline),global_aggregate,4,11.261896,18.419291,18.419291,0.000000,0.000000
+2,Converter + main core (baseline),grouped_aggregate,4,20.346792,41.115209,41.115209,0.000000,0.000000
+3,Predicate bitmap,scan_only,1,106.181041,107.913292,106.165562,-1.646230,-1.646230
+3,Predicate bitmap,filter_project,1,98.199062,108.518458,147.449770,26.403101,26.403101
+3,Predicate bitmap,global_aggregate,1,38.981521,68.473562,66.814875,-2.482512,-2.482512
+3,Predicate bitmap,grouped_aggregate,1,69.540084,150.021041,155.799396,3.708843,3.708843
+3,Predicate bitmap,scan_only,4,30.927834,29.197876,28.822146,-1.303614,-1.303614
+3,Predicate bitmap,filter_project,4,29.031354,30.194771,40.757355,25.915774,25.915774
+3,Predicate bitmap,global_aggregate,4,11.140333,18.331958,18.419291,0.474139,0.474139
+3,Predicate bitmap,grouped_aggregate,4,20.232020,40.011626,41.115209,2.684124,2.684124
+4,Scalar constants,scan_only,1,106.784521,107.157041,107.913292,0.700795,-0.933899
+4,Scalar constants,filter_project,1,98.423062,104.772375,108.518458,3.452024,28.943684
+4,Scalar constants,global_aggregate,1,38.876896,68.510666,68.473562,-0.054187,-2.538045
+4,Scalar constants,grouped_aggregate,1,70.195604,151.848021,150.021041,-1.217816,2.536194
+4,Scalar constants,scan_only,4,30.816292,28.947874,29.197876,0.856230,-0.436222
+4,Scalar constants,filter_project,4,29.234500,28.751021,30.194771,4.781455,29.458079
+4,Scalar constants,global_aggregate,4,11.145792,18.281833,18.331958,0.273430,0.746272
+4,Scalar constants,grouped_aggregate,4,20.427000,40.485583,40.011626,-1.184549,1.531369
+5,Global path / COUNT batch reduction; checked SUM,scan_only,1,103.032167,103.370063,107.157041,3.534045,2.633151
+5,Global path / COUNT batch reduction; checked SUM,filter_project,1,96.068250,102.658729,104.772375,2.017370,30.377152
+5,Global path / COUNT batch reduction; checked SUM,global_aggregate,1,37.270646,69.378333,68.510666,-1.266469,-3.836658
+5,Global path / COUNT batch reduction; checked SUM,grouped_aggregate,1,68.342771,151.523229,151.848021,0.213893,2.744662
+5,Global path / COUNT batch reduction; checked SUM,scan_only,4,30.361396,28.804938,28.947874,0.493774,0.059706
+5,Global path / COUNT batch reduction; checked SUM,filter_project,4,29.078042,28.777000,28.751021,-0.090359,29.394338
+5,Global path / COUNT batch reduction; checked SUM,global_aggregate,4,11.075313,19.210167,18.281833,-5.077902,-4.293735
+5,Global path / COUNT batch reduction; checked SUM,grouped_aggregate,4,20.224312,41.178313,40.485583,-1.711052,-0.153481
+6,Typed SUM states,scan_only,1,105.349354,105.549855,103.370063,-2.108726,0.579951
+6,Typed SUM states,filter_project,1,99.113563,105.222062,102.658729,-2.496946,28.638707
+6,Typed SUM states,global_aggregate,1,38.743917,47.935271,69.378333,30.907434,28.256589
+6,Typed SUM states,grouped_aggregate,1,70.589313,139.146938,151.523229,8.167917,10.688397
+6,Typed SUM states,scan_only,4,31.191709,29.186084,28.804938,-1.323198,-1.262703
+6,Typed SUM states,filter_project,4,29.202729,28.876480,28.777000,-0.345691,29.150260
+6,Typed SUM states,global_aggregate,4,11.116833,13.132708,19.210167,31.636677,28.701337
+6,Typed SUM states,grouped_aggregate,4,20.390895,36.839542,41.178313,10.536544,10.399235
+7,Integer grouping index,scan_only,1,105.262104,106.393292,105.549855,-0.799089,-0.214504
+7,Integer grouping index,filter_project,1,97.889938,104.547938,105.222062,0.640669,29.095897
+7,Integer grouping index,global_aggregate,1,38.176229,46.712438,47.935271,2.551009,30.086770
+7,Integer grouping index,grouped_aggregate,1,69.721417,76.018333,139.146938,45.368303,51.207556
+7,Integer grouping index,scan_only,4,31.061374,28.967375,29.186084,0.749361,-0.503880
+7,Integer grouping index,filter_project,4,29.055395,28.839583,28.876480,0.127774,29.240788
+7,Integer grouping index,global_aggregate,4,11.118291,13.085125,13.132708,0.362328,28.959673
+7,Integer grouping index,grouped_aggregate,4,20.425750,20.870063,36.839542,43.348745,49.240042
+8,Argument preparation / validation,scan_only,1,106.168791,105.732938,106.393292,0.620673,0.407500
+8,Argument preparation / validation,filter_project,1,98.107042,104.457062,104.547938,0.086922,29.157528
+8,Argument preparation / validation,global_aggregate,1,38.966354,47.884542,46.712438,-2.509190,28.332514
+8,Argument preparation / validation,grouped_aggregate,1,69.690625,73.158229,76.018333,3.762387,53.043317
+8,Argument preparation / validation,scan_only,4,30.926229,29.024417,28.967375,-0.196916,-0.701788
+8,Argument preparation / validation,filter_project,4,29.074438,28.655833,28.839583,0.637145,29.691627
+8,Argument preparation / validation,global_aggregate,4,11.202583,12.990666,13.085125,0.721877,29.472496
+8,Argument preparation / validation,grouped_aggregate,4,20.254166,20.047521,20.870063,3.941251,51.240619
+9,NULL density loops,scan_only,1,107.396501,107.858417,105.732938,-2.010234,-1.594542
+9,NULL density loops,filter_project,1,100.101729,105.913062,104.457062,-1.393875,28.170073
+9,NULL density loops,global_aggregate,1,38.082313,46.300542,47.884542,3.307957,30.703243
+9,NULL density loops,grouped_aggregate,1,70.098125,71.173312,73.158229,2.713183,54.317337
+9,NULL density loops,scan_only,4,30.961542,29.233167,29.024417,-0.719224,-1.426060
+9,NULL density loops,filter_project,4,29.149208,28.798354,28.655833,-0.497352,29.341946
+9,NULL density loops,global_aggregate,4,11.130958,12.683834,12.990666,2.361950,31.138320
+9,NULL density loops,grouped_aggregate,4,20.426709,19.640980,20.047521,2.027889,52.229406
+10,Whole-batch forwarding,scan_only,1,106.391854,106.808770,107.858417,0.973171,-0.605854
+10,Whole-batch forwarding,filter_project,1,98.123708,104.589479,105.913062,1.249689,29.067723
+10,Whole-batch forwarding,global_aggregate,1,38.572875,46.383396,46.300542,-0.178949,30.579237
+10,Whole-batch forwarding,grouped_aggregate,1,69.879854,71.549271,71.173312,-0.528230,54.076028
+10,Whole-batch forwarding,scan_only,4,30.662938,28.940959,29.233167,0.999577,-0.412228
+10,Whole-batch forwarding,filter_project,4,28.895521,28.852458,28.798354,-0.187874,29.209198
+10,Whole-batch forwarding,global_aggregate,4,11.117730,12.685875,12.683834,-0.016095,31.127237
+10,Whole-batch forwarding,grouped_aggregate,4,20.186917,19.240292,19.640980,2.040059,53.203954
+11,Pending-only cancellation waiters,scan_only,1,106.010271,106.710188,106.808770,0.092298,-0.512996
+11,Pending-only cancellation waiters,filter_project,1,99.646271,104.677375,104.589479,-0.084039,29.008113
+11,Pending-only cancellation waiters,global_aggregate,1,37.990938,45.770291,46.383396,1.321819,31.496854
+11,Pending-only cancellation waiters,grouped_aggregate,1,69.501521,70.228291,71.549271,1.846252,54.923900
+11,Pending-only cancellation waiters,scan_only,4,30.582979,28.828355,28.940959,0.389084,-0.021541
+11,Pending-only cancellation waiters,filter_project,4,29.180271,28.850042,28.852458,0.008374,29.215126
+11,Pending-only cancellation waiters,global_aggregate,4,11.124730,12.716396,12.685875,-0.240590,30.961536
+11,Pending-only cancellation waiters,grouped_aggregate,4,20.192417,19.161020,19.240292,0.412008,53.396757
+12,Arrow scalar comparison,scan_only,1,105.642000,105.945271,106.710188,0.716817,0.207498
+12,Arrow scalar comparison,filter_project,1,98.710646,103.477146,104.677375,1.146599,29.822105
+12,Arrow scalar comparison,global_aggregate,1,38.073146,45.996667,45.770291,-0.494590,31.158044
+12,Arrow scalar comparison,grouped_aggregate,1,69.928250,70.720667,70.228291,-0.701106,54.607869
+12,Arrow scalar comparison,scan_only,4,30.709499,28.756417,28.828355,0.249539,0.228052
+12,Arrow scalar comparison,filter_project,4,29.019625,28.297563,28.850042,1.915002,30.570658
+12,Arrow scalar comparison,global_aggregate,4,11.296625,12.852021,12.716396,-1.066533,30.225218
+12,Arrow scalar comparison,grouped_aggregate,4,20.233833,19.182958,19.161020,-0.114493,53.343400
+13,Borrowed direct arguments,scan_only,1,105.194063,105.257645,105.945271,0.649038,0.855190
+13,Borrowed direct arguments,filter_project,1,98.226917,102.702771,103.477146,0.748354,30.347284
+13,Borrowed direct arguments,global_aggregate,1,38.066750,45.926063,45.996667,0.153498,31.263715
+13,Borrowed direct arguments,grouped_aggregate,1,69.700438,70.406708,70.720667,0.443941,54.809383
+13,Borrowed direct arguments,scan_only,4,30.827438,28.880458,28.756417,-0.431352,-0.202317
+13,Borrowed direct arguments,filter_project,4,28.968083,28.179729,28.297563,0.416410,30.859769
+13,Borrowed direct arguments,global_aggregate,4,11.119291,12.686875,12.852021,1.284977,31.121808
+13,Borrowed direct arguments,grouped_aggregate,4,20.332980,19.210812,19.182958,-0.145202,53.275653

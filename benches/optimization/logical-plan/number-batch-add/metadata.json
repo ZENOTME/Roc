@@ -1,0 +1,144 @@
+{
+  "purpose": "Compare PR #35 macro implementation with the NumberBatchAdd refactor. Identical SQL, data, overflow semantics and harness.",
+  "old_core_commit": "37708712d41b2a51ab30ca951ca98c1e144b3274",
+  "variants": {
+    "macro": {
+      "base_local_commit": "b57681fa2fb5aaca1b31a2cf889b8be459ac8bd7",
+      "source_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/macro/source",
+      "compiled_source_sha256": "baacb33fb07fafcf939230f74ba2b369fd27ce12af31344db7add78ef26f9255",
+      "core_source_sha256": "9b41a05ec407826f4822a83cd3138026add7b11d8a2f20b05fc273ff58a97bf6",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/macro/benchmark",
+      "binary_sha256": "847c168cb8d8dc341c06d61340d230d0fcee262667913ce9d17df83425cc2bf5",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "core_commit": "37708712d41b2a51ab30ca951ca98c1e144b3274",
+      "source_matches_core_commit": true
+    },
+    "helper": {
+      "base_local_commit": "f11eb6186f2cfc118b520cbc9bc1bb11acb03815",
+      "source_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/helper/source",
+      "compiled_source_sha256": "74ddd4ee90f0b08b0d11b8ce9f38a2fd3dddf10397ded97cb8d63540a7108f2b",
+      "core_source_sha256": "8d00de1ce8b52747d5dd3ed9ec74d9aca187c1cab452d49e32b6afacb701f789",
+      "binary_path": "/Users/zenotme/Project/Roc/target/global-sum-diagnostics/number-batch-add/helper/benchmark",
+      "binary_sha256": "44c4b57e82360718cc91d268f947ebc90aedf44b79f07c38db7374ede0f6f9b6",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "core_commit": "ff096d95f29a55da4fd7a38956d8fd8ed110ca4a",
+      "source_matches_core_commit": true
+    }
+  },
+  "probe_sha256": "c75c5f1ca94c8a132b4af43a403e8fcf7089a79a19374894c8d7190a4997e522",
+  "new_core_commit": "ff096d95f29a55da4fd7a38956d8fd8ed110ca4a",
+  "new_local_commit": "f11eb6186f2cfc118b520cbc9bc1bb11acb03815",
+  "design": {
+    "data_directory": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+    "input_files": [
+      {
+        "name": "part-000.parquet",
+        "bytes": 6451300,
+        "sha256": "fc4ca32257ca5dfda30ba5bcf65457dafe2cb53f720c3e662e2a290a0a6f2309"
+      },
+      {
+        "name": "part-001.parquet",
+        "bytes": 6452352,
+        "sha256": "902c1ce6cbaadc87eebbdcb9641112af154cb1ac0dfdfe8f9b6fc39fc58d29f8"
+      },
+      {
+        "name": "part-002.parquet",
+        "bytes": 6451712,
+        "sha256": "79a3f0f87624f91bf40fc73ed6947509c868c3385ecf2836576cf8be4c812573"
+      },
+      {
+        "name": "part-003.parquet",
+        "bytes": 6451759,
+        "sha256": "7a65084a02920074ce0fe1358f79b4ef718c3f6d871eead217ca0d1f532f9e54"
+      },
+      {
+        "name": "part-004.parquet",
+        "bytes": 6451976,
+        "sha256": "517b24321a1ed0bc4b8408337a51d703175a378844a2e9a1bb4acf440c2f6387"
+      },
+      {
+        "name": "part-005.parquet",
+        "bytes": 6451555,
+        "sha256": "f828bdd19dbac842facacaa2a67043ac9c241419c14f8ae59a2bd8199554d89a"
+      },
+      {
+        "name": "part-006.parquet",
+        "bytes": 6452163,
+        "sha256": "521d73b24508cf6bf38fe06d5c84ca9bd06af54600303ddf82966cf708927554"
+      },
+      {
+        "name": "part-007.parquet",
+        "bytes": 6451536,
+        "sha256": "0e86c32fd189a4a16139ad22c0da5283eda8f24db4ad7f91d250deb36213d7e6"
+      }
+    ],
+    "replicas_per_stage": 10,
+    "timed_samples_per_case_engine": 10,
+    "warmups": 2,
+    "process_orders": [
+      [
+        "helper",
+        "macro"
+      ],
+      [
+        "helper",
+        "macro"
+      ],
+      [
+        "helper",
+        "macro"
+      ],
+      [
+        "macro",
+        "helper"
+      ],
+      [
+        "macro",
+        "helper"
+      ],
+      [
+        "helper",
+        "macro"
+      ],
+      [
+        "macro",
+        "helper"
+      ],
+      [
+        "helper",
+        "macro"
+      ],
+      [
+        "macro",
+        "helper"
+      ],
+      [
+        "macro",
+        "helper"
+      ]
+    ],
+    "order": "Ten balanced paired processes (five baseline-first/five candidate-first, randomized); three engine orders rotate within each sample. No compilation during timing. No observations trimmed.",
+    "sql": "SELECT SUM(value) AS total, COUNT(value) AS count FROM p (Parquet) or m (resident same decoded column)",
+    "batch_rows": 8192,
+    "threads": [
+      1,
+      4
+    ],
+    "timing": "Native collect or Roc execute through shutdown and output extraction; SQL/planning/conversion/Roc graph construction excluded; complete execution including Parquet decode included for p. Correctness/schema checked after each run, outside timers.",
+    "samples": {
+      "full_path": 2400,
+      "kernel": 4400
+    },
+    "statistics": "Geometric mean of ten per-process medians. 95% intervals resample the paired process-level log ratios (10000 resamples). Kernels include exact accumulator source in the example, compiled separately; full paths execute the core library."
+  },
+  "validation": {
+    "core_release_tests": 132,
+    "all_targets_check": true,
+    "new_core_warnings": false,
+    "timed_source_matches_core": true,
+    "integer_core_vector_additions": {
+      "macro": 7,
+      "helper": 7
+    }
+  }
+}

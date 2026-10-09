@@ -1,0 +1,104 @@
+{
+  "local_source": "1c2af64854fe30baca4ee149260a8ffc3e3271f3",
+  "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+  "core_heads": {
+    "12": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+    "15": "07919a785169557521d188860ee2c78f50b3a62d",
+    "16": "b308030a737e2b705a0bde2ba6b2e1cec0f1f390"
+  },
+  "variants": {
+    "all": {
+      "changes": [],
+      "compiled_source_sha256": "c905f2e9e5be452d7ea357e019424631e3106c9c90068801511dc4657950714f",
+      "binary_sha256": "20da6b2bc6f7a42b3936844d54087dd383005973fc4df7d88e357352219e138d",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local-source_archive_sha256": "98002979fec902a647a4c5cda004024b34ac3197e9009e4fd2bc435d9c264ad9",
+      "core-source_archive_sha256": "baa87caf365788056588288aeaf161a0c55fe50c5fa0fc33e80db6c6961fe70b"
+    },
+    "without12": {
+      "changes": [
+        {
+          "path": "src/expr/scalar/kernels.rs",
+          "restored_from": "47f1511b67561bae0b6c7654e71355f20d1d2e7b"
+        }
+      ],
+      "compiled_source_sha256": "031de39b59ee4860e138ad232ddc17ed7719be6863e220332c98bd4d69038103",
+      "binary_sha256": "de42fa1d2ec9969881c57821e047a04aa8876c43a44949016dbed16186cdb0b3",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local-source_archive_sha256": "e1421df2d349b9a7ef11c562ada868c964d0cdb8d956382d59340edd3231a224",
+      "core-source_archive_sha256": "ece0d8e87638fcaadb346dcfb71aedb495f2469e00214d438d89ae93faf0c3d1"
+    },
+    "without15": {
+      "changes": [
+        {
+          "path": "src/exec/aggregate.rs",
+          "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+        },
+        {
+          "path": "src/expr/agg/accumulator.rs",
+          "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+        },
+        {
+          "path": "src/expr/agg/executor.rs",
+          "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+        },
+        {
+          "removed": "tests/agg_optimized.rs"
+        }
+      ],
+      "compiled_source_sha256": "cd01347de3e1a5fc9e47e47df2a577425bd5fc916fbcf6b4db2bc52022799c0d",
+      "binary_sha256": "60aa6353ce699223de483855288e60eac455d99933322ebbd4218f5af347774b",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local-source_archive_sha256": "9ac69982a50920e4ad193d469f93f619f7ddadda201b4f24942467f84c25c25d",
+      "core-source_archive_sha256": "e08ec2d4c7c2c9838f950c3907610be198602244da80d16a9a99bf62e9a2a366"
+    },
+    "without16": {
+      "changes": [
+        {
+          "path": "src/exec/filter.rs",
+          "restored_from": "07919a785169557521d188860ee2c78f50b3a62d"
+        },
+        {
+          "path": "src/operator/filter.rs",
+          "restored_from": "07919a785169557521d188860ee2c78f50b3a62d"
+        },
+        {
+          "path": "integrations/datafusion/src/converter.rs",
+          "change": "Disable local projection/filter fusion and column index remapping; keep ordinary projection above full-schema filter."
+        }
+      ],
+      "compiled_source_sha256": "b6527c92ade5eaf729b8954a8cbf579280ab170b976392b4dc4e6376d0504aad",
+      "binary_sha256": "40288a3bff8df22663a3cf51ae4435b71379d50fde9a80a1acb3b3c34ab869d6",
+      "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+      "local-source_archive_sha256": "fed0506390057b8756b1f35ec03568aca6d4955b17d98a16757351cabfb35d3f",
+      "core-source_archive_sha256": "cb52b8cd7371aa2a73b51da94bbb7e6dbc6c035584e8a885095e8a1c8843db5e"
+    }
+  },
+  "design": {
+    "replicas": 5,
+    "samples_per_case": 7,
+    "warmups": 2,
+    "threads": [
+      1,
+      4
+    ],
+    "input": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+    "comparison": "Remove one optimization at a time from the exact current local harness; retain all others. Without16 also disables local converter fusion/remapping. Timed full SQL execution over 4M deterministic Snappy Parquet rows, with planning outside timing. All four workloads, including unaffected controls, are measured."
+  },
+  "machine": "Apple M1 Pro",
+  "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "samples": {
+    "roc": 1120,
+    "datafusion": 1120,
+    "total": 2240
+  },
+  "statistics": "Geometric mean of five process medians per variant/case. Paired process log ratios with 10000 five-cluster bootstrap resamples for 95% intervals. Variant order randomized per replica; native DataFusion versus Roc order alternates per timed sample. Effects are not additive.",
+  "compiler_artifact_control": "Copied path-dependency builds initially reused a Roc artifact; caught by the required Compiling roc log assertion before any timing. Final builds clean only Roc release artifacts, explicitly rebuild Roc and its DataFusion harness, capture separate binaries and verify compiled source and binary hashes in every process report. No compilation overlapped timing.",
+  "decisions": {
+    "12": "Retain: replaces a handwritten scalar comparison implementation with existing Arrow kernels, net removes 34 production lines; affected SQL filter/project is about 1.8%-2.0% faster in this setup. Simplification is the principal reason; small control movements limit causal claims about timing.",
+    "15": "Close/defer: no stable global Int64 SUM/COUNT query improvement at one or four threads; adds a global route, duplicates FILTER/argument preparation and creates fallback group-ID vectors per batch. No conclusion is claimed for every possible type/workload or future implementation.",
+    "16": "Retain: about 4.5%-5.2% lower SQL filter/project elapsed time, removes real predicate-only column filtering work. Optional output-column selection preserves default behavior.",
+    "14": "Retain: evidence documentation adds no runtime execution path; records exact measured identities and scope."
+  }
+}

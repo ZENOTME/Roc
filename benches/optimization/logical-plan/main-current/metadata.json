@@ -1,0 +1,43 @@
+{
+  "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+  "local_harness": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+  "core_source_tree": "34ca23507da8768803bc4b6641b55396ec006591",
+  "core_tests_tree": "5c61a6cff8952a135cda0f77903b1fa98eb4b561",
+  "core_source_and_tests_match_main": true,
+  "compiled_source_sha256": "cd01347de3e1a5fc9e47e47df2a577425bd5fc916fbcf6b4db2bc52022799c0d",
+  "binary_sha256": "46eb9d910502395d33c1ee9042db59f6fc13e8c0147a75315ffb7ca98fdb8249",
+  "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+  "build_label": "main-291317e-current",
+  "compiler_artifact_control": "Clean Roc release artifacts, require both Roc and local harness to compile, preserve binary, verify compiled source and executable hashes in every process. No builds overlap timing.",
+  "design": {
+    "replicas": 5,
+    "samples_per_case_per_engine": 10,
+    "warmups_per_engine": 2,
+    "threads": [
+      1,
+      4
+    ],
+    "batch_rows": 8192,
+    "rows": 4000000,
+    "groups": 256,
+    "input": "/Users/zenotme/Project/Roc/target/parquet-snappy/data-1791083916888251000",
+    "cache": "warm operating-system page cache; Parquet decode occurs inside every execution",
+    "order": "Four workloads in the recorded fixed order, one thread then four threads. Engine order alternates per sample. Five sequential independent processes; no compilation or other benchmarks during timing."
+  },
+  "sample_counts": {
+    "roc": 400,
+    "datafusion": 400,
+    "total": 800
+  },
+  "statistics": "Geometric mean of five process medians, ten timed samples per case/engine/process. Gap=(Roc/DF-1)*100; positive is slower. 10000 paired process cluster bootstrap resamples for 95% intervals; five clusters only. Intervals exclude neither fixed-order nor machine/system confounding.",
+  "machine": "Apple M1 Pro",
+  "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "datafusion": "55.1.0",
+  "arrow": "59.3.0",
+  "date": "2026-10-07",
+  "core_source_archive_sha256": "5fa4565e5d81927c08a4ac222df9ce73a78fd4f6117cd2533ff23064374a56b0",
+  "core_source_archive_scope": "Unmodified main src, tests, benches, Cargo.toml and Cargo.lock; no DataFusion integration. Main manifests differ from the locally compiled workspace manifests, which add the harness and its locked dependencies. Core src/tests match exactly.",
+  "local_source_archive_sha256": "bb0639e32190924e01a7ef06eabbc48f3fb6afe4736aa07da8a01358ad12ef53",
+  "local_source_archive_scope": "Exact compiled core and local integration, tests and workspace manifests, retained locally only."
+}

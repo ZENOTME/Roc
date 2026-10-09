@@ -1,0 +1,2695 @@
+{
+  "main": "c4f9d2634a7f443b755fb5609d578714b382234a",
+  "local_benchmark_branch": "codex/local-datafusion-benchmark",
+  "raw_archive_commit": "1da4ca4843f387c67d7c25ebbb428f8715247bc3",
+  "checkpoints": [
+    {
+      "pr": 3,
+      "new_core_commit": "186367f94519be94f490ee47b561dbad319731f7",
+      "local_benchmark_checkpoint": "cde6f225fd7a2bb99ebc58b1a6c518cb5825d524",
+      "core_and_tests_sha256": "f80d159514f6c9e5f1f62e3ed159934a2c770a90b330fd16a0e46384fd42d3ee",
+      "exact_match": true,
+      "core_tests_passed": 80
+    },
+    {
+      "pr": 4,
+      "new_core_commit": "eff0b6c7a93f08d83f09b8b723c103c080ff0eff",
+      "local_benchmark_checkpoint": "b4cfe59e6a350e3ca4beece94958df6637640a79",
+      "core_and_tests_sha256": "d754dc7fe01b29b06f0c395dab509547b59d04ffd50ef8da355897327fe0d1c8",
+      "exact_match": true,
+      "core_tests_passed": 84
+    },
+    {
+      "pr": 5,
+      "new_core_commit": "f5155d7e1270116f9d79766ec5569fed8ed8aaff",
+      "local_benchmark_checkpoint": "e00f2304f2f922885c8aa1b5aa5094c663dce37a",
+      "core_and_tests_sha256": "b0790ded1207544a3d909a6a7698945b3d20d999fdb37c7a6e5ca12fcf8a155c",
+      "exact_match": true,
+      "core_tests_passed": 92
+    },
+    {
+      "pr": 6,
+      "new_core_commit": "1946b3cb2142b5298b7045336e74c551e7d30f13",
+      "local_benchmark_checkpoint": "853d7a053610d91bbb9ec87918820b7a65324b42",
+      "core_and_tests_sha256": "e29659224bea8a1b1b8c0c1c269c7b83e6689f8a66afa4ec0d57288ac2cb7c54",
+      "exact_match": true,
+      "core_tests_passed": 93
+    },
+    {
+      "pr": 7,
+      "new_core_commit": "a8e1f9e9d19af4ca5ef7cfcdfd8f1069a3899f7a",
+      "local_benchmark_checkpoint": "87caa80cf545e5cb5f0996507223b2c5645fd26c",
+      "core_and_tests_sha256": "352c09e60ff89054076168763633ebaff0581876fd529d743900212719248e5a",
+      "exact_match": true,
+      "core_tests_passed": 97
+    },
+    {
+      "pr": 8,
+      "new_core_commit": "412a6664e5033b25d3f94d3cc38e5b1ee831a970",
+      "local_benchmark_checkpoint": "8ea76c0ff367411ec52b5164b152d6e60737bb70",
+      "core_and_tests_sha256": "543dd3abe41edd6dae093905e4076fd47a1305b35ad0b1a9f825d7056a3d8f48",
+      "exact_match": true,
+      "core_tests_passed": 100
+    },
+    {
+      "pr": 9,
+      "new_core_commit": "db380fd2237b3b3512ade9b16a382539ce47ff79",
+      "local_benchmark_checkpoint": "f273e5f6ef0a7aef94c266aa5846309c37eb3819",
+      "core_and_tests_sha256": "e046fa68e3a86c663fc9f20dd90e9a5ee8e5b56bd052a9d496d3c9e564627fa1",
+      "exact_match": true,
+      "core_tests_passed": 102
+    },
+    {
+      "pr": 10,
+      "new_core_commit": "b42c4bbc17c2d8f9132d4de621f35160a21013bc",
+      "local_benchmark_checkpoint": "a676b85c5f223e885f295056dfefeacd5630ac5c",
+      "core_and_tests_sha256": "a04ba152d39a5cfdddafeb298c0b5c77745f6adeabe603c6c762a530599f0d5c",
+      "exact_match": true,
+      "core_tests_passed": 103
+    },
+    {
+      "pr": 11,
+      "new_core_commit": "2eb643a897927295193aed6d95b58dafa6731082",
+      "local_benchmark_checkpoint": "5cb73b58a2d4719544c7cd1259d1d3a738c6c681",
+      "core_and_tests_sha256": "e6057cd1d9f28b2c5a3d94f9adf6d42cd8d87980b33cc11c78cb9851243d4fdb",
+      "exact_match": true,
+      "core_tests_passed": 105
+    },
+    {
+      "pr": 12,
+      "new_core_commit": "29affbe6c938830bcd1c460e9a8ccddba0f738fb",
+      "local_benchmark_checkpoint": "11f469e33b933d6c167073d6c83dc528b6410ac0",
+      "core_and_tests_sha256": "1936fd671c4b91d226246362dd7e6f5030561a53703f8b502abc1c88e9565759",
+      "exact_match": true,
+      "core_tests_passed": 105
+    },
+    {
+      "pr": 13,
+      "new_core_commit": "a14c63f9e5dbd499178ce321c2cec1f8aa91bdc0",
+      "local_benchmark_checkpoint": "9c72fa139a249e5c931b9ea0eeeffdb2d7a0fd56",
+      "core_and_tests_sha256": "051b5fb7912a4d6c8021d9e135114c7f78572429cbad08b4acd6043ae5cdf59b",
+      "exact_match": true,
+      "core_tests_passed": 105
+    },
+    {
+      "pr": 15,
+      "new_core_commit": "b2fa727a2de41fb6ad35621f2b4f43dda3a58030",
+      "local_benchmark_checkpoint": "0e253f220a4f44b3f8e443958da83c5fdd2ae27a",
+      "core_and_tests_sha256": "1adbbfdfa9c0bc43b56dbc077e8bad21cf0b0e3dbccbfb35eb16f8b92861ac23",
+      "exact_match": true,
+      "core_tests_passed": 107
+    },
+    {
+      "pr": 16,
+      "new_core_commit": "da11ff877a0db685ee3f77dc85ad927d1ced9ba5",
+      "local_benchmark_checkpoint": "51e66c94a89609a51406675ae643d3c49a3f5f55",
+      "core_and_tests_sha256": "2ba9fe77ebb34265602ddbd00db86514aecaeb3bcf8467f2249f5b2e7445bcfc",
+      "exact_match": true,
+      "core_tests_passed": 108
+    }
+  ],
+  "historical_mapping_note": "The original checkpoint identities above precede the RunArray amendment; exact_match refers to those historical snapshots only.",
+  "runarray_amendment": {
+    "date": "2026-10-04",
+    "core_tests_at_pr4": 87,
+    "core_tests_at_final": 111,
+    "local_workspace_tests_including_doctest": 127,
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "b762295f662fd060773cdc36a69c2aeb5511a92d",
+        "src_tree": "1d19c58a171d3052f6b99e3e7c2cb536d5835064",
+        "tests_tree": "277e83f9ce7e628044991d323345bad12b8717c0",
+        "measured_local_identity": {
+          "sha": "465dcb69cc82ef197e53d6b16efb13565b1df933",
+          "source_sha256": "00c33ad41511b8ef18451a5f5b1d53bdd2720305a7d19ea431531e9ab29df73c",
+          "binary_sha256": "449b232cdbc42d49bb879a36fac4f6e8c4f2a166629b52324309fe6c8df134a4"
+        },
+        "exact_core_and_tests_tree_match_to_new_measurement": true,
+        "fresh_core_tests_passed": 87
+      },
+      {
+        "pr": 5,
+        "core_commit": "bc0169832ab5e37189eb72bfe2c0a8d36b7515db",
+        "src_tree": "cd8b2cf583f0e4c506ee8500b0444435d170c84e",
+        "tests_tree": "9815b0c31617e7c5fdac585ba11c69e2594c4499",
+        "fresh_core_tests_passed": 95
+      },
+      {
+        "pr": 6,
+        "core_commit": "ee527450e2dd33baad651b9ef552945115fb194d",
+        "src_tree": "caa109c78ed82ce77463518f2a50d8d0f334770b",
+        "tests_tree": "6258599c8de368f2c84669b48c4e949473506288"
+      },
+      {
+        "pr": 7,
+        "core_commit": "2ad29e8e310c1ed11682c3fb2c42c0ae62aa333c",
+        "src_tree": "4c3a2b4d71e599b9936504f37770e477100907c7",
+        "tests_tree": "6258599c8de368f2c84669b48c4e949473506288"
+      },
+      {
+        "pr": 8,
+        "core_commit": "7a7fae747b4d071a4d846089d6e451322f88e19d",
+        "src_tree": "f370cf1f383aa55269230819042674f111a963b5",
+        "tests_tree": "6258599c8de368f2c84669b48c4e949473506288",
+        "fresh_core_tests_passed": 103
+      },
+      {
+        "pr": 9,
+        "core_commit": "f9e0e35abb656500c7147b3e1d5d5c4c0bb4ac3f",
+        "src_tree": "faf0572fe6f0b737d13ed39fba018c43c8340347",
+        "tests_tree": "20d4d16a61d3d58571e7952d68706ed94aa49ec9"
+      },
+      {
+        "pr": 10,
+        "core_commit": "1f3ad6fecd0fe84e5fecb0ba068880476f4403b5",
+        "src_tree": "1d3a27d23b453a1e3947b29dd0b64df34b5868f9",
+        "tests_tree": "20d4d16a61d3d58571e7952d68706ed94aa49ec9"
+      },
+      {
+        "pr": 11,
+        "core_commit": "ee1ec784729a4015b10104e6d814194aef790f44",
+        "src_tree": "e85d62532e354c31c292fd435c55ac75c7d4e5e6",
+        "tests_tree": "20d4d16a61d3d58571e7952d68706ed94aa49ec9"
+      },
+      {
+        "pr": 12,
+        "core_commit": "cb340479f2645e6bb4f69770ccf9a442b43934dd",
+        "src_tree": "d10f276110239029b4975ed7be8f2d1f7ffae8d9",
+        "tests_tree": "20d4d16a61d3d58571e7952d68706ed94aa49ec9",
+        "fresh_core_tests_passed": 108
+      },
+      {
+        "pr": 13,
+        "core_commit": "f3fe367196d244bec85edf4a27db330777532f71",
+        "src_tree": "1ed514746d6d4b19df4e52e055cfe3ca610e6727",
+        "tests_tree": "20d4d16a61d3d58571e7952d68706ed94aa49ec9"
+      },
+      {
+        "pr": 15,
+        "core_commit": "63a722a8236dc02c78a0944b0e1a7ca696d6df69",
+        "src_tree": "24fd9757fbdff33f9bb4c9129282542853fd7c3b",
+        "tests_tree": "b075df1735fd2db1bbc24c7437d25907dda3453c"
+      },
+      {
+        "pr": 16,
+        "core_commit": "70baf5f3a40ede64965d32530addc06aad45fa05",
+        "src_tree": "e037de9287fb87283ec620729e7855169afd1145",
+        "tests_tree": "b075df1735fd2db1bbc24c7437d25907dda3453c",
+        "measured_local_identity": {
+          "sha": "11e91c5a0645711a5b57e830bd063ce1518ffbba",
+          "source_sha256": "d6af3f5d605c2738f94ebc641b248a92ef08d7289bae803ed4ca6253c1c4698d",
+          "binary_sha256": "feecbe83a8da3d419d6b20446af03ca99037f77a8449622f28891b2c297c7d1e"
+        },
+        "exact_core_and_tests_tree_match_to_new_measurement": true,
+        "fresh_core_tests_passed": 111
+      }
+    ]
+  },
+  "evaluate_only_amendment": {
+    "date": "2026-10-05",
+    "semantics": "One evaluate -> ArrayRef entry; consumers handle ordinary/RunArray representation. No evaluate_flat API.",
+    "performance_note": "Not newly benchmarked; earlier runarray_amendment measurement identities remain historical.",
+    "workspace_tests_including_doctest": 128,
+    "local_harness_commit": "d7d17cd63b623232e1dd88801309d95fd2c46c86",
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "11e60abda78033000d7ad9b2107be94e284bd25a",
+        "src_tree": "38b8e992d6852ad035e489bebe1269a4835b39f7",
+        "tests_tree": "41c0df67bba028727e100ba5880a42cf7c85bc8b",
+        "fresh_core_tests_passed": 88
+      },
+      {
+        "pr": 5,
+        "core_commit": "b1e77a551133c5a67de8699956f0294c6f2dabf5",
+        "src_tree": "1a0de0ce09095872aaa3e1f0f6e992f2b7c94252",
+        "tests_tree": "1e0a67f8efd946e9e81120b4d20552c06a088586",
+        "fresh_core_tests_passed": 96
+      },
+      {
+        "pr": 6,
+        "core_commit": "1c9f79fe38c9a5696efcacccf51a0f40852e6522",
+        "src_tree": "299538edb607b4d90963f912af54ca68061b1a13",
+        "tests_tree": "df7a3358bfa6aef40bce5cfccec81bad3077b59f"
+      },
+      {
+        "pr": 7,
+        "core_commit": "aa8d6286b12dbd1dc8faacc27eccb667a8ca13e7",
+        "src_tree": "24458bf96a8c4d5d801e30c6f1b79fc229d04b12",
+        "tests_tree": "df7a3358bfa6aef40bce5cfccec81bad3077b59f"
+      },
+      {
+        "pr": 8,
+        "core_commit": "cb2da20abe8d5071a7877f57c8f929794ccbd41a",
+        "src_tree": "1e37bdb2446517b57cace84026d71f5cb802ffaf",
+        "tests_tree": "df7a3358bfa6aef40bce5cfccec81bad3077b59f"
+      },
+      {
+        "pr": 9,
+        "core_commit": "98c8101d71685d3cc96453b4009f1e1a06f26573",
+        "src_tree": "d328dbd289d81709f910c56cf58b382da7ae068b",
+        "tests_tree": "4f0edfdee72ae75ecfb57d01a5c34c855ba4b31a"
+      },
+      {
+        "pr": 10,
+        "core_commit": "15a50be3397c4fec8fc00057d252003c37724f2b",
+        "src_tree": "42a3f956af689dfc2fdf192c30db3505a41c4efd",
+        "tests_tree": "4f0edfdee72ae75ecfb57d01a5c34c855ba4b31a"
+      },
+      {
+        "pr": 11,
+        "core_commit": "b1fca6d50e8f76266614269e6098cb99c36e7a2a",
+        "src_tree": "92a62c0a165d820cfe58daeac1b22dbafd430557",
+        "tests_tree": "4f0edfdee72ae75ecfb57d01a5c34c855ba4b31a"
+      },
+      {
+        "pr": 12,
+        "core_commit": "d832f6e6642fb19701e20a042d03ea85bfd4a330",
+        "src_tree": "b9ed0d5bacf5c06b24f26edc8847b75923bf99ef",
+        "tests_tree": "4f0edfdee72ae75ecfb57d01a5c34c855ba4b31a"
+      },
+      {
+        "pr": 13,
+        "core_commit": "4a7e15ec4a8b837e42f3a589aa3fc955ea676ac3",
+        "src_tree": "c160c0085a70ebb14b20b49783ce37358d97ac92",
+        "tests_tree": "4f0edfdee72ae75ecfb57d01a5c34c855ba4b31a"
+      },
+      {
+        "pr": 15,
+        "core_commit": "50ee6edfe5844986b039a9c73dc7f5cc7421dcb8",
+        "src_tree": "7d3ae164519de5340655193d88f9ee4fc6ab9043",
+        "tests_tree": "def9517d8bef2ce5e7bc64578383ddba39a9c561"
+      },
+      {
+        "pr": 16,
+        "core_commit": "80f3f6b285a2d7ed26055067649420bc16937470",
+        "src_tree": "9d79d6c9d87116ced92df81d4ebabec8dea564ad",
+        "tests_tree": "def9517d8bef2ce5e7bc64578383ddba39a9c561",
+        "fresh_core_tests_passed": 112
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "accessor_amendment": {
+    "date": "2026-10-05",
+    "semantics": "Single evaluate -> ArrayRef API; Arrow typed accessors read primitive/Boolean constants. No broadcast input decoding for arithmetic, NOT, AND/OR or constant predicates.",
+    "performance_note": "Not newly benchmarked; earlier measurement identities remain historical.",
+    "workspace_tests_including_doctest": 131,
+    "local_harness_commit": "48bd31da6cee0844620a45d3824187f29f7e5410",
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "8ea939c87272026b3afc63ffc516ea7461f44dfe",
+        "src_tree": "337766aab04233e70c8ceea7fa01b2c2fc121035",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "fresh_core_tests_passed": 91
+      },
+      {
+        "pr": 5,
+        "core_commit": "2da0628d306a6aac33ba9c8628e81352badb6bb1",
+        "src_tree": "5519cae15af4b4c8e375733b8962f3fe6256e079",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8"
+      },
+      {
+        "pr": 6,
+        "core_commit": "fff8c8ca38253e4572b2363762de1a7bf172d56e",
+        "src_tree": "7fbeebc48c7170c5e79aef2fbc46664d7cd9dadf",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 7,
+        "core_commit": "857173494b49d8dde3851225411db52320a2c738",
+        "src_tree": "b7a480c2bc94085b6349d48725cf57a9424878bb",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 8,
+        "core_commit": "c2c919ee8b25cabfa4840e579d9320fe41970dbf",
+        "src_tree": "d27e7374e5ade6f78df18fb683272ba2ea045992",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 9,
+        "core_commit": "eea458872d28757270fb4c586e42b70c127a830f",
+        "src_tree": "2df5e705067b3d3400edca70727ec33c3d19ba8d",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 10,
+        "core_commit": "6eea6fcec9fbd18c86ceddf334020a3a2381aa32",
+        "src_tree": "c6ca2c0b01c87cc53cbaec22a68b455f0d444e50",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 11,
+        "core_commit": "69ff3ba271fa4a9887f3d6a9fb655c4e7ce00829",
+        "src_tree": "0d0e7f43a872de71c4ccf65308c07488e74b06f5",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 12,
+        "core_commit": "163ca4d59146286e9d5223f59353b56f920d16ea",
+        "src_tree": "27cb350527e16a690fc6bcb434ca8eb6b91990c5",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 13,
+        "core_commit": "10287acbd03c2f3c1544413b4a4dc49ae5f1af84",
+        "src_tree": "b1f631de7115d6a26ba0ae39d55dd98f9c1e1b25",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 15,
+        "core_commit": "55e61dc076892dad24dc06aa8f701dd59b3ec8cb",
+        "src_tree": "0ca218cf184b9e02fd14e5d9f09b9a3870152709",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a"
+      },
+      {
+        "pr": 16,
+        "core_commit": "f0d0514321a990b88df9280f670a332bbef4cfc7",
+        "src_tree": "1418481befdd20495a6d9e1d33a5fc38597f745c",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "fresh_core_tests_passed": 115
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "materialization_amendment": {
+    "date": "2026-10-05",
+    "semantics": "One evaluate -> ArrayRef API; shared materialized_runarray helper at ordinary-array consumption boundaries; no special constant filter return. Arithmetic/Boolean kernels retain Arrow accessor paths. COALESCE retains the ordinary per-row NULL path without an all-NULL argument fast path.",
+    "performance_note": "Not newly benchmarked; earlier measurement identities remain historical.",
+    "workspace_tests_including_doctest": 133,
+    "local_harness_commit": "55eb6a880e35ade4ad87774dfb4a436b9baa7f0e",
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "cfcb68e380752387906e38e9e072750386e56f47",
+        "src_tree": "e286025b6d9837eb3603d708ca63e618b219210b",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "fresh_core_tests_passed": 93
+      },
+      {
+        "pr": 5,
+        "core_commit": "1ec7a6d1b02eb0072f05bfb27174dc004e74d0ad",
+        "src_tree": "572b073e93fff7df33323bca3f161da6a8fe71c4",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8"
+      },
+      {
+        "pr": 6,
+        "core_commit": "3450ebfe42b858e384406c86eee9a37b046ad4eb",
+        "src_tree": "31c0a1f36e34c4a87c73dac00f7ed1ba54bc37fe",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 7,
+        "core_commit": "5dbcc4693d30c98b19382c4a1587c530755add02",
+        "src_tree": "61bbcc2d771fdf52a1be583120656f645e7ed3c1",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 8,
+        "core_commit": "2c1976a99f4318da6229b8bb061b1f604ea1dba3",
+        "src_tree": "f7add0803651439eb62505b7ff0bb7fa56d9daa4",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 9,
+        "core_commit": "b488cb0c0cb904cb2e0f25ed781d36d4838476fe",
+        "src_tree": "b9c136a4867f831ff315c58a57823bb839b071b8",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 10,
+        "core_commit": "efa20f71f32a4e0f9fa53b91cd67ea5db01a9a92",
+        "src_tree": "76e7aa68276aa0f844a4df4c8d1bd4158dbabc05",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 11,
+        "core_commit": "6714cc20aed6ae04ebf89411dbedc12fdb64bffe",
+        "src_tree": "62a1dffb08d55dc3ff77f0619fc7fcae9d64f99c",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 12,
+        "core_commit": "5f5ab1e5a4004eea8333e13a96ef52b0ec6d6c30",
+        "src_tree": "19e9aa9ccd9eb98ff1d51d169d8af96ce13b77df",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 13,
+        "core_commit": "3593071d8039a5edfa12829e3e69bf7821931002",
+        "src_tree": "b9979a491cacfb97f5c5eff84c68bf81f73d9b6e",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 15,
+        "core_commit": "91ff7c4a4f5bbbbca66414336e67482677c9f10e",
+        "src_tree": "401f8e3d50dea901b0870e771296587737bd0ecc",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a"
+      },
+      {
+        "pr": 16,
+        "core_commit": "6836f3c79f7c6662d4da220709bdcc33ebfde623",
+        "src_tree": "31c580804b4490fe2e108426ca80c9338fdfbd72",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "fresh_core_tests_passed": 117
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "conjunction_amendment": {
+    "date": "2026-10-05",
+    "semantics": "Streaming eager And/Or evaluations, arguments only. All bitmap calculations use Arrow APIs; neutral NULL value bits permit validity composition with one lazily allocated reusable scratch bitmap. RunArray support belongs to PR4.",
+    "performance_note": "Three-process conjunction bitmap microbenchmark recorded in conjunction-arrow/summary.json and raw CSVs. Nullable 8192-row regression is explicit; no new end-to-end query measurements.",
+    "workspace_tests_including_doctest": 138,
+    "local_harness_commit": "70ae8ce3d72141125b2eb0f792577005361afe40",
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "c744f38a588be51cc2f80c2a7c1486551164e8c6",
+        "src_tree": "3d9b67ad137e9cf5fc4762d528f217ed5e90b051",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "fresh_core_tests_passed": 98
+      },
+      {
+        "pr": 5,
+        "core_commit": "f5714fa5bd9ecf626359295b476d998a5f5473f2",
+        "src_tree": "ccc08b8655ce12edda72437165caa9c1f446f39a",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8"
+      },
+      {
+        "pr": 6,
+        "core_commit": "56054a6efbfd5ba97a14719c300d21146d4e0177",
+        "src_tree": "12b6ba638d411b70a65b62413e06079787be8dd8",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 7,
+        "core_commit": "942d83efdc47f9024cac2a1c56ed1981fcb0de80",
+        "src_tree": "1bf23949cdbccb172b1b973d30d1a95b0d13a29e",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 8,
+        "core_commit": "460db150aa902dbaf18882376c9a55982e37d61a",
+        "src_tree": "87ddba6b31991c0b42b32e3071124ba4691b8e59",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 9,
+        "core_commit": "609e2a1491d5e1e5af5c2ad36999c8123ef5f1f0",
+        "src_tree": "77668a5f17ca3a528661caac0c1d233f40084e88",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 10,
+        "core_commit": "be32aebb369a55bcf377b321161bd12eb0f87500",
+        "src_tree": "6ffeed8a16d679956f93ff3268c7637e01a5da97",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 11,
+        "core_commit": "cf4043a30dc506a69d2492bb7b1b12fd7d50c42c",
+        "src_tree": "3bfcd8c3e7409105c75cc974841acd87c2ec6c84",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 12,
+        "core_commit": "b954098b357cd2a2b95efeb518cbeff00f73e770",
+        "src_tree": "fd4fb85d801ea5bf3a2c69a10b0881a7d4b2fe2f",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 13,
+        "core_commit": "3ff3a91aec8552ce3bf11e6b747b7f225a201f87",
+        "src_tree": "716a39aad266831ce408a847c7c5828cf565b06f",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 15,
+        "core_commit": "23eef79cec484eb1b6cca9dcfd68dca39d0efb2f",
+        "src_tree": "e47e8411635de203ef0d75b7c9a850895835caf9",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a"
+      },
+      {
+        "pr": 16,
+        "core_commit": "20bf956b0dd0fb3f8d18ffc4f132f37403896e25",
+        "src_tree": "bb7ae2f71cc203994f3af7378b57659263554f64",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "fresh_core_tests_passed": 122
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true,
+    "independent_conjunction_pr": {
+      "pr": 17,
+      "url": "https://github.com/ZENOTME/Roc/pull/17",
+      "core_commit": "490e29bbcf47ad328f727ab48f4d4e1712393920",
+      "base": "main",
+      "fresh_core_tests_passed": 84,
+      "src_tree": "48bd5b69b7b94765923f6262c4689fa7e82b950a",
+      "tests_tree": "ea84f057d5f1c2f86b55e5341c0f52783fae70bb",
+      "runarray_support_pr": 4
+    }
+  },
+  "conjunction_direct_validity_amendment": {
+    "date": "2026-10-05",
+    "semantics": "Streaming eager And/Or evaluations. Direct four-case optional validity; arbitrary NULL value bits; no scratch. Arrow bitmap APIs handle no/single-sided validity; both-sided validity uses one safe fused loop with Arrow slice-aware word iterators. RunArray adaptation belongs to PR4.",
+    "performance_note": "Fresh six-way, three-process bitmap merging ablations in conjunction-direct/summary.json. No new end-to-end query timing.",
+    "workspace_tests_including_doctest": 139,
+    "local_harness_commit": "d1eb2ecef41333e4875521b76540a21027e73fec",
+    "independent_conjunction_pr": {
+      "pr": 17,
+      "url": "https://github.com/ZENOTME/Roc/pull/17",
+      "core_commit": "2e5c1b7fa24ba75698640f9ba4909bfabc801683",
+      "base": "main",
+      "fresh_core_tests_passed": 85,
+      "src_tree": "f0ed95381a5240a0acbfdbc74a237ef50596c946",
+      "tests_tree": "ea84f057d5f1c2f86b55e5341c0f52783fae70bb"
+    },
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "aba5c6c569115ece453868f67e00a71b0ebd961c",
+        "src_tree": "dbb6bd977a432e8f99703caf119d2e88397b6c12",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "fresh_core_tests_passed": 99
+      },
+      {
+        "pr": 5,
+        "core_commit": "0bd2e65f23c674135097d727e9c571895a65a0ee",
+        "src_tree": "e7ef095444314ca87d5d394ba99230b9931e8392",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8"
+      },
+      {
+        "pr": 6,
+        "core_commit": "29e8deeb029a05c99ef5f82a95094b11e63da6c9",
+        "src_tree": "6c3747546c0114494628c03688bf0a968e2a9cd6",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 7,
+        "core_commit": "cfcdffba7319e94945bd9d4b76d18d4eba29428e",
+        "src_tree": "16521b3f27d88ba115916970ee5acc97f68b1199",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 8,
+        "core_commit": "3c4061db02656c859f5ee5e4e1d2010ba0edad15",
+        "src_tree": "3e3119c7d32fb7e18c83426bf01666a989a22d15",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 9,
+        "core_commit": "a2b54075215162fc8014344ac7b469f4292c67dd",
+        "src_tree": "65ca492ed9d95431acb168474e45599e19c88761",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 10,
+        "core_commit": "c5100fa31ca2c1a3d0310bd614829b672525ad26",
+        "src_tree": "7ff306d03f93545136eb0923b029c87e8e8aa65c",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 11,
+        "core_commit": "f30117aabe319bf082733478fb4170cd9b95dc0f",
+        "src_tree": "2c5a2d6cef8011d49e11ddb31c6c094acebc3882",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 12,
+        "core_commit": "a7fecb0183f0238ec2865edd72c268591b876aed",
+        "src_tree": "de1916e87c0e742444ff06e5df9245c2292ef1b6",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 13,
+        "core_commit": "86402c627a5fc8cf6f822c044ec0c2929245e617",
+        "src_tree": "ed23cc86902b3f23426f151213fb3965afc0e20e",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 15,
+        "core_commit": "152141ba904e2df09269576d141e9938622138da",
+        "src_tree": "f2fac286adf3ce7d7a272c08fdcdec5c60cdb48f",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a"
+      },
+      {
+        "pr": 16,
+        "core_commit": "18d92fcae59ab5fba3e56921c183a00ed2c5c7b2",
+        "src_tree": "fb46b6181629ad295ba2d10360e725e0a6cba022",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "fresh_core_tests_passed": 123
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "conjunction_inline_amendment": {
+    "date": "2026-10-05",
+    "semantics": "Conjunction bitmap implementation and tests inline in conjunction.rs; private workspace/update functions. to_evaluation directly binds arguments and constructs And/Or evaluations, without a bind wrapper. Ordinary and encoded bitmap algorithm bodies unchanged.",
+    "performance_note": "No fresh performance measurement for this structural refactoring; conjunction-direct samples retain the preceding measured source identities.",
+    "workspace_tests_including_doctest": 139,
+    "local_harness_commit": "f60605faa5f239a32b65ad759b4a476fe6fe2cc6",
+    "independent_conjunction_pr": {
+      "pr": 17,
+      "url": "https://github.com/ZENOTME/Roc/pull/17",
+      "core_commit": "af9fdec93de9ee2b8296fd8ff1daf561cbcebc9e",
+      "base": "main",
+      "fresh_core_tests_passed": 85,
+      "src_tree": "9bfe6b3b93241ef6c9c8320452feb69e391f9f05",
+      "tests_tree": "ea84f057d5f1c2f86b55e5341c0f52783fae70bb"
+    },
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "cac458f7a50e19986507a834181c72a54366ba35",
+        "src_tree": "a2b3856355bfd0bcdfc437a36b3ad6121a04b9b4",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "fresh_core_tests_passed": 99
+      },
+      {
+        "pr": 5,
+        "core_commit": "331a22df836b9f970f544a333a433b163811a799",
+        "src_tree": "0bd1fd2933e7c2c21619827ab722d87021753735",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8"
+      },
+      {
+        "pr": 6,
+        "core_commit": "92f38f77e48fa2fcec48d2d78c895f2bc633a4f1",
+        "src_tree": "0c3f615c0f8a6e5b5c4dc26bd2bfb88685ab4a2d",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 7,
+        "core_commit": "9d5c5833e83e9495a8845a44f2a0ca041a70df24",
+        "src_tree": "cbeafacfec973220de1ae8d05b63c2b2f8bb01eb",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 8,
+        "core_commit": "215598b10469ca4b3ef14d9d7608b63f1305b411",
+        "src_tree": "13f9330a21fb550f8bdd2e8dcbbaff7780912b74",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e"
+      },
+      {
+        "pr": 9,
+        "core_commit": "5ccaa566d373d869f4118f957561ad5685b89421",
+        "src_tree": "39d8d6bd3032b5ae8eb187f783a19ba07c4f1e83",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 10,
+        "core_commit": "69c3554c8563ed0d8bb4674b97d5648b1cb24a44",
+        "src_tree": "1cb496569ca6d5ec5b0ed64b669a8fd1d882640c",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 11,
+        "core_commit": "4f592df999a47a0346841899195b389041c2d27a",
+        "src_tree": "ead42748ee83f6fd3a539c281cde368de2984645",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 12,
+        "core_commit": "2f84ef8cd1014bbbf9b6eeb3a5f4c3e38662d16e",
+        "src_tree": "dc9892233f74ae30e45c054ebf73ecd54807d4b2",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 13,
+        "core_commit": "58c5ac3c69c608e3f5fcc2518b9e36a15b326826",
+        "src_tree": "bb00a44356c1c32b0c2bd139d7d370da7eda3518",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91"
+      },
+      {
+        "pr": 15,
+        "core_commit": "8a2bdcdc161c3a76c49f46524ba912452dfae618",
+        "src_tree": "229616669fb78747bffe8ea0a1096fcc8a4e6e5d",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a"
+      },
+      {
+        "pr": 16,
+        "core_commit": "cd14574ff2496d6365f8b8deb1167303951ca70d",
+        "src_tree": "3f85c5d473f44f00d0fdebf18df320e75f1e2571",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "fresh_core_tests_passed": 123
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "post_conjunction_merge_restack": {
+    "merged_pr": 17,
+    "merged_commit": "1f86a8d823da506513b36a73a155bb1414e98bdc",
+    "reviewed_pr17_head": "af9fdec93de9ee2b8296fd8ff1daf561cbcebc9e",
+    "merged_tree_matches_reviewed_head": true,
+    "validation_note": "History-only restack after squash merge; identical core and tests trees reuse preceding release validation: 85 PR17, 99 PR4, 123 final core, 139 local workspace. No new tests or benchmarks run.",
+    "local_harness_commit": "f60605faa5f239a32b65ad759b4a476fe6fe2cc6",
+    "checkpoints": [
+      {
+        "pr": 4,
+        "core_commit": "f6f3fcbb8261e4e0128bed762db1c76333fb28af",
+        "previous_tested_core_commit": "cac458f7a50e19986507a834181c72a54366ba35",
+        "src_tree": "a2b3856355bfd0bcdfc437a36b3ad6121a04b9b4",
+        "tests_tree": "dda8ad22dfc440afa34cd0597fbce6274611aea5",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 5,
+        "core_commit": "075a85e2f7589a14031ddbe4907cdd9ccc46f045",
+        "previous_tested_core_commit": "331a22df836b9f970f544a333a433b163811a799",
+        "src_tree": "0bd1fd2933e7c2c21619827ab722d87021753735",
+        "tests_tree": "13859edcbe8c55d9c813faa08ea4a7feb017ccc8",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 6,
+        "core_commit": "d2ea1467ae389a9cb2af17ec733e3bb5744ce42a",
+        "previous_tested_core_commit": "92f38f77e48fa2fcec48d2d78c895f2bc633a4f1",
+        "src_tree": "0c3f615c0f8a6e5b5c4dc26bd2bfb88685ab4a2d",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 7,
+        "core_commit": "60ed3c1723fc4f630e349534fdd721ac3afbaa4d",
+        "previous_tested_core_commit": "9d5c5833e83e9495a8845a44f2a0ca041a70df24",
+        "src_tree": "cbeafacfec973220de1ae8d05b63c2b2f8bb01eb",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 8,
+        "core_commit": "397112afa210e24c74c2e22e376976e19dc62639",
+        "previous_tested_core_commit": "215598b10469ca4b3ef14d9d7608b63f1305b411",
+        "src_tree": "13f9330a21fb550f8bdd2e8dcbbaff7780912b74",
+        "tests_tree": "aa6091fa4ecb061bc9b818d8a92b1535a696299e",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 9,
+        "core_commit": "0cae2d9e08fab26282212d1dc99cd81a5d99adb5",
+        "previous_tested_core_commit": "5ccaa566d373d869f4118f957561ad5685b89421",
+        "src_tree": "39d8d6bd3032b5ae8eb187f783a19ba07c4f1e83",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 10,
+        "core_commit": "79efd3f5b3b770115f206a67f5830b7505f9ff1b",
+        "previous_tested_core_commit": "69c3554c8563ed0d8bb4674b97d5648b1cb24a44",
+        "src_tree": "1cb496569ca6d5ec5b0ed64b669a8fd1d882640c",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 11,
+        "core_commit": "4617c0a1b5e5e51e7cf7c800dfbf357b666e0031",
+        "previous_tested_core_commit": "4f592df999a47a0346841899195b389041c2d27a",
+        "src_tree": "ead42748ee83f6fd3a539c281cde368de2984645",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 12,
+        "core_commit": "5bd45684cd8b91b5dde6ca0f271b09a09da2f3f2",
+        "previous_tested_core_commit": "2f84ef8cd1014bbbf9b6eeb3a5f4c3e38662d16e",
+        "src_tree": "dc9892233f74ae30e45c054ebf73ecd54807d4b2",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 13,
+        "core_commit": "943b7bbd61e6c2a6dc587cf1a4bbcd46580be37f",
+        "previous_tested_core_commit": "58c5ac3c69c608e3f5fcc2518b9e36a15b326826",
+        "src_tree": "bb00a44356c1c32b0c2bd139d7d370da7eda3518",
+        "tests_tree": "10729e07461d718c94c8e20f46d23a6a6c21bd91",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 15,
+        "core_commit": "d3bb405470d635c6b8f70adfa5df3f6ddfd9cee1",
+        "previous_tested_core_commit": "8a2bdcdc161c3a76c49f46524ba912452dfae618",
+        "src_tree": "229616669fb78747bffe8ea0a1096fcc8a4e6e5d",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "identical_to_previous_tested_trees": true
+      },
+      {
+        "pr": 16,
+        "core_commit": "d6fa967e26f3b925ea9820e74a8f250e2a1f44a0",
+        "previous_tested_core_commit": "cd14574ff2496d6365f8b8deb1167303951ca70d",
+        "src_tree": "3f85c5d473f44f00d0fdebf18df320e75f1e2571",
+        "tests_tree": "852c85a0b1150a070142fa45dfe67323bb3e0a3a",
+        "identical_to_previous_tested_trees": true
+      }
+    ],
+    "final_core_and_test_trees_match_local_harness": true
+  },
+  "column_value_amendment": {
+    "api": "evaluate -> ColumnValue; bound eval fn(&[ColumnValue]) -> Result<ColumnValue>",
+    "pr4": "abb68b16370b000c4938bd5037932e576489e235",
+    "final_core": "2a4d92b3345c0e55b9696c6c1388fa686ea675b0",
+    "local_harness": "eb7d624d5d27e8ef5d4583acae8e079a2a102daa",
+    "release_test_counts": {
+      "pr4": 98,
+      "final_core": 122,
+      "local_workspace_including_doctest": 138
+    },
+    "core_test_trees_match_local": true,
+    "measured_sources": {
+      "before": "f6f3fcbb8261e4e0128bed762db1c76333fb28af",
+      "after": "abb68b16370b000c4938bd5037932e576489e235"
+    },
+    "benchmark": "column-values/metadata.json",
+    "prior_entries": "historical source snapshots and validations, not assertions about the current code",
+    "tested_final_core": "39da31f8337dc6f45bef745db2ed571bfdc98423",
+    "final_core_tree_matches_tested": true,
+    "stack": [
+      {
+        "pr": 4,
+        "commit": "abb68b16370b000c4938bd5037932e576489e235"
+      },
+      {
+        "pr": 5,
+        "commit": "7a1b1c1ae0d986acdb8ec012e7f90c2d000e0e0c"
+      },
+      {
+        "pr": 6,
+        "commit": "55622a2618ce6183d2c5c7a24bdb89f40c73b449"
+      },
+      {
+        "pr": 7,
+        "commit": "6bb2f15aa7ca86312c0f2a7ee8f644c6711d158f"
+      },
+      {
+        "pr": 8,
+        "commit": "a24961537b69b5e3edfa5b97de55d9131def3e6d"
+      },
+      {
+        "pr": 9,
+        "commit": "760f6d048ee4b3e531d8313ceccfecaa75325860"
+      },
+      {
+        "pr": 10,
+        "commit": "d93fc64fc481c5c7edb65ceaea1e183fdf8284f2"
+      },
+      {
+        "pr": 11,
+        "commit": "34889b7a153358ee09901913c1588905b6d0dcc8"
+      },
+      {
+        "pr": 12,
+        "commit": "da4ddaa848ab1c491de8101846251f4e2b26e185"
+      },
+      {
+        "pr": 13,
+        "commit": "cf2db8b62567a6a44da663a907f09afd4935b3fe"
+      },
+      {
+        "pr": 15,
+        "commit": "beef9b84361c256d5200e0e5dc0e8f0fdb1266ea"
+      },
+      {
+        "pr": 16,
+        "commit": "2a4d92b3345c0e55b9696c6c1388fa686ea675b0"
+      }
+    ],
+    "all_targets_checked_prs": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      15,
+      16
+    ],
+    "pr5_global_consumer_regression": "11 agg_optimized release tests passed after adapting single-group scalar inputs"
+  },
+  "explicit_scalar_types_amendment": {
+    "reference": "DataFusion common 55.1.0 ScalarValue and Arrow 59.3.0",
+    "pr4": "0440f551601ca4e2c2a43f64a484dd5d9e58b102",
+    "final_core": "66f7107dc449baad20cc11aaa739baccc917742c",
+    "local_harness": "f4bb1d2302b9b26572913097a2f9e9ed5867358e",
+    "release_test_counts": {
+      "pr4": 106,
+      "final_core": 130,
+      "local_workspace_including_doctest": 146
+    },
+    "core_test_trees_match_local": true,
+    "new_test_groups": 8,
+    "all_targets_checked_prs": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      15,
+      16
+    ],
+    "stack": [
+      {
+        "pr": 4,
+        "commit": "0440f551601ca4e2c2a43f64a484dd5d9e58b102"
+      },
+      {
+        "pr": 5,
+        "commit": "93529da8afdf36cd87911c2f415251b1b5c0fdbe"
+      },
+      {
+        "pr": 6,
+        "commit": "f02c63a115954f12b66e3392d6229104e58924b4"
+      },
+      {
+        "pr": 7,
+        "commit": "1120b6f8428d93e56a36a279521dfe1e77330dd7"
+      },
+      {
+        "pr": 8,
+        "commit": "89a36ea832088ba16aaf0728844acebcffbcab7d"
+      },
+      {
+        "pr": 9,
+        "commit": "fcc4137fed8a71f7baf1f8ceb18be6d10ad66dd9"
+      },
+      {
+        "pr": 10,
+        "commit": "ad69750b71131d774ab6ac79dfc8d25786f9ab9f"
+      },
+      {
+        "pr": 11,
+        "commit": "54899e8dfb9d8b89ccb802e81807e79ab959b40f"
+      },
+      {
+        "pr": 12,
+        "commit": "66906b2441ccb714a69f0daa3e0de0319e812882"
+      },
+      {
+        "pr": 13,
+        "commit": "869349d898aa1cc7e4ced03d4fe02e0c85bddc62"
+      },
+      {
+        "pr": 15,
+        "commit": "3f16a41b301dd2874a2b7cc2ba9d29e51b51cf13"
+      },
+      {
+        "pr": 16,
+        "commit": "66f7107dc449baad20cc11aaa739baccc917742c"
+      }
+    ],
+    "new_performance_measurement": false,
+    "prior_entries": "historical source snapshots and validations; expression benchmark still measures abb68b16370b000c4938bd5037932e576489e235"
+  },
+  "nested_broadcast_consolidation": {
+    "pr4": "3387c3f01ebab5d68b978a1129aa42882d7253d5",
+    "final_core": "7280709c6f1a5c6d705aa4274319c800843c65d3",
+    "local_harness": "a63672ea5a84c74aa5ef8b84225ef21deb75434a",
+    "release_test_counts": {
+      "pr4": 106,
+      "final_core": 130
+    },
+    "core_test_trees_match_local": true,
+    "new_performance_measurement": false,
+    "local_workspace_tests": "146 passed at preceding explicit scalar type coverage; not rerun for this internal helper consolidation",
+    "stack": [
+      {
+        "pr": 4,
+        "commit": "3387c3f01ebab5d68b978a1129aa42882d7253d5"
+      },
+      {
+        "pr": 5,
+        "commit": "06e16fa8a07f65edf89efda32a858d248aaff5fa"
+      },
+      {
+        "pr": 6,
+        "commit": "75d658f0957fbfa8e4bb7d28581490308fc4ef07"
+      },
+      {
+        "pr": 7,
+        "commit": "d03311ea7884a49475eac61d5e7f0210785b21d4"
+      },
+      {
+        "pr": 8,
+        "commit": "aee1031f73697153592ef290cdddad14f7a3270d"
+      },
+      {
+        "pr": 9,
+        "commit": "1dbd65151fdcfaf106e1273e302559ed47cd5dd4"
+      },
+      {
+        "pr": 10,
+        "commit": "ebf85e5f2a44ff698058632fad8410c6bf703700"
+      },
+      {
+        "pr": 11,
+        "commit": "c95c268aea751931f89870e203a8d23d5e703b8e"
+      },
+      {
+        "pr": 12,
+        "commit": "4a2373922b62bc513320c5d8e37035b27ce28271"
+      },
+      {
+        "pr": 13,
+        "commit": "937a351e8cc8922cfc983b9a8a40bd245679b318"
+      },
+      {
+        "pr": 15,
+        "commit": "f00be76f4c5bdc69d93a71f54fae447edc15227b"
+      },
+      {
+        "pr": 16,
+        "commit": "7280709c6f1a5c6d705aa4274319c800843c65d3"
+      }
+    ]
+  },
+  "conjunction_update_dispatch": {
+    "pr4": "26848e709c91f5403b259c3945296a06ca021ee0",
+    "final_core": "3f016d7847eec159488b9ba288f5e18abae970cb",
+    "local_harness": "ae1528b42a9db8a7092382bb3f83b5373d839d9a",
+    "release_test_counts": {
+      "pr4": 106,
+      "final_core": 130
+    },
+    "core_test_trees_match_local": true,
+    "new_performance_measurement": false,
+    "local_workspace_tests": "146 passed at preceding explicit scalar type coverage; not rerun for this internal conjunction dispatch change",
+    "stack": [
+      {
+        "pr": 4,
+        "commit": "26848e709c91f5403b259c3945296a06ca021ee0"
+      },
+      {
+        "pr": 5,
+        "commit": "6817fc2e661e82f512ac735556e9ef01141f25c6"
+      },
+      {
+        "pr": 6,
+        "commit": "f22cf16398e59517cc546f9be1c6b63927034c96"
+      },
+      {
+        "pr": 7,
+        "commit": "1f1348d40f21a115ffe9539693754cb566d3ca17"
+      },
+      {
+        "pr": 8,
+        "commit": "adef7e76089d63ac46760364e8c5f649ac11c380"
+      },
+      {
+        "pr": 9,
+        "commit": "89f9dc7cf77ccd77be05df079399d8ef10e0bdea"
+      },
+      {
+        "pr": 10,
+        "commit": "d63e15529c09cd01700d9dbc3eb03b091e124586"
+      },
+      {
+        "pr": 11,
+        "commit": "419310159c8d364445bcf34cc0f9888a8fc94737"
+      },
+      {
+        "pr": 12,
+        "commit": "0d7b2f12aff203763e587a430c2ba11299abd27c"
+      },
+      {
+        "pr": 13,
+        "commit": "b49fc47eba3f5c0f07df1b1672ed3d3866ecf12c"
+      },
+      {
+        "pr": 15,
+        "commit": "53a2e733d91c8a08417b54485eaa539f840f09c9"
+      },
+      {
+        "pr": 16,
+        "commit": "3f016d7847eec159488b9ba288f5e18abae970cb"
+      }
+    ]
+  },
+  "post_pr4_merge_restack": {
+    "merge_commit": "1c5588a3c456c4c0810daa8c18c0d4c2bea855e2",
+    "reviewed_pr4_head": "26848e709c91f5403b259c3945296a06ca021ee0",
+    "merged_tree_matches_reviewed": true,
+    "stack": [
+      {
+        "pr": 5,
+        "commit": "018cd99a256272ed5d97f4dc433af36ac7a7d159",
+        "previous_tested_commit": "6817fc2e661e82f512ac735556e9ef01141f25c6",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 6,
+        "commit": "c2268cbe3372d0355b8e28ad189b65cbfa4ea4b2",
+        "previous_tested_commit": "f22cf16398e59517cc546f9be1c6b63927034c96",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 7,
+        "commit": "896e40eac4376e2eeda3431ff3e69eb792d27713",
+        "previous_tested_commit": "1f1348d40f21a115ffe9539693754cb566d3ca17",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 8,
+        "commit": "afc7f157b208042481d40e8ae84eb6e887a3e52d",
+        "previous_tested_commit": "adef7e76089d63ac46760364e8c5f649ac11c380",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 9,
+        "commit": "90b6d2ca44b36368482bb01e1b77095be5c67880",
+        "previous_tested_commit": "89f9dc7cf77ccd77be05df079399d8ef10e0bdea",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 10,
+        "commit": "ee3c312d386f0e4a85fd248ee6e914df2801216a",
+        "previous_tested_commit": "d63e15529c09cd01700d9dbc3eb03b091e124586",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 11,
+        "commit": "18f3c87292aff62ea3219ef3e7c144483e57d760",
+        "previous_tested_commit": "419310159c8d364445bcf34cc0f9888a8fc94737",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 12,
+        "commit": "231b61d9543458e1839a40876a8b4af5c5629498",
+        "previous_tested_commit": "0d7b2f12aff203763e587a430c2ba11299abd27c",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 13,
+        "commit": "a31996d48882d80c1df1896554e866611446c2a9",
+        "previous_tested_commit": "b49fc47eba3f5c0f07df1b1672ed3d3866ecf12c",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 15,
+        "commit": "ced6558221dea072ef8ab16f60714067b06bd106",
+        "previous_tested_commit": "53a2e733d91c8a08417b54485eaa539f840f09c9",
+        "full_tree_matches_previous_tested": true
+      },
+      {
+        "pr": 16,
+        "commit": "7b54f1fffed84886bf533a6aaabfccbf5842d98d",
+        "previous_tested_commit": "3f016d7847eec159488b9ba288f5e18abae970cb",
+        "full_tree_matches_previous_tested": true
+      }
+    ],
+    "local_harness": "ae1528b42a9db8a7092382bb3f83b5373d839d9a",
+    "core_test_trees_match_local": true,
+    "validation": "History-only restack. Reviewed PR #4 passed 106 release tests; final core passed 130. All full repository trees match those validated revisions, so no tests or performance measurements were repeated."
+  },
+  "post_pr5_closure": {
+    "closed_pr": 5,
+    "main": "1c5588a3c456c4c0810daa8c18c0d4c2bea855e2",
+    "stack": [
+      {
+        "number": 6,
+        "branch": "codex/df-06-typed-aggregate",
+        "old_sha": "c2268cbe3372d0355b8e28ad189b65cbfa4ea4b2",
+        "new_sha": "7985dace8669503a7ae0054ab67871e6c86236c8",
+        "diff_files": [
+          "src/expr/agg/accumulator.rs",
+          "tests/agg_typed.rs"
+        ],
+        "all_targets_check": true,
+        "release_tests": 111
+      },
+      {
+        "number": 7,
+        "branch": "codex/df-07-integer-group-index",
+        "old_sha": "896e40eac4376e2eeda3431ff3e69eb792d27713",
+        "new_sha": "bb85fac2cdbd08bc1262b3120897bcca9c6f6f4f",
+        "diff_files": [
+          "Cargo.lock",
+          "Cargo.toml",
+          "src/exec/aggregate.rs",
+          "src/exec/aggregate/group_index.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "afc7f157b208042481d40e8ae84eb6e887a3e52d",
+        "new_sha": "50f13cf3ead4ac4cc06a0e7b37c8b537e2844680",
+        "diff_files": [
+          "src/exec/aggregate.rs",
+          "src/expr/agg/accumulator.rs",
+          "src/expr/agg/executor.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "90b6d2ca44b36368482bb01e1b77095be5c67880",
+        "new_sha": "cb862b9ad898c98e49d19f86b9efaeca805f074e",
+        "diff_files": [
+          "src/expr/agg/accumulator.rs",
+          "tests/aggregate_hotloop.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "ee3c312d386f0e4a85fd248ee6e914df2801216a",
+        "new_sha": "055ad766b7539b5901869f5c4fee3bce8c8c7971",
+        "diff_files": [
+          "src/pipeline/execution.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "18f3c87292aff62ea3219ef3e7c144483e57d760",
+        "new_sha": "5586b577cf5fcc3f4fbed28ade6fa00ee3fc7436",
+        "diff_files": [
+          "src/exec/scan.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "231b61d9543458e1839a40876a8b4af5c5629498",
+        "new_sha": "73f2dc051cbb51705db419819f042a7ad879e780",
+        "diff_files": [
+          "src/expr/scalar/kernels.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "a31996d48882d80c1df1896554e866611446c2a9",
+        "new_sha": "82b55db1bbca84d1dc3d34730db63ecef8f24f08",
+        "diff_files": [
+          "src/expr/agg/executor.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "ced6558221dea072ef8ab16f60714067b06bd106",
+        "new_sha": "502a50aa5c218a32a23bafca05bc96aeae053f66",
+        "diff_files": [
+          "src/exec/aggregate.rs",
+          "src/expr/agg/accumulator.rs",
+          "src/expr/agg/executor.rs",
+          "tests/agg_optimized.rs"
+        ],
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "7b54f1fffed84886bf533a6aaabfccbf5842d98d",
+        "new_sha": "bd12073d05e1d64fc7751b1fa2df9a1157bff1d0",
+        "diff_files": [
+          "src/exec/filter.rs",
+          "src/operator/filter.rs"
+        ],
+        "all_targets_check": true,
+        "release_tests": 132
+      }
+    ],
+    "local_harness": "34e5120cddacfeab2e30a2960d44f04df924e133",
+    "local_workspace_release_tests": 148,
+    "core_test_trees_match_local": true,
+    "validation": "Every remaining core checkpoint passed cargo check --all-targets --locked. Fresh release tests passed 111 at PR #6, 132 at PR #16, and 148 in the local DataFusion workspace. This is a source-changing restack, not a tree-equivalent history change.",
+    "scope": "PR #6 now targets main and contains only typed SUM/grouped COUNT changes and typed-state tests. The general global reduction from PR #5 is removed through PR #13. PR #8 introduces its own validated internal grouped path. PR #15 supplies the required global SUM route, while COUNT, AVG and other aggregates use ordinary grouped per-row updates.",
+    "performance": "No new timings were taken after removing PR #5. Historical benchmark samples retain their original source identities and include the old PR #5 route; none measures this amended series."
+  },
+  "bound_sum_update_fn": {
+    "main": "1c5588a3c456c4c0810daa8c18c0d4c2bea855e2",
+    "stack": [
+      {
+        "number": 6,
+        "branch": "codex/df-06-typed-aggregate",
+        "old_sha": "7985dace8669503a7ae0054ab67871e6c86236c8",
+        "new_sha": "0a69952f69816a5c4ca6fd96f13c88746af37bfd",
+        "all_targets_check": true,
+        "release_tests": 111
+      },
+      {
+        "number": 7,
+        "branch": "codex/df-07-integer-group-index",
+        "old_sha": "bb85fac2cdbd08bc1262b3120897bcca9c6f6f4f",
+        "new_sha": "a264ff546611e14cb1049bda4b1adfed89d665fe",
+        "all_targets_check": true
+      },
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "50f13cf3ead4ac4cc06a0e7b37c8b537e2844680",
+        "new_sha": "77a820c37805d6342f553a8d3a488e08391612ec",
+        "all_targets_check": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "cb862b9ad898c98e49d19f86b9efaeca805f074e",
+        "new_sha": "c6453520f20df57e71e60a6d5877354d717b6ffe",
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "055ad766b7539b5901869f5c4fee3bce8c8c7971",
+        "new_sha": "ad2549e46b34a1f5561d2ba77a5050db2c27411b",
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "5586b577cf5fcc3f4fbed28ade6fa00ee3fc7436",
+        "new_sha": "d2ac5489a53b156d9076974c163fcc5d437c5b48",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "73f2dc051cbb51705db419819f042a7ad879e780",
+        "new_sha": "9b692f84e24daec38a5fd30098f4fe9c7e3d2176",
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "82b55db1bbca84d1dc3d34730db63ecef8f24f08",
+        "new_sha": "c6f022c2c5fd553ca33907d10f336cc6a489e2fd",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "502a50aa5c218a32a23bafca05bc96aeae053f66",
+        "new_sha": "76260ec688d974b7276dc794805b8cb9cd2517d9",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "bd12073d05e1d64fc7751b1fa2df9a1157bff1d0",
+        "new_sha": "453c7d271e0f99a563411c7978a4a1f759bed6d9",
+        "all_targets_check": true,
+        "release_tests": 132
+      }
+    ],
+    "local_harness": "06f23e4224c06518f9ba6d21549062013b3a277e",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 148,
+    "binding": "SUM construction pairs the enum state with a SumUpdateFn selected by result type. Batch update invokes that function; typed state accessors validate the matching variant outside row loops. Resize and materialization retain their enum matches. Grouped merges reuse the bound update function.",
+    "validation": "All ten remaining core checkpoints passed cargo check --all-targets --locked. Fresh release tests passed 111 at PR #6, 132 at PR #16, and 148 in the local DataFusion workspace. Checked integer overflow, NULL validity, sliced bitmaps and floating accumulation order are unchanged.",
+    "performance": "No performance measurement was repeated for this binding amendment. No speedup is inferred from replacing one per-batch enum dispatch with an indirect function call."
+  },
+  "bound_aggregate_update_fns": {
+    "main": "1c5588a3c456c4c0810daa8c18c0d4c2bea855e2",
+    "stack": [
+      {
+        "number": 6,
+        "branch": "codex/df-06-typed-aggregate",
+        "old_sha": "0a69952f69816a5c4ca6fd96f13c88746af37bfd",
+        "new_sha": "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca",
+        "all_targets_check": true,
+        "release_tests": 111
+      },
+      {
+        "number": 7,
+        "branch": "codex/df-07-integer-group-index",
+        "old_sha": "a264ff546611e14cb1049bda4b1adfed89d665fe",
+        "new_sha": "15e691997acef2c243840bd0b33f6e4dd053d5db",
+        "all_targets_check": true
+      },
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "77a820c37805d6342f553a8d3a488e08391612ec",
+        "new_sha": "00a6356edaa3639b8cd8ab24b31bcda48bd6f5c7",
+        "all_targets_check": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "c6453520f20df57e71e60a6d5877354d717b6ffe",
+        "new_sha": "b9a95cd255cccf3df4f905efe6665e615e6d89b3",
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "ad2549e46b34a1f5561d2ba77a5050db2c27411b",
+        "new_sha": "3d6d9d28b7d49e50fc2709c9c8ab246a9e7ce3a2",
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "d2ac5489a53b156d9076974c163fcc5d437c5b48",
+        "new_sha": "ab55c250c967df2a422522fdc18a7cc310d9df3b",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "9b692f84e24daec38a5fd30098f4fe9c7e3d2176",
+        "new_sha": "421bd1de47acaf97e1ecf824e8a9bfe36a000061",
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "c6f022c2c5fd553ca33907d10f336cc6a489e2fd",
+        "new_sha": "a97ba592192497b66a534365c1d14425de903ccc",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "76260ec688d974b7276dc794805b8cb9cd2517d9",
+        "new_sha": "985d5dd51639f06d8bb88fe6ef45f15678c54b48",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "453c7d271e0f99a563411c7978a4a1f759bed6d9",
+        "new_sha": "ca5438684181a389455d045eb3f8c7237c65ec23",
+        "all_targets_check": true,
+        "release_tests": 132
+      }
+    ],
+    "local_harness": "fef23127112ba529cc4b7afc3c8e11f2120557ae",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 148,
+    "binding": "All supported aggregates pair an AccumulatorState enum with an UpdateFn during construction. COUNT, COUNT DISTINCT, AVG and COVAR_POP select fixed functions. SUM selects its typed function by result type at the same boundary, without a second indirect SUM call. MIN/MAX bind update_extremum::<true/false>, removing the stored runtime minimum flag. Each update function obtains its matching mutable state through safe private accessors outside row loops. Resize, state materialization and non-SUM/non-extremum partial merges retain enum matches. SUM and MIN/MAX merges reuse the bound update entry point.",
+    "validation": "All ten remaining core checkpoints passed cargo check --all-targets --locked. Fresh release tests passed 111 at PR #6, 132 at PR #16, and 148 in the local DataFusion workspace. Existing worker-merge, distinct, covariance, extrema, NULL/FILTER, signature error and overflow tests passed.",
+    "performance": "No performance measurement was repeated for this binding amendment. MIN/MAX comparator direction is a compile-time constant, but no speedup is inferred from binding changes alone.",
+    "superseded_by": "early_sum_result_validation"
+  },
+  "aggregate_binding_ablation": {
+    "source_before": "0a69952f69816a5c4ca6fd96f13c88746af37bfd",
+    "source_after": "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca",
+    "runtime_reference": "7985dace8669503a7ae0054ab67871e6c86236c8",
+    "metadata": "aggregate-binding/metadata.json",
+    "raw_samples": [
+      "aggregate-binding/process-0.csv",
+      "aggregate-binding/process-1.csv",
+      "aggregate-binding/process-2.csv"
+    ],
+    "timing_rows": 16848,
+    "cases_per_process": 78,
+    "processes": 3,
+    "measurement_scope": "Accumulator::update only, including casts and existing row encoding; binding, resize, input creation, group-ID generation, state/output materialization, storage and pipeline scheduling excluded",
+    "control": "One shared module and identical state layout for the factorial; shared loop bodies are kept out of dispatch wrappers. Actual before/after source snapshots are measured separately with default inlining.",
+    "conclusions": "Binding alone is close to neutral at normal batches. At 8192 nullable rows, MIN/MAX Int64 direction specialization reduces time by 8.26%/5.02%; actual seven-aggregate refactor reduces mixed time by 1.69% with COUNT/Float64 SUM regressions and unstable COUNT DISTINCT. Actual source deltas include code generation and layout; do not assign them all to dispatch binding. No new full-query/DataFusion result is claimed.",
+    "validation": "Independent one-batch scalar references plus exact six-way output comparison after every timing round. All three processes completed all cases. Measurements refer to the recorded source_after snapshot before early SUM result validation; the amendment was tested separately and these timings were not regenerated."
+  },
+  "early_sum_result_validation": {
+    "main": "1c5588a3c456c4c0810daa8c18c0d4c2bea855e2",
+    "stack": [
+      {
+        "number": 6,
+        "branch": "codex/df-06-typed-aggregate",
+        "old_sha": "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca",
+        "new_sha": "d970548e75f6cc5f0247846bdd95eda19e031815",
+        "release_tests": 113,
+        "all_targets_check": true
+      },
+      {
+        "number": 7,
+        "branch": "codex/df-07-integer-group-index",
+        "old_sha": "15e691997acef2c243840bd0b33f6e4dd053d5db",
+        "new_sha": "118e18dc9d31503069ecc615c0158f7d87e591cc",
+        "all_targets_check": true
+      },
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "00a6356edaa3639b8cd8ab24b31bcda48bd6f5c7",
+        "new_sha": "0f569224cbfacf0d7729beb8b8ed1c07e2d91757",
+        "all_targets_check": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "b9a95cd255cccf3df4f905efe6665e615e6d89b3",
+        "new_sha": "7d7a683584e89a70a6d2fa87d3de32ef23ef66f1",
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "3d6d9d28b7d49e50fc2709c9c8ab246a9e7ce3a2",
+        "new_sha": "7d8bc2f711dc52f60ef98752a57f47bd059efa67",
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "ab55c250c967df2a422522fdc18a7cc310d9df3b",
+        "new_sha": "3724221a894ddb42e8887cf68efa37ee996d41f6",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "421bd1de47acaf97e1ecf824e8a9bfe36a000061",
+        "new_sha": "dc8a24aa635ac1987932bd9ad4c7ea9080c0470a",
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "a97ba592192497b66a534365c1d14425de903ccc",
+        "new_sha": "07e103405b470f2bda68bb7d0f6c9d18bb2e6b99",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "985d5dd51639f06d8bb88fe6ef45f15678c54b48",
+        "new_sha": "af492cea0040c06b88ed82b9ad68f22537765571",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "ca5438684181a389455d045eb3f8c7237c65ec23",
+        "new_sha": "3abbb6186db2f0912ad644bf5bc0eab16f778c3a",
+        "all_targets_check": true,
+        "release_tests": 134
+      }
+    ],
+    "local_harness": "8f5bcff7b54ead9264b1627000860adb08e8180f",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 150,
+    "change": "PR #6 removes SumGroups::Unsupported. SumGroups::bind returns Result and rejects all result types except Int64, UInt64 and Float64 with InvalidPlan before processing input. SumGroups::state is infallible. Supported narrower numeric input arrays still cast to the declared result type. Integer overflow, NULL and floating-order semantics are unchanged.",
+    "validation": "PR #6 passed 113 release tests, the final core passed 134, and the local-only DataFusion workspace passed 150. All ten core checkpoints passed all-target compilation. Tests check invalid result types during executor and worker-state construction and valid Int32/UInt32/Float32 input widening.",
+    "performance": "No timing rerun is claimed for this amendment. All published benchmark samples retain their measured source identities, including the previous PR #6 aggregate-binding snapshot.",
+    "superseded_by": "after_pr7_merge"
+  },
+  "after_pr6_merge": {
+    "main": "3aaa6fefe9397d3efc1271d235a46d0be9ecd975",
+    "merged_pr": {
+      "number": 6,
+      "reviewed_head": "d970548e75f6cc5f0247846bdd95eda19e031815",
+      "merge_commit": "3aaa6fefe9397d3efc1271d235a46d0be9ecd975",
+      "release_tests": 113,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [
+      {
+        "number": 7,
+        "branch": "codex/df-07-integer-group-index",
+        "old_sha": "118e18dc9d31503069ecc615c0158f7d87e591cc",
+        "all_targets_check": true,
+        "new_sha": "962c02511900c80ca97be4d2f8126ae88c1c3ec0",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "0f569224cbfacf0d7729beb8b8ed1c07e2d91757",
+        "all_targets_check": true,
+        "new_sha": "952201ac26630be576a6a7a7bfb42a9ac6b50be1",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "7d7a683584e89a70a6d2fa87d3de32ef23ef66f1",
+        "all_targets_check": true,
+        "new_sha": "3d5542e1fdff6ee2da3baaf1bcf0ea0be54abcff",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "7d8bc2f711dc52f60ef98752a57f47bd059efa67",
+        "all_targets_check": true,
+        "new_sha": "740981e19511b4ff5b8ef2b5be84817134e25d18",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "3724221a894ddb42e8887cf68efa37ee996d41f6",
+        "all_targets_check": true,
+        "new_sha": "74a9c705bb2ddd05d60e00ed20a3f757f9fb110b",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "dc8a24aa635ac1987932bd9ad4c7ea9080c0470a",
+        "all_targets_check": true,
+        "new_sha": "9a6169365871cc7402bb9740f3eb54edb4d599ce",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "07e103405b470f2bda68bb7d0f6c9d18bb2e6b99",
+        "all_targets_check": true,
+        "new_sha": "b49bb59bc621b5a5d9fb511649d749846fef7cf0",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "af492cea0040c06b88ed82b9ad68f22537765571",
+        "all_targets_check": true,
+        "new_sha": "4220017661123a3bff2ec0760897d9c46c461d6b",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "3abbb6186db2f0912ad644bf5bc0eab16f778c3a",
+        "all_targets_check": true,
+        "new_sha": "daad9c474d9faa607858b65bd2989083025662bf",
+        "tree_unchanged_from_tested_head": true,
+        "release_tests": 134
+      }
+    ],
+    "local_harness": "f0d7cd9ad7c3ce4f49263b5f52d17e7afd5daccd",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 150,
+    "validation": "The squash merge tree exactly equals the reviewed PR #6 tree with 113 passing release tests and all-target compilation. All remaining core and local integration trees exactly equal the previously validated heads (134 final-core and 150 local-workspace release tests). Reparenting changed only commit ancestry; no tests or timings were rerun.",
+    "performance": "Recorded timing samples retain their measured source revisions; no new performance claim is made for merging or restacking."
+  },
+  "after_pr7_merge": {
+    "main": "1bfd41bdcc20f78a58b86957302369825a254076",
+    "merged_pr": {
+      "number": 7,
+      "reviewed_head": "962c02511900c80ca97be4d2f8126ae88c1c3ec0",
+      "merge_commit": "1bfd41bdcc20f78a58b86957302369825a254076",
+      "release_tests": 117,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "952201ac26630be576a6a7a7bfb42a9ac6b50be1",
+        "all_targets_check": true,
+        "new_sha": "c0973912e5b6e74632039474bb02c053893eafce",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "3d5542e1fdff6ee2da3baaf1bcf0ea0be54abcff",
+        "all_targets_check": true,
+        "new_sha": "c45a39bd2d9042c4da6ee3f27055669d819e8187",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "740981e19511b4ff5b8ef2b5be84817134e25d18",
+        "all_targets_check": true,
+        "new_sha": "2e64d14c8e66ad350cacaef51e8e101268945111",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "74a9c705bb2ddd05d60e00ed20a3f757f9fb110b",
+        "all_targets_check": true,
+        "new_sha": "8fee80ca306a7d64b3d49ebf5b7f6c3259751a00",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "9a6169365871cc7402bb9740f3eb54edb4d599ce",
+        "all_targets_check": true,
+        "new_sha": "0ce944cda2b87a1af9fbf25466ce5bb30f3560e2",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "b49bb59bc621b5a5d9fb511649d749846fef7cf0",
+        "all_targets_check": true,
+        "new_sha": "9385ff0eca1289513892baae073b49a01c7a9ba5",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "4220017661123a3bff2ec0760897d9c46c461d6b",
+        "all_targets_check": true,
+        "new_sha": "931f1858783cfd194499366400a101e4c8a6f9cb",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "daad9c474d9faa607858b65bd2989083025662bf",
+        "all_targets_check": true,
+        "new_sha": "5b7af1b6482a77c3e4165e437aed5422b9a1dce5",
+        "tree_unchanged_from_tested_head": true,
+        "release_tests": 134
+      }
+    ],
+    "local_harness": "df9f913158fc7d8114aff16e9e33534d800c6a09",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 150,
+    "validation": "The squash merge tree exactly equals the reviewed PR #7 tree with 117 passing release tests and all-target compilation. All remaining core and local integration trees exactly equal the previously validated heads (134 final-core and 150 local-workspace release tests). Reparenting changed only commit ancestry; no tests or timings were rerun.",
+    "performance": "Recorded timing samples retain their measured source revisions; no new performance claim is made for merging or restacking.",
+    "superseded_by": "remove_aggregate_reference_specialization"
+  },
+  "remove_aggregate_reference_specialization": {
+    "main": "1bfd41bdcc20f78a58b86957302369825a254076",
+    "stack": [
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "c0973912e5b6e74632039474bb02c053893eafce",
+        "new_sha": "7cdfcc1a00f92de5241cd6ff7e23fcf9a6405722",
+        "all_targets_check": true,
+        "release_tests": 120
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "c45a39bd2d9042c4da6ee3f27055669d819e8187",
+        "new_sha": "aa17da0111f4111490addd5e85df62c5f8f31eb7",
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "2e64d14c8e66ad350cacaef51e8e101268945111",
+        "new_sha": "8b1efd0182233f0b946a70115a39bb6c7ae8ce68",
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "8fee80ca306a7d64b3d49ebf5b7f6c3259751a00",
+        "new_sha": "e5a2d3c733045602634920b9a566a26e338a8a45",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "0ce944cda2b87a1af9fbf25466ce5bb30f3560e2",
+        "new_sha": "b6346344467ffa493935b0813b4854ba56c58a43",
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "9385ff0eca1289513892baae073b49a01c7a9ba5",
+        "new_sha": "188cc312ccdc4d1804d4017b5183cbb31eafaffd",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "931f1858783cfd194499366400a101e4c8a6f9cb",
+        "new_sha": "a6e53d9154df28090fbb0e3e14bd691935553953",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "5b7af1b6482a77c3e4165e437aed5422b9a1dce5",
+        "new_sha": "9a3f5f1ddbb7f54c1da26487ea93ceacf455f0f0",
+        "all_targets_check": true,
+        "release_tests": 134
+      }
+    ],
+    "local_harness": "aca831842cd4d2f9101bd3a5c580a02d0f30d3dc",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 150,
+    "change": "Aggregate arguments use ScalarExpressionEvaluation uniformly. Remove AggregateArgument and all aggregate-specific Reference dispatch. PR #13 retains only the empty-argument shortcut.",
+    "validation": "Fresh release tests passed: 120 at PR #8, 134 at final core PR #16, 150 in the local-only DataFusion workspace. Every remaining core checkpoint passed all-target compilation.",
+    "performance": "No new timings were collected. Historical cumulative argument-preparation and borrowed-reference timings include removed code and must not be attributed to the amended revisions.",
+    "superseded_by": "single_argument_aggregates"
+  },
+  "single_argument_aggregates": {
+    "main": "1bfd41bdcc20f78a58b86957302369825a254076",
+    "stack": [
+      {
+        "number": 8,
+        "branch": "codex/df-08-aggregate-preparation",
+        "old_sha": "7cdfcc1a00f92de5241cd6ff7e23fcf9a6405722",
+        "new_sha": "6504d61bca4ffc48ca18d90365c068a67a708b45",
+        "all_targets_check": true,
+        "release_tests": 120
+      },
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "aa17da0111f4111490addd5e85df62c5f8f31eb7",
+        "new_sha": "bc42f85be4056817be24df76b2c55e2a746e6629",
+        "all_targets_check": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "8b1efd0182233f0b946a70115a39bb6c7ae8ce68",
+        "new_sha": "b783aee5596bee05ef590e1579c88591a13725c0",
+        "all_targets_check": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "e5a2d3c733045602634920b9a566a26e338a8a45",
+        "new_sha": "4f5d93b876a7c2933a69d2273953c36fd8adb9a3",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "b6346344467ffa493935b0813b4854ba56c58a43",
+        "new_sha": "d7cc8589c008f58419e1b335b4b44a81393f274c",
+        "all_targets_check": true
+      },
+      {
+        "number": 13,
+        "branch": "codex/df-13-borrowed-arguments",
+        "old_sha": "188cc312ccdc4d1804d4017b5183cbb31eafaffd",
+        "superseded": true,
+        "new_sha": "d7cc8589c008f58419e1b335b4b44a81393f274c"
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "a6e53d9154df28090fbb0e3e14bd691935553953",
+        "new_sha": "73a70f9910760ab8f3fce3421e578f7121e25ac2",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "9a3f5f1ddbb7f54c1da26487ea93ceacf455f0f0",
+        "new_sha": "f8a8d74c6e34114576e81b2c737f588831f65646",
+        "all_targets_check": true,
+        "release_tests": 134
+      }
+    ],
+    "local_harness": "9e3e5afa256525ca1c24773aaabaf07a390036e6",
+    "core_test_trees_match_local": true,
+    "local_workspace_release_tests": 150,
+    "change": "Remove COVAR_POP and use Option<ScalarExprRef> with one optional evaluated array throughout aggregate updates.",
+    "superseded_pr": 13,
+    "validation": "Fresh release tests at PR #8, final core PR #16 and local DataFusion workspace; all active core checkpoints passed all-target compilation. See stack records for counts.",
+    "performance": "No fresh timings. Existing samples preserve their original code snapshots, including historical COVAR_POP and argument-vector implementations; they do not measure this revision.",
+    "superseded_by": "after_pr8_merge"
+  },
+  "after_pr8_merge": {
+    "main": "67d39dc33cdd2d614441f77c457c930b387ac289",
+    "merged_pr": {
+      "number": 8,
+      "reviewed_head": "6504d61bca4ffc48ca18d90365c068a67a708b45",
+      "merge_commit": "67d39dc33cdd2d614441f77c457c930b387ac289",
+      "release_tests": 120,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [
+      {
+        "number": 9,
+        "branch": "codex/df-09-aggregate-hotloop",
+        "old_sha": "bc42f85be4056817be24df76b2c55e2a746e6629",
+        "all_targets_check": true,
+        "new_sha": "6b309ac73edee0831cdb7543a8a9a4fbf66901bd",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "b783aee5596bee05ef590e1579c88591a13725c0",
+        "all_targets_check": true,
+        "new_sha": "bc9cba6c7ffcf7e7bd845a0f01937ec0bcc92528",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "4f5d93b876a7c2933a69d2273953c36fd8adb9a3",
+        "all_targets_check": true,
+        "new_sha": "1dfd20fcc550d328c29efa707edd29f3b727888f",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "d7cc8589c008f58419e1b335b4b44a81393f274c",
+        "all_targets_check": true,
+        "new_sha": "5c006e3862664d2484ce184ec1011a9f48515353",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "73a70f9910760ab8f3fce3421e578f7121e25ac2",
+        "all_targets_check": true,
+        "new_sha": "c07e7248bdc9f1b831b6e5e6c0282292eac2da2b",
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "f8a8d74c6e34114576e81b2c737f588831f65646",
+        "all_targets_check": true,
+        "release_tests": 134,
+        "new_sha": "bfa94d19cd91074edf8c68175d17377164aeb98b",
+        "tree_unchanged_from_tested_head": true
+      }
+    ],
+    "local_harness": "10915070e70c2c4fb8d67298ed2896c0e7f91b66",
+    "local_workspace_release_tests": 150,
+    "core_test_trees_match_local": true,
+    "validation": "The squash merge tree equals the reviewed PR #8 tree validated by 120 release tests and all-target compilation. Remaining core and local harness trees exactly match the previously validated revisions, including 134 final-core and 150 local-workspace release tests. No tests were rerun for ancestry-only changes.",
+    "performance": "PR #8 benchmark snapshots and all 5760 samples retain their measured identities. The merged tree equals the measured candidate tree. No new measurements were collected for merge/restack.",
+    "superseded_by": "drop_pr9"
+  },
+  "drop_pr9": {
+    "main": "67d39dc33cdd2d614441f77c457c930b387ac289",
+    "stack": [
+      {
+        "number": 10,
+        "branch": "codex/df-10-whole-batch",
+        "old_sha": "bc9cba6c7ffcf7e7bd845a0f01937ec0bcc92528",
+        "new_sha": "416a3910f6dbff231e21e3d602f8baac2245e06f",
+        "all_targets_check": true,
+        "release_tests": 121
+      },
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "1dfd20fcc550d328c29efa707edd29f3b727888f",
+        "new_sha": "0953ec4e4ee50e29032bf2d18cc3c58547063308",
+        "all_targets_check": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "5c006e3862664d2484ce184ec1011a9f48515353",
+        "new_sha": "99f5457e9fcb067897ddf3c29a97242ffac559a2",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "c07e7248bdc9f1b831b6e5e6c0282292eac2da2b",
+        "new_sha": "1d633def248eb222d93293f4beb7c8b8bb5aecb1",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "bfa94d19cd91074edf8c68175d17377164aeb98b",
+        "new_sha": "1c64776b194aabfb5b3fdd5e0b528f9523424c1e",
+        "all_targets_check": true,
+        "release_tests": 132
+      }
+    ],
+    "closed_prs": [
+      {
+        "number": 13,
+        "reason": "Superseded by single optional argument evaluation in PR #8; transformed incremental diff is empty.",
+        "old_sha": "188cc312ccdc4d1804d4017b5183cbb31eafaffd"
+      },
+      {
+        "number": 9,
+        "old_sha": "6b309ac73edee0831cdb7543a8a9a4fbf66901bd",
+        "reason": "Deferred at user request; remove NULL-density dispatch and integer first-value specialization from all later PRs."
+      }
+    ],
+    "local_harness": "a1032cc3f1b4fc86bd314319354586c362828638",
+    "local_workspace_release_tests": 148,
+    "core_test_trees_match_local": true,
+    "change": "Remove PR #9 NULL-density dispatch and integer SUM first-value specialization from all remaining heads. Grouped SUM and COUNT exactly reuse main implementation. Global SUM in PR #15 retains local-state accumulation with plain valid_indices and the original first-value semantics. Remove PR #9 regression file.",
+    "validation": "Fresh release tests: 121 at PR #10, 132 at final PR #16, 148 in the local-only DataFusion workspace. All remaining core heads passed all-target compilation.",
+    "performance": "No timings were rerun for these later heads. Main and the measured PR #8 tree are unchanged, so that report remains applicable. Historical later-PR samples contain removed PR #9 code and do not measure current heads.",
+    "superseded_by": "after_pr10_merge"
+  },
+  "after_pr10_merge": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "merged_pr": {
+      "number": 10,
+      "reviewed_head": "416a3910f6dbff231e21e3d602f8baac2245e06f",
+      "merge_commit": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+      "release_tests": 121,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [
+      {
+        "number": 11,
+        "branch": "codex/df-11-ready-poll",
+        "old_sha": "0953ec4e4ee50e29032bf2d18cc3c58547063308",
+        "new_sha": "6ee7251da77e7238e44034807447ae510420b510",
+        "all_targets_check": true,
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "99f5457e9fcb067897ddf3c29a97242ffac559a2",
+        "new_sha": "269fa0881c920c922fa1a37162f6dbf73ecaf2d7",
+        "all_targets_check": true,
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "1d633def248eb222d93293f4beb7c8b8bb5aecb1",
+        "new_sha": "ed79a248f33aba1de6e3a601abb9d4ec3d8ea892",
+        "all_targets_check": true,
+        "tree_unchanged_from_tested_head": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "1c64776b194aabfb5b3fdd5e0b528f9523424c1e",
+        "new_sha": "c08db4cdbf355413f47c1eb9103e8374c571435e",
+        "all_targets_check": true,
+        "release_tests": 132,
+        "tree_unchanged_from_tested_head": true
+      }
+    ],
+    "local_harness": "a9458d66c77633016ba74471e43046fad1430e1d",
+    "local_workspace_release_tests": 148,
+    "core_test_trees_match_local": true,
+    "validation": "The squash merge tree equals the reviewed PR #10 tree validated by 121 release tests and all-target compilation. Remaining core and local-only harness source trees and incremental diffs are unchanged, preserving their earlier compilation checks, 132 final-core and 148 local-workspace release tests. No checks were repeated for ancestry-only changes.",
+    "performance": "Historical benchmark snapshots and samples retain their measured identities. No timings were collected for PR #10 or the ancestry-only update.",
+    "superseded_by": "drop_pr11"
+  },
+  "pr11_current_scan_benchmark": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "head": "6ee7251da77e7238e44034807447ae510420b510",
+    "samples": 360,
+    "report": "pr11-current/README.md",
+    "scope": "ScanExec next_batch only; ready source, queued channel, synthetic scan-plus-Arrow-SUM and one artificial Pending. No SQL-query or real I/O measurements.",
+    "ready_channel_main_ns": 108.0427608820483,
+    "ready_channel_pr11_ns": 85.00769766204463,
+    "status": "Historical measurement of closed PR #11; source snapshots and timing samples are unchanged. This optimization is absent from later source heads."
+  },
+  "drop_pr11": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "closed_pr": {
+      "number": 11,
+      "old_sha": "6ee7251da77e7238e44034807447ae510420b510",
+      "reason": "Deferred because the isolated ready-channel path saves about 23 ns per batch with no demonstrated material query improvement; retain simpler select_biased polling."
+    },
+    "stack": [
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "269fa0881c920c922fa1a37162f6dbf73ecaf2d7",
+        "new_sha": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+        "all_targets_check": true
+      },
+      {
+        "number": 15,
+        "branch": "codex/df-15-global-sum-local",
+        "old_sha": "ed79a248f33aba1de6e3a601abb9d4ec3d8ea892",
+        "new_sha": "07919a785169557521d188860ee2c78f50b3a62d",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "c08db4cdbf355413f47c1eb9103e8374c571435e",
+        "new_sha": "b308030a737e2b705a0bde2ba6b2e1cec0f1f390",
+        "all_targets_check": true,
+        "release_tests": 130
+      }
+    ],
+    "local_harness": "1c2af64854fe30baca4ee149260a8ffc3e3271f3",
+    "local_workspace_release_tests": 146,
+    "core_test_trees_match_local": true,
+    "validation": "Every remaining core head passed all-target compilation. Final core passed 130 release tests and the local-only DataFusion workspace passed 146. ScanExecutor is identical to main, including its simpler select_biased polling. Two PR #11-specific unit tests were removed with that patch; all other incremental PR diffs are identical.",
+    "performance": "Keep all 360 PR #11 timing samples and their exact measured source identities as historical evidence. Isolated ready-channel reads saved about 23 ns per batch with no measured SQL-query improvement; the complexity was rejected. No timings were collected for the post-removal stack.",
+    "superseded_by": "remaining_pr_review"
+  },
+  "remaining_pr_review": {
+    "main": "47f1511b67561bae0b6c7654e71355f20d1d2e7b",
+    "closed_pr": {
+      "number": 15,
+      "old_sha": "07919a785169557521d188860ee2c78f50b3a62d",
+      "reason": "Deferred after current-source leave-one-out measurements: over 4M Snappy Parquet rows, the global Int64 SUM/COUNT query changes from 54.00 to 54.17 ms at one thread and 14.86 to 15.00 ms at four threads. Five paired process runs show no stable improvement. The additional global route, duplicated FILTER/argument preparation and fallback per-batch group-ID allocation are not justified by demonstrated benefit. Preserve the exact measured snapshots and raw samples; remove this patch from later heads. This decision applies to the measured workload and current implementation, not every possible global-SUM design."
+    },
+    "retained_stack": [
+      {
+        "number": 12,
+        "branch": "codex/df-12-scalar-arrow",
+        "old_sha": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+        "new_sha": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+        "all_targets_check": true
+      },
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "b308030a737e2b705a0bde2ba6b2e1cec0f1f390",
+        "new_sha": "de42987d66ae02143ff2d40be125f8ace53c2e3d",
+        "all_targets_check": true,
+        "release_tests": 122
+      }
+    ],
+    "local_harness": "5a9526d1c00b8a2dba4e392ce8716a4b31e30d9c",
+    "local_workspace_release_tests": 138,
+    "core_test_trees_match_local": true,
+    "source_matches_measured_without15": true,
+    "measurement": {
+      "report": "remaining-pr-review/README.md",
+      "local_source": "1c2af64854fe30baca4ee149260a8ffc3e3271f3",
+      "core_heads": {
+        "12": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+        "15": "07919a785169557521d188860ee2c78f50b3a62d",
+        "16": "b308030a737e2b705a0bde2ba6b2e1cec0f1f390"
+      },
+      "samples": {
+        "roc": 1120,
+        "datafusion": 1120,
+        "total": 2240
+      },
+      "variants": {
+        "all": {
+          "changes": [],
+          "compiled_source_sha256": "c905f2e9e5be452d7ea357e019424631e3106c9c90068801511dc4657950714f",
+          "binary_sha256": "20da6b2bc6f7a42b3936844d54087dd383005973fc4df7d88e357352219e138d",
+          "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+          "local-source_archive_sha256": "98002979fec902a647a4c5cda004024b34ac3197e9009e4fd2bc435d9c264ad9",
+          "core-source_archive_sha256": "baa87caf365788056588288aeaf161a0c55fe50c5fa0fc33e80db6c6961fe70b"
+        },
+        "without12": {
+          "changes": [
+            {
+              "path": "src/expr/scalar/kernels.rs",
+              "restored_from": "47f1511b67561bae0b6c7654e71355f20d1d2e7b"
+            }
+          ],
+          "compiled_source_sha256": "031de39b59ee4860e138ad232ddc17ed7719be6863e220332c98bd4d69038103",
+          "binary_sha256": "de42fa1d2ec9969881c57821e047a04aa8876c43a44949016dbed16186cdb0b3",
+          "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+          "local-source_archive_sha256": "e1421df2d349b9a7ef11c562ada868c964d0cdb8d956382d59340edd3231a224",
+          "core-source_archive_sha256": "ece0d8e87638fcaadb346dcfb71aedb495f2469e00214d438d89ae93faf0c3d1"
+        },
+        "without15": {
+          "changes": [
+            {
+              "path": "src/exec/aggregate.rs",
+              "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+            },
+            {
+              "path": "src/expr/agg/accumulator.rs",
+              "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+            },
+            {
+              "path": "src/expr/agg/executor.rs",
+              "restored_from": "5a6d73e06f99bec096df7f2b5f2de1826612ff41"
+            },
+            {
+              "removed": "tests/agg_optimized.rs"
+            }
+          ],
+          "compiled_source_sha256": "cd01347de3e1a5fc9e47e47df2a577425bd5fc916fbcf6b4db2bc52022799c0d",
+          "binary_sha256": "60aa6353ce699223de483855288e60eac455d99933322ebbd4218f5af347774b",
+          "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+          "local-source_archive_sha256": "9ac69982a50920e4ad193d469f93f619f7ddadda201b4f24942467f84c25c25d",
+          "core-source_archive_sha256": "e08ec2d4c7c2c9838f950c3907610be198602244da80d16a9a99bf62e9a2a366"
+        },
+        "without16": {
+          "changes": [
+            {
+              "path": "src/exec/filter.rs",
+              "restored_from": "07919a785169557521d188860ee2c78f50b3a62d"
+            },
+            {
+              "path": "src/operator/filter.rs",
+              "restored_from": "07919a785169557521d188860ee2c78f50b3a62d"
+            },
+            {
+              "path": "integrations/datafusion/src/converter.rs",
+              "change": "Disable local projection/filter fusion and column index remapping; keep ordinary projection above full-schema filter."
+            }
+          ],
+          "compiled_source_sha256": "b6527c92ade5eaf729b8954a8cbf579280ab170b976392b4dc4e6376d0504aad",
+          "binary_sha256": "40288a3bff8df22663a3cf51ae4435b71379d50fde9a80a1acb3b3c34ab869d6",
+          "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+          "local-source_archive_sha256": "fed0506390057b8756b1f35ec03568aca6d4955b17d98a16757351cabfb35d3f",
+          "core-source_archive_sha256": "cb52b8cd7371aa2a73b51da94bbb7e6dbc6c035584e8a885095e8a1c8843db5e"
+        }
+      },
+      "decisions": {
+        "12": "Retain: replaces a handwritten scalar comparison implementation with existing Arrow kernels, net removes 34 production lines; affected SQL filter/project is about 1.8%-2.0% faster in this setup. Simplification is the principal reason; small control movements limit causal claims about timing.",
+        "15": "Close/defer: no stable global Int64 SUM/COUNT query improvement at one or four threads; adds a global route, duplicates FILTER/argument preparation and creates fallback group-ID vectors per batch. No conclusion is claimed for every possible type/workload or future implementation.",
+        "16": "Retain: about 4.5%-5.2% lower SQL filter/project elapsed time, removes real predicate-only column filtering work. Optional output-column selection preserves default behavior.",
+        "14": "Retain: evidence documentation adds no runtime execution path; records exact measured identities and scope."
+      }
+    },
+    "validation": "PR #12 is unchanged from its previously checked head. Retained PR #16 passed fresh all-target compilation and 122 release tests; local-only DataFusion workspace passed 138 release tests. PR #15 changes and its eight tests are removed; retained PR #16 incremental diff is unchanged. All core source and test files match the measured without15 source snapshot. No timings were rerun after the identity-only publication update.",
+    "superseded_by": "after_pr12_merge"
+  },
+  "after_pr12_merge": {
+    "main": "e29ed143cbee9ffffb968da744c1acbecb23d392",
+    "merged_pr": {
+      "number": 12,
+      "reviewed_head": "5a6d73e06f99bec096df7f2b5f2de1826612ff41",
+      "merge_commit": "e29ed143cbee9ffffb968da744c1acbecb23d392",
+      "release_tests": 121,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [
+      {
+        "number": 16,
+        "branch": "codex/df-16-filter-projection",
+        "old_sha": "de42987d66ae02143ff2d40be125f8ace53c2e3d",
+        "new_sha": "f4c4d5bdd3653717960503fd447ef5e1cf8db255",
+        "all_targets_check": true,
+        "release_tests": 122,
+        "tree_unchanged_from_tested_head": true
+      }
+    ],
+    "local_harness": "b95d86cb2bdbf93c6077d2bfb4a70494841068af",
+    "local_workspace_release_tests": 138,
+    "core_test_trees_match_local": true,
+    "validation": "The squash merge tree equals the reviewed PR #12 tree validated by 121 release tests and all-target compilation. Remaining core and local-only harness source trees and incremental diffs are unchanged, preserving their earlier compilation checks, 122 final-core and 138 local-workspace release tests. No checks were repeated for ancestry-only changes.",
+    "performance": "Historical benchmark snapshots and samples retain their measured identities. All prior benchmark samples and measured identities remain unchanged. No timings were collected for the ancestry-only update.",
+    "superseded_by": "after_pr16_merge"
+  },
+  "after_pr16_merge": {
+    "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+    "merged_pr": {
+      "number": 16,
+      "reviewed_head": "f4c4d5bdd3653717960503fd447ef5e1cf8db255",
+      "merge_commit": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+      "release_tests": 122,
+      "merge_tree_matches_tested_head": true
+    },
+    "stack": [],
+    "local_harness": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+    "local_workspace_release_tests": 138,
+    "core_test_trees_match_local": true,
+    "validation": "The squash merge tree equals the reviewed PR #16 tree validated by 122 release tests and all-target compilation. The local-only harness source tree is unchanged, and the documentation PR has no production source changes, preserving their earlier compilation checks, 122 final-core and 138 local-workspace release tests. No checks were repeated for ancestry-only changes.",
+    "performance": "Historical benchmark snapshots and samples retain their measured identities. All prior benchmark samples and measured identities remain unchanged. No timings were collected for the ancestry-only update."
+  },
+  "main_current_benchmark_2026_10_07": {
+    "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+    "local_harness": "67fd05a3ecb4c852c96b396869ddfd3d1de5cca8",
+    "core_source_tree": "34ca23507da8768803bc4b6641b55396ec006591",
+    "core_tests_tree": "5c61a6cff8952a135cda0f77903b1fa98eb4b561",
+    "core_source_and_tests_match_main": true,
+    "compiled_source_sha256": "cd01347de3e1a5fc9e47e47df2a577425bd5fc916fbcf6b4db2bc52022799c0d",
+    "binary_sha256": "46eb9d910502395d33c1ee9042db59f6fc13e8c0147a75315ffb7ca98fdb8249",
+    "lock_sha256": "1a7a2d3d6f3f90ddd8f65a8af24f445a8d8b64a4417d363f97e5aea4ace94621",
+    "sample_counts": {
+      "roc": 400,
+      "datafusion": 400,
+      "total": 800
+    },
+    "report": "main-current/README.md",
+    "validation": "Fresh release build and five benchmark processes; all 40 full schema/unordered-row comparisons and 800 timed row-count checks pass. Unit tests were not rerun for unchanged production source. Previous 122 core/138 local-workspace test results remain historical.",
+    "summary": {
+      "scan_only/1t": {
+        "datafusion_ms": 105.83657944579039,
+        "roc_ms": 105.830794597461,
+        "roc_over_datafusion": 0.9999453416922609,
+        "roc_elapsed_gap_percent": -0.005465830773909719,
+        "paired_process_bootstrap_95_gap_percent": [
+          -0.38329186946525207,
+          0.542215973028215
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            105.5427085,
+            105.720104,
+            105.31777100000001,
+            105.93739550000001,
+            106.669979
+          ],
+          "roc": [
+            105.179833,
+            105.15745799999999,
+            106.396354,
+            105.9283125,
+            106.49983350000001
+          ]
+        }
+      },
+      "scan_only/4t": {
+        "datafusion_ms": 31.13644291231655,
+        "roc_ms": 29.128510479726927,
+        "roc_over_datafusion": 0.9355118232919486,
+        "roc_elapsed_gap_percent": -6.44881767080514,
+        "paired_process_bootstrap_95_gap_percent": [
+          -6.899541293227673,
+          -5.875698978505239
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            31.146854,
+            31.000125,
+            30.8711045,
+            31.6063545,
+            31.0628125
+          ],
+          "roc": [
+            28.919,
+            28.9119995,
+            29.2032295,
+            29.575521000000002,
+            29.038000000000004
+          ]
+        }
+      },
+      "filter_project/1t": {
+        "datafusion_ms": 99.63358979451063,
+        "roc_ms": 99.09224080024441,
+        "roc_over_datafusion": 0.994566601530842,
+        "roc_elapsed_gap_percent": -0.5433398469158024,
+        "paired_process_bootstrap_95_gap_percent": [
+          -0.8324541580138289,
+          -0.26795478594588973
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            99.416833,
+            98.87210400000001,
+            98.782729,
+            100.72789600000002,
+            100.3839795
+          ],
+          "roc": [
+            98.93870900000002,
+            98.55506199999999,
+            98.675541,
+            99.936125,
+            99.362166
+          ]
+        }
+      },
+      "filter_project/4t": {
+        "datafusion_ms": 29.42509081495598,
+        "roc_ms": 27.385327749608894,
+        "roc_over_datafusion": 0.9306794640609799,
+        "roc_elapsed_gap_percent": -6.93205359390201,
+        "paired_process_bootstrap_95_gap_percent": [
+          -7.334999537294273,
+          -6.559489768412041
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            29.251728999999997,
+            29.201354000000002,
+            29.451500000000003,
+            29.7795835,
+            29.444792
+          ],
+          "roc": [
+            27.4082495,
+            27.2029375,
+            27.215708499999998,
+            27.792042,
+            27.3119375
+          ]
+        }
+      },
+      "global_aggregate/1t": {
+        "datafusion_ms": 38.533052729253264,
+        "roc_ms": 53.68902503575496,
+        "roc_over_datafusion": 1.3933239448478911,
+        "roc_elapsed_gap_percent": 39.33239448478911,
+        "paired_process_bootstrap_95_gap_percent": [
+          39.06528836149803,
+          39.65995648891156
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            38.932854500000005,
+            38.361000000000004,
+            38.0977495,
+            38.6415,
+            38.637375500000005
+          ],
+          "roc": [
+            54.176812999999996,
+            53.308229499999996,
+            53.320521,
+            53.891958,
+            53.752854
+          ]
+        }
+      },
+      "global_aggregate/4t": {
+        "datafusion_ms": 11.35558646922696,
+        "roc_ms": 14.870376158155777,
+        "roc_over_datafusion": 1.3095207542519895,
+        "roc_elapsed_gap_percent": 30.952075425198956,
+        "paired_process_bootstrap_95_gap_percent": [
+          30.257029598773567,
+          31.555876034931018
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            11.354104,
+            11.355146000000001,
+            11.407041499999998,
+            11.334437000000001,
+            11.327375
+          ],
+          "roc": [
+            14.810542,
+            14.9114375,
+            14.803958000000002,
+            14.9064165,
+            14.919979
+          ]
+        }
+      },
+      "grouped_aggregate/1t": {
+        "datafusion_ms": 70.41420818659222,
+        "roc_ms": 73.34411306623618,
+        "roc_over_datafusion": 1.0416095693624778,
+        "roc_elapsed_gap_percent": 4.160956936247784,
+        "paired_process_bootstrap_95_gap_percent": [
+          3.47895928334665,
+          4.974280547857157
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            70.321125,
+            70.3759995,
+            69.577875,
+            71.357833,
+            70.44956250000001
+          ],
+          "roc": [
+            73.0527705,
+            72.47149999999999,
+            73.395625,
+            74.09718699999999,
+            73.71408349999999
+          ]
+        }
+      },
+      "grouped_aggregate/4t": {
+        "datafusion_ms": 20.593778423657344,
+        "roc_ms": 20.287171007336433,
+        "roc_over_datafusion": 0.9851116482845764,
+        "roc_elapsed_gap_percent": -1.4888351715423576,
+        "paired_process_bootstrap_95_gap_percent": [
+          -1.9665507719414554,
+          -0.9053440098177767
+        ],
+        "process_medians_ms": {
+          "datafusion": [
+            20.6253125,
+            20.37175,
+            20.4765205,
+            20.785978999999998,
+            20.712125
+          ],
+          "roc": [
+            20.331083,
+            20.067292000000002,
+            20.4055,
+            20.360500000000002,
+            20.2732085
+          ]
+        }
+      }
+    }
+  },
+  "global_count_batch_candidate_2026_10_07": {
+    "main": "291317e1c4ee43ca7a613f0a532b1f35fae5aab4",
+    "candidate_core": "0ddd08565871b7e53faa09f738d0cfa25579635c",
+    "candidate_pr": "https://github.com/ZENOTME/Roc/pull/18",
+    "local_harness": "590c6875c80689172aa5f72ad1097ed1ea144d0a",
+    "core_source_and_tests_match_local": true,
+    "core_release_tests_passed": 125,
+    "all_targets_check": true,
+    "report": "global-count-batch/README.md",
+    "primary_focused_summary": {
+      "global_aggregate/1t": {
+        "main_roc_ms": 54.04644831111836,
+        "count_roc_ms": 46.68101830960421,
+        "saved_ms": 7.365430001514149,
+        "roc_elapsed_reduction_percent": 13.627963042298452,
+        "paired_process_bootstrap_95_reduction_percent": [
+          12.053974733626461,
+          15.162257439490823
+        ],
+        "main_datafusion_ms": 38.780796969848545,
+        "count_datafusion_ms": 39.02938482175245,
+        "main_roc_gap_to_datafusion_percent": 39.36394435921113,
+        "count_roc_gap_to_datafusion_percent": 19.604801671347992,
+        "datafusion_control_change_percent": 0.6410075896510881,
+        "process_medians_ms": {
+          "main": {
+            "roc": [
+              56.494646,
+              54.433333000000005,
+              55.1789795,
+              54.15325,
+              54.4887085,
+              53.2304585,
+              52.594104,
+              52.878604499999994,
+              53.67420800000001,
+              53.4505
+            ],
+            "datafusion": [
+              39.0794165,
+              39.763228999999995,
+              40.256146,
+              38.576916,
+              39.19277100000001,
+              38.265874999999994,
+              37.668833,
+              37.851875,
+              38.8094795,
+              38.419604
+            ]
+          },
+          "count": {
+            "roc": [
+              46.444708000000006,
+              46.996104,
+              46.38312500000001,
+              46.500792000000004,
+              45.462542,
+              48.1198335,
+              46.4157295,
+              45.947083500000005,
+              46.573938,
+              48.033125
+            ],
+            "datafusion": [
+              39.4114795,
+              39.03714599999999,
+              38.1345625,
+              39.523458500000004,
+              37.852042,
+              40.2006875,
+              38.910270999999995,
+              38.2640625,
+              39.122875,
+              39.905583500000006
+            ]
+          }
+        }
+      },
+      "global_aggregate/4t": {
+        "main_roc_ms": 15.026987506234505,
+        "count_roc_ms": 12.944855302946447,
+        "saved_ms": 2.082132203288058,
+        "roc_elapsed_reduction_percent": 13.855952182193587,
+        "paired_process_bootstrap_95_reduction_percent": [
+          12.877782330159949,
+          14.888101333851878
+        ],
+        "main_datafusion_ms": 11.522279098726408,
+        "count_datafusion_ms": 11.447549737033468,
+        "main_roc_gap_to_datafusion_percent": 30.416798425716696,
+        "count_roc_gap_to_datafusion_percent": 13.079703520038976,
+        "datafusion_control_change_percent": -0.6485640649096958,
+        "process_medians_ms": {
+          "main": {
+            "roc": [
+              14.989437500000001,
+              14.9416045,
+              15.263749500000001,
+              14.974917000000001,
+              15.293125,
+              14.925771000000001,
+              14.6947295,
+              14.931353999999999,
+              15.321459,
+              14.945729
+            ],
+            "datafusion": [
+              11.582562,
+              11.615729,
+              11.749208,
+              11.550437,
+              11.5350415,
+              11.4305625,
+              11.2160415,
+              11.4110205,
+              11.6935,
+              11.448021
+            ]
+          },
+          "count": {
+            "roc": [
+              13.369937,
+              12.8055625,
+              13.3049375,
+              12.8708755,
+              12.669208000000001,
+              12.784667,
+              12.833896,
+              12.653396,
+              13.1292295,
+              13.0490625
+            ],
+            "datafusion": [
+              11.744542,
+              11.369561999999998,
+              11.5932915,
+              11.3148125,
+              11.327395500000002,
+              11.3756255,
+              11.397417,
+              11.1751255,
+              11.651563,
+              11.538333
+            ]
+          }
+        }
+      }
+    },
+    "all_experiment_counts": {
+      "pilot_total_timings": 1600,
+      "complete_repeat_total_timings": 1600,
+      "focused_total_timings": 800,
+      "total_timings": 4000,
+      "full_correctness_checks": 200
+    },
+    "validation": "Fresh 125 release tests and all-target compilation for the exact candidate core. All 200 complete schema/unordered-row comparisons and 4000 timed row-count checks pass. Focused local binaries apply the same workload-iterator filter to both recorded harness snapshots; production core and timed SQL path are otherwise unchanged. DataFusion integration remains local. Candidate is not merged."
+  }
+}

@@ -1,0 +1,347 @@
+/Users/zenotme/Project/Roc/target/global-sum-diagnostics/paired/reuse/benchmark:
+(__TEXT,__text) section
+__ZN3roc4expr3agg11accumulator21update_global_sum_i6417h542f02f14711faf4E:
+100695b04:	sub	sp, sp, #0x120
+100695b08:	stp	x28, x27, [sp, #0xc0]
+100695b0c:	stp	x26, x25, [sp, #0xd0]
+100695b10:	stp	x24, x23, [sp, #0xe0]
+100695b14:	stp	x22, x21, [sp, #0xf0]
+100695b18:	stp	x20, x19, [sp, #0x100]
+100695b1c:	stp	x29, x30, [sp, #0x110]
+100695b20:	add	x29, sp, #0x110
+100695b24:	mov	x19, x8
+100695b28:	mov	x22, #0x2
+100695b2c:	movk	x22, #0x8000, lsl #48
+100695b30:	ldr	x8, [x0]
+100695b34:	cmp	x8, x22
+100695b38:	b.ne	0x100695f2c
+100695b3c:	mov	x20, x1
+100695b40:	cbz	x1, 0x100695b64
+100695b44:	mov	x23, x0
+100695b48:	mov	x0, x20
+100695b4c:	bl	__ZN103_$LT$alloc..sync..Arc$LT$dyn$u20$arrow_array..array..Array$GT$$u20$as$u20$arrow_array..array..Array$GT$9data_type17ha9af553b7a83faaaE
+100695b50:	add	x1, x23, #0x40
+100695b54:	bl	__ZN73_$LT$arrow_schema..datatype..DataType$u20$as$u20$core..cmp..PartialEq$GT$2eq17h7a1b1839218f99f6E
+100695b58:	tbz	w0, #0x0, 0x100695ba4
+100695b5c:	mov	x8, #0x0
+100695b60:	b	0x100695be0
+100695b64:	bl	__RNvCsfLfy6EI15iL_7___rustc35___rust_no_alloc_shim_is_unstable_v2
+100695b68:	mov	w0, #0x19
+100695b6c:	mov	w1, #0x1
+100695b70:	bl	__RNvCsfLfy6EI15iL_7___rustc12___rust_alloc
+100695b74:	cbz	x0, 0x100695fc8
+100695b78:	adrp	x8, 18774 ; 0x104feb000
+100695b7c:	add	x8, x8, #0x18d
+100695b80:	ldr	q0, [x8]
+100695b84:	str	q0, [x0]
+100695b88:	ldur	q0, [x8, #0x9]
+100695b8c:	stur	q0, [x0, #0x9]
+100695b90:	mov	w8, #0x4
+100695b94:	mov	w9, #0x19
+100695b98:	stp	x8, x9, [x19]
+100695b9c:	stp	x0, x9, [x19, #0x10]
+100695ba0:	b	0x100695e90
+100695ba4:	ldp	x8, x1, [x20]
+100695ba8:	ldr	x9, [x1, #0x10]
+100695bac:	sub	x9, x9, #0x1
+100695bb0:	and	x9, x9, #0xfffffffffffffff0
+100695bb4:	add	x9, x8, x9
+100695bb8:	add	x21, sp, #0x60
+100695bbc:	add	x8, sp, #0x60
+100695bc0:	add	x0, x9, #0x10
+100695bc4:	add	x2, x23, #0x40
+100695bc8:	bl	__ZN10arrow_cast4cast4cast17h3b289f34455f2c23E
+100695bcc:	add	x10, x22, #0x12
+100695bd0:	ldp	x9, x8, [sp, #0x60]
+100695bd4:	ldr	x20, [sp, #0x70]
+100695bd8:	cmp	x9, x10
+100695bdc:	b.ne	0x100695ca4
+100695be0:	stp	x8, x20, [sp, #0x8]
+100695be4:	ldr	x9, [x23, #0x8]
+100695be8:	cbnz	x9, 0x100695f5c
+100695bec:	add	x9, sp, #0x8
+100695bf0:	cmp	x8, #0x0
+100695bf4:	csel	x0, x20, x9, eq
+100695bf8:	bl	__ZN103_$LT$alloc..sync..Arc$LT$dyn$u20$arrow_array..array..Array$GT$$u20$as$u20$arrow_array..array..Array$GT$6as_any17hb775503f5b330cb4E
+100695bfc:	mov	x21, x0
+100695c00:	ldr	x9, [x1, #0x18]
+100695c04:	add	x8, sp, #0x60
+100695c08:	blr	x9
+100695c0c:	ldp	x8, x9, [sp, #0x60]
+100695c10:	mov	x10, #0x82e5
+100695c14:	movk	x10, #0x7dc7, lsl #16
+100695c18:	movk	x10, #0xb1ab, lsl #32
+100695c1c:	movk	x10, #0xe46c, lsl #48
+100695c20:	cmp	x9, x10
+100695c24:	mov	x9, #0x6d0a
+100695c28:	movk	x9, #0x48b8, lsl #16
+100695c2c:	movk	x9, #0x2253, lsl #32
+100695c30:	movk	x9, #0x5f13, lsl #48
+100695c34:	ccmp	x8, x9, #0x0, eq
+100695c38:	b.ne	0x100695f78
+100695c3c:	mov	x22, x21
+100695c40:	ldr	x27, [x22, #0x30]!
+100695c44:	ldur	x8, [x22, #-0x8]
+100695c48:	lsr	x20, x8, #3
+100695c4c:	ldr	x26, [x22, #0x28]
+100695c50:	cmp	x27, #0x0
+100695c54:	csel	x8, xzr, x26, eq
+100695c58:	cmp	x20, x8
+100695c5c:	b.ne	0x100695c74
+100695c60:	mov	w8, #0x5
+100695c64:	str	x8, [x19]
+100695c68:	ldr	x8, [sp, #0x8]
+100695c6c:	cbnz	x8, 0x100695e74
+100695c70:	b	0x100695e90
+100695c74:	ldr	x8, [x23, #0x20]
+100695c78:	cbz	x8, 0x100695fd4
+100695c7c:	ldr	x8, [x23, #0x38]
+100695c80:	cbz	x8, 0x100695fe8
+100695c84:	ldr	x24, [x23, #0x18]
+100695c88:	ldr	x23, [x23, #0x30]
+100695c8c:	ldrb	w8, [x23]
+100695c90:	tbz	w8, #0x0, 0x100695cec
+100695c94:	mov	x23, #0x0
+100695c98:	ldr	x25, [x24]
+100695c9c:	cbnz	x27, 0x100695d34
+100695ca0:	b	0x100695de4
+100695ca4:	mov	w10, #0x1
+100695ca8:	dup.2d	v0, x10
+100695cac:	ldr	x10, [sp, #0x78]
+100695cb0:	str	q0, [sp, #0x60]
+100695cb4:	stp	x9, x8, [sp, #0x70]
+100695cb8:	stp	x20, x10, [sp, #0x80]
+100695cbc:	bl	__RNvCsfLfy6EI15iL_7___rustc35___rust_no_alloc_shim_is_unstable_v2
+100695cc0:	mov	w0, #0x30
+100695cc4:	mov	w1, #0x8
+100695cc8:	bl	__RNvCsfLfy6EI15iL_7___rustc12___rust_alloc
+100695ccc:	cbz	x0, 0x100695f88
+100695cd0:	ldp	q0, q1, [sp, #0x60]
+100695cd4:	stp	q0, q1, [x0]
+100695cd8:	ldr	q0, [sp, #0x80]
+100695cdc:	str	q0, [x0, #0x20]
+100695ce0:	mov	w8, #0x1
+100695ce4:	stp	x8, x0, [x19]
+100695ce8:	b	0x100695e90
+100695cec:	cbz	x27, 0x100695eb0
+100695cf0:	add	x8, sp, #0x60
+100695cf4:	mov	x0, x22
+100695cf8:	bl	__ZN12arrow_buffer6buffer4null10NullBuffer13valid_indices17h4416d5ea7a7e3e92E
+100695cfc:	ldr	x15, [sp, #0x90]
+100695d00:	cbz	x15, 0x100695ec8
+100695d04:	ldr	x8, [sp, #0x98]
+100695d08:	rbit	x9, x15
+100695d0c:	clz	x9, x9
+100695d10:	add	x0, x9, x8
+100695d14:	cmp	x0, x20
+100695d18:	b.hs	0x100695ebc
+100695d1c:	ldr	x8, [x21, #0x20]
+100695d20:	ldr	x25, [x8, x0, lsl #3]
+100695d24:	mov	w8, #0x1
+100695d28:	strb	w8, [x23]
+100695d2c:	add	x23, x0, #0x1
+100695d30:	cbz	x27, 0x100695de4
+100695d34:	cbz	x26, 0x100695de4
+100695d38:	add	x8, sp, #0x18
+100695d3c:	mov	x0, x22
+100695d40:	bl	__ZN12arrow_buffer6buffer4null10NullBuffer12valid_slices17h42b7735416f7dadcE
+100695d44:	ldur	q0, [sp, #0x38]
+100695d48:	ldur	q1, [sp, #0x48]
+100695d4c:	stp	q0, q1, [sp, #0x80]
+100695d50:	ldr	x8, [sp, #0x58]
+100695d54:	str	x8, [sp, #0xa0]
+100695d58:	ldur	q0, [sp, #0x28]
+100695d5c:	ldur	q1, [sp, #0x18]
+100695d60:	stp	q1, q0, [sp, #0x60]
+100695d64:	ldr	x22, [x21, #0x20]
+100695d68:	adrp	x21, 22953 ; 0x10603e000
+100695d6c:	add	x21, x21, #0x320
+100695d70:	b	0x100695d74
+100695d74:	sub	x8, x29, #0x68
+100695d78:	add	x0, sp, #0x60
+100695d7c:	bl	__ZN109_$LT$arrow_buffer..util..bit_iterator..BitSliceIterator$u20$as$u20$core..iter..traits..iterator..Iterator$GT$4next17hc5cbc129757100f4E
+100695d80:	ldur	x8, [x29, #-0x68]
+100695d84:	cmp	x8, #0x1
+100695d88:	b.ne	0x100695df4
+100695d8c:	ldur	x1, [x29, #-0x58]
+100695d90:	cmp	x1, x23
+100695d94:	b.ls	0x100695d74
+100695d98:	ldur	x8, [x29, #-0x60]
+100695d9c:	cmp	x23, x8
+100695da0:	csel	x9, x23, x8, hi
+100695da4:	cmp	x1, x20
+100695da8:	ccmp	x8, x1, #0x2, ls
+100695dac:	b.hi	0x100695f44
+100695db0:	subs	x8, x1, x9
+100695db4:	b.ne	0x100695dbc
+100695db8:	b	0x100695d74
+100695dbc:	lsl	x8, x8, #3
+100695dc0:	add	x9, x22, x9, lsl #3
+100695dc4:	ldr	x10, [x9], #0x8
+100695dc8:	adds	x10, x25, x10
+100695dcc:	b.vs	0x100695e2c
+100695dd0:	mov	x25, x10
+100695dd4:	subs	x8, x8, #0x8
+100695dd8:	b.ne	0x100695dc4
+100695ddc:	mov	x25, x10
+100695de0:	b	0x100695d74
+100695de4:	cmp	x20, x23
+100695de8:	b.lo	0x100695f98
+100695dec:	subs	x8, x20, x23
+100695df0:	b.ne	0x100695dfc
+100695df4:	mov	w8, #0x5
+100695df8:	b	0x100695e5c
+100695dfc:	ldr	x9, [x21, #0x20]
+100695e00:	add	x9, x9, x23, lsl #3
+100695e04:	lsl	x10, x8, #3
+100695e08:	mov	w8, #0x5
+100695e0c:	ldr	x11, [x9], #0x8
+100695e10:	adds	x11, x25, x11
+100695e14:	b.vs	0x100695e2c
+100695e18:	mov	x25, x11
+100695e1c:	subs	x10, x10, #0x8
+100695e20:	b.ne	0x100695e0c
+100695e24:	mov	x25, x11
+100695e28:	b	0x100695e5c
+100695e2c:	bl	__RNvCsfLfy6EI15iL_7___rustc35___rust_no_alloc_shim_is_unstable_v2
+100695e30:	mov	w0, #0x1d
+100695e34:	mov	w1, #0x1
+100695e38:	bl	__RNvCsfLfy6EI15iL_7___rustc12___rust_alloc
+100695e3c:	cbz	x0, 0x100696004
+100695e40:	adrp	x8, 18774 ; 0x104feb000
+100695e44:	add	x8, x8, #0x1a6
+100695e48:	ldr	q0, [x8]
+100695e4c:	str	q0, [x0]
+100695e50:	ldur	q0, [x8, #0xd]
+100695e54:	stur	q0, [x0, #0xd]
+100695e58:	mov	w8, #0x4
+100695e5c:	str	x25, [x24]
+100695e60:	mov	w9, #0x1d
+100695e64:	stp	x8, x9, [x19]
+100695e68:	stp	x0, x9, [x19, #0x10]
+100695e6c:	ldr	x8, [sp, #0x8]
+100695e70:	cbz	x8, 0x100695e90
+100695e74:	mov	x9, #-0x1
+100695e78:	.long	0xf8690108
+100695e7c:	cmp	x8, #0x1
+100695e80:	b.ne	0x100695e90
+100695e84:	dmb	ishld
+100695e88:	add	x0, sp, #0x8
+100695e8c:	bl	__ZN5alloc4sync16Arc$LT$T$C$A$GT$9drop_slow17h242119907f21dfe8E
+100695e90:	ldp	x29, x30, [sp, #0x110]
+100695e94:	ldp	x20, x19, [sp, #0x100]
+100695e98:	ldp	x22, x21, [sp, #0xf0]
+100695e9c:	ldp	x24, x23, [sp, #0xe0]
+100695ea0:	ldp	x26, x25, [sp, #0xd0]
+100695ea4:	ldp	x28, x27, [sp, #0xc0]
+100695ea8:	add	sp, sp, #0x120
+100695eac:	ret
+100695eb0:	mov	x0, #0x0
+100695eb4:	cmp	x0, x20
+100695eb8:	b.lo	0x100695d1c
+100695ebc:	adrp	x2, 22953 ; 0x10603e000
+100695ec0:	add	x2, x2, #0x308
+100695ec4:	b	0x100695ff8
+100695ec8:	ldr	x8, [sp, #0x98]
+100695ecc:	ldp	x14, x10, [sp, #0x70]
+100695ed0:	ldp	x9, x12, [sp, #0x80]
+100695ed4:	ldp	x11, x13, [sp, #0x60]
+100695ed8:	b	0x100695eec
+100695edc:	mov	x14, #0x0
+100695ee0:	mov	x15, x10
+100695ee4:	add	x8, x8, #0x40
+100695ee8:	cbnz	x15, 0x100695d08
+100695eec:	cmp	x14, #0x1
+100695ef0:	b.eq	0x100695edc
+100695ef4:	cmp	x14, #0x3
+100695ef8:	b.ne	0x100695f14
+100695efc:	tst	x11, #0xfffffffffffffffd
+100695f00:	b.eq	0x100695fa8
+100695f04:	mov	x11, #0x0
+100695f08:	mov	w14, #0x3
+100695f0c:	mov	x15, x13
+100695f10:	b	0x100695ee4
+100695f14:	cbz	x9, 0x100695efc
+100695f18:	cmp	x9, x12
+100695f1c:	b.eq	0x100695efc
+100695f20:	ldr	x15, [x9], #0x8
+100695f24:	mov	w14, #0x2
+100695f28:	b	0x100695ee4
+100695f2c:	adrp	x0, 18774 ; 0x104feb000
+100695f30:	add	x0, x0, #0x12d
+100695f34:	adrp	x2, 22953 ; 0x10603e000
+100695f38:	add	x2, x2, #0x278
+100695f3c:	mov	w1, #0xc1
+100695f40:	bl	__RNvNtCsl8K0bEFm1U0_4core9panicking9panic_fmt
+100695f44:	mov	x23, x9
+100695f48:	mov	x0, x23
+100695f4c:	mov	x2, x20
+100695f50:	mov	x3, x21
+100695f54:	bl	__RNvNtNtCsl8K0bEFm1U0_4core5slice5index16slice_index_fail
+100695f58:	b	0x100696010
+100695f5c:	adrp	x0, 18774 ; 0x104feb000
+100695f60:	add	x0, x0, #0x12d
+100695f64:	adrp	x2, 22953 ; 0x10603e000
+100695f68:	add	x2, x2, #0x470
+100695f6c:	mov	w1, #0xc1
+100695f70:	bl	__RNvNtCsl8K0bEFm1U0_4core9panicking9panic_fmt
+100695f74:	b	0x100696010
+100695f78:	adrp	x0, 22953 ; 0x10603e000
+100695f7c:	add	x0, x0, #0x428
+100695f80:	bl	__RNvNtCsl8K0bEFm1U0_4core6option13unwrap_failed
+100695f84:	b	0x100696010
+100695f88:	mov	w0, #0x8
+100695f8c:	mov	w1, #0x30
+100695f90:	bl	__RNvNtCs1OjIl8oxbrv_5alloc5alloc18handle_alloc_error
+100695f94:	b	0x100696010
+100695f98:	adrp	x21, 22953 ; 0x10603e000
+100695f9c:	add	x21, x21, #0x338
+100695fa0:	mov	x1, x20
+100695fa4:	b	0x100695f48
+100695fa8:	mov	w10, #0x3
+100695fac:	str	x10, [sp, #0x70]
+100695fb0:	str	x11, [sp, #0x60]
+100695fb4:	str	x9, [sp, #0x80]
+100695fb8:	stp	xzr, x8, [sp, #0x90]
+100695fbc:	adrp	x0, 22953 ; 0x10603e000
+100695fc0:	add	x0, x0, #0x350
+100695fc4:	b	0x100695f80
+100695fc8:	mov	w0, #0x1
+100695fcc:	mov	w1, #0x19
+100695fd0:	bl	__RNvNtCs1OjIl8oxbrv_5alloc7raw_vec12handle_error
+100695fd4:	mov	x0, #0x0
+100695fd8:	mov	x20, #0x0
+100695fdc:	adrp	x2, 22953 ; 0x10603e000
+100695fe0:	add	x2, x2, #0x2d8
+100695fe4:	b	0x100695ff8
+100695fe8:	mov	x0, #0x0
+100695fec:	mov	x20, #0x0
+100695ff0:	adrp	x2, 22953 ; 0x10603e000
+100695ff4:	add	x2, x2, #0x2f0
+100695ff8:	mov	x1, x20
+100695ffc:	bl	__RNvNtCsl8K0bEFm1U0_4core9panicking18panic_bounds_check
+100696000:	b	0x100696010
+100696004:	mov	w0, #0x1
+100696008:	mov	w1, #0x1d
+10069600c:	bl	__RNvNtCs1OjIl8oxbrv_5alloc7raw_vec12handle_error
+100696010:	brk	#0x1
+100696014:	b	0x100696030
+100696018:	mov	x19, x0
+10069601c:	add	x0, x21, #0x10
+100696020:	bl	__ZN4core3ptr52drop_in_place$LT$arrow_schema..error..ArrowError$GT$17h1efb8b2ef793d8cfE
+100696024:	mov	x0, x19
+100696028:	bl	0x104b445cc ; symbol stub for: __Unwind_Resume
+10069602c:	bl	__RNvNtCsl8K0bEFm1U0_4core9panicking16panic_in_cleanup
+100696030:	ldr	x8, [sp, #0x8]
+100696034:	cbz	x8, 0x10069605c
+100696038:	mov	x9, #-0x1
+10069603c:	.long	0xf8690108
+100696040:	cmp	x8, #0x1
+100696044:	b.ne	0x10069605c
+100696048:	dmb	ishld
+10069604c:	mov	x19, x0
+100696050:	add	x0, sp, #0x8
+100696054:	bl	__ZN5alloc4sync16Arc$LT$T$C$A$GT$9drop_slow17h242119907f21dfe8E
+100696058:	mov	x0, x19
+10069605c:	bl	0x104b445cc ; symbol stub for: __Unwind_Resume
+100696060:	bl	__RNvNtCsl8K0bEFm1U0_4core9panicking16panic_in_cleanup

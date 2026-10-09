@@ -1,0 +1,193 @@
+   Compiling roc v0.1.0 (/Users/zenotme/.codex/worktrees/datafusion-optimization-prs/Roc)
+    Finished `release` profile [optimized] target(s) in 9.51s
+     Running unittests src/lib.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/roc-892ebc18be3a56a0)
+
+running 75 tests
+test exec::aggregate::group_index::tests::global_ids_remain_zero_across_input_and_merge_batch_sizes ... ok
+test exec::aggregate::tests::aggregate_signatures_without_usable_kernels_are_plan_errors ... ok
+test exec::aggregate::group_index::tests::unsigned_slices_keep_full_width_values_and_null_offsets ... ok
+test exec::aggregate::group_index::tests::signed_keys_keep_null_extremes_and_reuse_ids_across_batches ... ok
+test exec::aggregate::tests::global_input_merges_distinct_and_multi_column_states ... ok
+test exec::aggregate::tests::merges_distinct_and_multi_column_states_across_workers ... ok
+test exec::aggregate::tests::filtered_count_star_handles_zero_column_batches ... ok
+test exec::aggregate::tests::rejects_empty_specification ... ok
+test exec::aggregate::tests::unsigned_sum_stays_exact_and_signed_sum_checks_overflow ... ok
+test exec::aggregate::tests::integer_groups_remap_partial_ids_and_keep_null_and_exact_sum ... ok
+test exec::aggregate::tests::empty_global_input_has_one_row ... ok
+test exec::aggregate::tests::all_null_group_stays_null_across_empty_batches_and_merges ... ok
+test exec::aggregate::tests::empty_grouped_input_and_grouping_without_aggregates ... ok
+test exec::aggregate::tests::unsupported_sum_result_type_is_rejected_during_state_construction ... ok
+test exec::filter::tests::constant_predicates_and_empty_inputs_preserve_filter_semantics ... ok
+test exec::filter::tests::non_boolean_predicate_is_an_execution_error ... ok
+test expr::agg::accumulator::global_count_tests::count_star_empty_input_and_distinct_keep_their_semantics ... ok
+test expr::agg::accumulator::global_count_tests::overflow_preserves_the_same_successful_prefix_as_row_updates ... ok
+test expr::agg::accumulator::global_sum_tests::bounded_sum_cancels_arbitrary_null_payloads_even_when_raw_sum_wraps ... ok
+test exec::aggregate::group_index::tests::compound_keys_use_row_semantics ... ok
+test expr::agg::accumulator::global_count_tests::global_count_matches_row_updates_for_slices_and_dictionary_nulls ... ok
+test expr::agg::accumulator::global_sum_tests::global_float_sum_preserves_first_signed_zero_null_payloads_and_addition_order ... ok
+test exec::filter::tests::predicate_bitmap_ignores_true_bits_under_nulls_and_respects_slices ... ok
+test expr::agg::accumulator::global_sum_tests::global_sum_checks_each_prefix_and_preserves_state_on_error ... ok
+test expr::agg::executor::tests::filtered_arguments_and_constants_follow_original_group_ids ... ok
+test expr::agg::accumulator::global_sum_tests::global_sum_matches_row_order_for_sliced_null_patterns_and_empty_batches ... ok
+test expr::agg::executor::tests::references_check_indices_after_filtering ... ok
+test exec::filter::tests::projection_filters_selected_columns_after_reading_full_predicate_input ... ok
+test exec::aggregate::tests::missing_arguments_are_plan_errors_and_runtime_types_remain_checked ... ok
+test expr::agg::accumulator::cast_argument_tests::same_type_borrows_and_numeric_coercion_still_casts ... ok
+test expr::predicate::tests::selection_uses_batch_positions_and_excludes_nulls ... ok
+test expr::agg::executor::tests::computed_argument_uses_filtered_input ... ok
+test exec::aggregate::tests::aggregate_filter_runs_before_arguments_and_preserves_empty_groups ... ok
+test expr::agg::accumulator::global_sum_tests::global_sum_keeps_numeric_casts_and_partial_merges ... ok
+test expr::scalar::conjunction::tests::streaming_updates_report_errors_in_argument_order_without_short_circuiting ... ok
+test expr::scalar::conjunction::tests::nonnullable_inputs_reuse_values_and_do_not_allocate_validity ... ok
+test expr::scalar::conjunction::tests::invalid_inputs_fail_before_modifying_the_result ... ok
+test expr::scalar::executor::tests::failed_evaluation_does_not_affect_previous_outputs ... ok
+test expr::scalar::constant::tests::constant_stays_scalar_at_every_batch_length ... ok
+test exec::aggregate::tests::extrema_merge_values_and_keep_string_null_semantics ... ok
+test expr::scalar::function::tests::eval_consumes_supplied_arrays_without_executing_children ... ok
+test expr::scalar::executor::tests::returned_results_are_owned_by_the_caller ... ok
+test expr::scalar::function::tests::constant_pair_execution_stays_lazy_and_repeated_outputs_remain_owned ... ok
+test expr::scalar::kernels::tests::bound_functions_validate_arity_lengths_and_scalar_types ... ok
+test expr::scalar::value::tests::array_boundaries_preserve_identity_and_validate_row_counts ... ok
+test operator::scan::channel::tests::dropping_last_receiver_wakes_sender_and_returns_unsent_item ... ok
+test operator::scan::channel::tests::dropping_pending_receive_does_not_consume_an_item ... ok
+test expr::scalar::function::tests::scalar_integer_failures_ignore_null_rows_and_preserve_operand_order ... ok
+test expr::scalar::value::tests::scalar_conversion_preserves_slices_nulls_and_arrow_type_metadata ... ok
+test operator::scan::channel::tests::full_queue_applies_backpressure_and_drains_before_disconnect ... ok
+test operator::scan::channel::tests::receiver_is_a_shared_work_queue ... ok
+test pipeline::execution::tests::continuation_error_does_not_combine ... ok
+test pipeline::execution::tests::drains_nested_continuations_before_advancing_input ... ok
+test pipeline::execution::tests::early_process_stop_finishes_downstream_but_not_upstream ... ok
+test pipeline::execution::tests::empty_continuations_yield_and_can_be_cancelled_without_a_runtime ... ok
+test pipeline::execution::tests::empty_finish_outputs_yield_and_can_be_cancelled_without_a_runtime ... ok
+test pipeline::execution::tests::empty_output_skips_downstream_without_losing_continuations_or_new_inputs ... ok
+test pipeline::execution::tests::empty_source_still_finishes_and_empty_tail_batches_do_not_end_finishing ... ok
+test pipeline::execution::tests::finish_error_does_not_combine_or_finish_downstream ... ok
+test pipeline::execution::tests::finishes_buffers_in_order_and_drains_tail_continuations ... ok
+test pipeline::execution::tests::pipeline_without_processors_still_splits_source_morsels ... ok
+test pipeline::execution::tests::process_stop_during_finishing_discards_upstream_tail_and_drains_final_output ... ok
+test pipeline::execution::tests::processor_finished_discards_upstream_continuations_and_combines_successfully ... ok
+test pipeline::execution::tests::sink_finished_stops_pending_outputs ... ok
+test pipeline::execution::tests::sink_stop_during_finishing_skips_remaining_tail_and_downstream_finish ... ok
+test pipeline::execution::tests::whole_morsels_preserve_array_identity ... ok
+test pipeline::graph::tests::rejects_cycles ... ok
+test pipeline::graph::tests::rejects_duplicate_dependencies ... ok
+test expr::scalar::conjunction::tests::nullable_sliced_arrays_match_arrow_without_reallocating ... ok
+test expr::agg::accumulator::global_sum_tests::bounded_sum_matches_checked_updates_for_deterministic_extreme_inputs ... ok
+test expr::scalar::conjunction::tests::truth_table_ignores_values_under_null_and_accepts_all_valid_bitmaps ... ok
+test expr::scalar::function::tests::scalar_float_special_values_and_arrow_comparison_fallback_match_broadcast ... ok
+test expr::scalar::kernels::tests::scalar_pairs_match_broadcast_for_numeric_types_and_nulls ... ok
+test expr::scalar::conjunction::tests::scalar_constants_match_arrow_and_reuse_all_buffers ... ok
+test expr::scalar::function::tests::scalar_numeric_kernels_match_broadcast_for_all_types_and_operand_orders ... ok
+
+test result: ok. 75 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/agg_typed.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/agg_typed-4a7dc459a76d08f5)
+
+running 7 tests
+test public_grouped_update_still_rejects_invalid_ids ... ok
+test typed_float_sum_preserves_signed_zero_order_and_null_payloads ... ok
+test unsupported_sum_result_types_are_rejected_during_construction ... ok
+test grouped_sums_preserve_typed_state_and_sliced_null_bitmaps ... ok
+test grouped_count_and_sum_cross_bitmap_words_without_reading_null_payloads ... ok
+test typed_sum_checks_overflow_within_batches_and_partial_merges ... ok
+test sum_result_type_validation_preserves_narrow_input_casts ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/column_values.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/column_values-45e0eaa87dc728d5)
+
+running 2 tests
+test nested_scalar_functions_stay_scalar_until_consumed_by_an_array ... ok
+test scalar_cast_not_null_tests_and_conjunction_keep_scalar_results ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/extensible_pipeline.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/extensible_pipeline-7f0d99dfacbdf83e)
+
+running 3 tests
+test two_input_operator_chooses_both_child_pipelines ... ok
+test host_operator_builds_a_dependency_without_core_dispatch ... ok
+test invalid_project_reports_operator_and_reason ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/physical_expressions.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/physical_expressions-b33996a200ae50f6)
+
+running 7 tests
+test scan_forwards_host_task_and_preserves_storage_batches_and_cancellation ... ok
+test filter_rejects_non_boolean_results_without_an_input_schema ... ok
+test exchange_relays_batches_and_initializes_sinks_for_empty_input ... ok
+test exchange_read_errors_reach_the_caller_without_becoming_end_of_input ... ok
+test preserves_arrow_kernel_errors ... ok
+test scalar_predicates_and_constant_projections_preserve_batch_shape ... ok
+test executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pipeline_execution.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/pipeline_execution-1dfab9c07cfde5c8)
+
+running 6 tests
+test tokio_handle_can_be_used_directly ... ok
+test caller_can_cancel_execution_without_a_tokio_runtime ... ok
+test dropping_graph_execution_does_not_request_shutdown ... ok
+test worker_failure_returns_without_shutdown_and_caller_stops_remaining_workers ... ok
+test graph_failure_returns_before_caller_requests_shutdown ... ok
+test runs_pipeline_tasks_and_waits_for_dependencies_to_finalize ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scalar_expressions.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/scalar_expressions-7dfb993763b89ed0)
+
+running 20 tests
+test boolean_value_execution_preserves_three_valued_logic ... ok
+test cast_modes_result_metadata_and_empty_inputs ... ok
+test constant_only_expressions_return_full_columns_for_each_batch_size ... ok
+test input_binding_retains_shared_arrays_and_releases_replaced_input ... ok
+test comparisons_and_null_safe_comparisons ... ok
+test multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors ... ok
+test numeric_kernels_evaluate_constants_per_row_and_preserve_nulls ... ok
+test filter_selection_uses_the_boolean_value_result ... ok
+test coalesce_selects_remaining_rows_and_skips_unused_errors ... ok
+test coalesce_preserves_outputs_and_recovers_after_branch_errors ... ok
+test each_description_builds_an_evaluation ... ok
+test case_executes_only_matching_rows_in_original_order ... ok
+test nested_case_selects_original_rows_and_recovers_after_branch_errors ... ok
+test typed_kernels_downcast_used_columns_without_validating_the_input_layout ... ok
+test nested_branches_and_predicates_preserve_input_order_and_duplicates ... ok
+test zero_column_inputs_keep_row_counts_through_branches_and_predicates ... ok
+test plan_time_validation_is_limited_to_kernel_selection ... ok
+test scalar_boolean_constants_match_arrow_kleene_in_both_operand_positions ... ok
+test checked_integer_errors_and_null_rows_match_arrow ... ok
+test all_bound_numeric_signatures_match_arrow ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/scalar_values.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/scalar_values-70bffbaa794006a9)
+
+running 8 tests
+test typed_constants_stay_scalar_and_broadcast_at_array_consumers ... ok
+test decimal_precision_and_scale_roundtrip ... ok
+test strings_and_binary_values_roundtrip ... ok
+test run_end_values_preserve_metadata_and_sliced_logical_indices ... ok
+test sparse_and_dense_unions_preserve_active_child_and_nulls ... ok
+test native_and_temporal_values_roundtrip_with_typed_nulls ... ok
+test nested_arrays_preserve_fields_slices_and_parent_nulls ... ok
+test dictionary_keys_and_logical_nulls_roundtrip ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/source_cancellation.rs (/Users/zenotme/Project/Roc/target/column-value-checks/build/release/deps/source_cancellation-d7fbb053c2266981)
+
+running 4 tests
+test failed_source_initialization_does_not_request_shutdown_or_leak_guards ... ok
+test normal_finalization_and_drop_do_not_request_shutdown ... ok
+test shutdown_waits_for_the_last_source_owner_to_release_its_guard ... ok
+test sources_observe_the_callers_shared_shutdown_without_forwarding ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests roc
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

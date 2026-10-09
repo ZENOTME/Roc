@@ -1,0 +1,52 @@
+{
+  "repository": "/Users/zenotme/.codex/worktrees/datafusion-optimization-prs/Roc",
+  "heads": {
+    "before": "0a69952f69816a5c4ca6fd96f13c88746af37bfd",
+    "after": "bb4800ea31fd7feb80dc704b0e42382a6f23a3ca",
+    "runtime_reference": "7985dace8669503a7ae0054ab67871e6c86236c8"
+  },
+  "variants": [
+    "enum_dynamic",
+    "enum_static",
+    "bound_dynamic",
+    "bound_static",
+    "before",
+    "after"
+  ],
+  "rows": [
+    128,
+    8192,
+    65536
+  ],
+  "groups": 256,
+  "null_fraction": [
+    0,
+    0.058823529411764705
+  ],
+  "samples_per_process": 12,
+  "processes": 3,
+  "target_sample_ms": 15,
+  "timing_scope": "Accumulator::update only, including casts and existing row encoding; binding, resize, input creation, group-ID generation, state/output materialization, storage and pipeline scheduling excluded",
+  "control_layout": "All four factorial controls share the same enum state, runtime minimum field and update pointer. Exact before/after modules retain their own production layouts.",
+  "order": "Six-way balanced cyclic order, two cycles per case; case order shuffled per process",
+  "summary_method": "median of three process medians; retain each process and paired round ratios",
+  "generated_sha256": {
+    "after.rs": "b6ff237c446ccc9812c31c2732f0cc328f740f59d7a89d4c05d1d1b8d8760f3a",
+    "before.rs": "317bbd534d4f12de5898181ebf91a21fab124e14848a00c06ae94822d1701ff4",
+    "bound_dynamic.rs": "15dc783ec6fe387ea950dc959526e1d69d1698960812516917d281eb34f192c9",
+    "bound_static.rs": "f9d757e65016684224417391bbf362adc0440fb97c71e292a21fc57b4d7ad6f5",
+    "enum_dynamic.rs": "027a81169a9697c386252c516c675ac2221bd86dbf25f53dc95466c62ac040b9",
+    "enum_static.rs": "21cb7893e0015f2c47512d781234ebf5c23e08996c77dd96894609e9c21bd605"
+  },
+  "distinct_hash_control": "All variants clone a shared RandomState per process during resize (outside timing), using the same hash algorithm and seed; each process receives a fresh seed.",
+  "production_module_note": "Before/after update kernels are copied without algorithm changes; only resize uses the shared hash-seed constructor to control DISTINCT hash collisions. black_box on mutable accumulator prevents constant propagation of the selected type/function at the timed call site.",
+  "binary_sha256": "1120bf6b9d8fa673e1e066b82761b861244818d27785c08a7366b7d2de2384b4",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "host": "macOS-26.6.2-arm64-arm-64bit",
+  "cpu": "Apple M1 Pro",
+  "arrow": "59.3.0",
+  "build": "cargo build --release --locked; default release profile, no RUSTFLAGS override",
+  "cargo_lock_sha256": "9097a96a8bd45fe0b8808a2f12681a2a29f2ff8455a2894420777e9649943713",
+  "benchmark_main_sha256": "fd08964ece14401e16a204203912672456c5347547223d39dec279ebe9d2af7f",
+  "recorded_at_utc": "2026-10-05T13:38:34Z"
+}

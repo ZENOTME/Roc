@@ -1,0 +1,185 @@
+{
+  "method": "Single thread; four Boolean inputs; 25% NULLs in nullable cases; slice offsets 0/7/14/21; warm inputs; three independent processes with nine alternating-order samples each. 4000 iterations at 8192 rows, 500 at 65536. Exact output equality checked before timing. Includes accumulator creation, four updates and finalization; excludes expression evaluation, planning and input preparation. The DataFusion reference is only its general Arrow Kleene merge sequence, not full engine execution.",
+  "environment": {
+    "cpu": "Apple M1 Pro",
+    "platform": "macOS ARM64",
+    "rust": "1.95.0",
+    "arrow": "59.3.0"
+  },
+  "source_sha256": {
+    "direct.rs": "3a75bb9dde0f19d342b4ffbc369ef91ad81a1dd616fd6cafaa2ff329b9866796",
+    "fused.rs": "19da8aa24bcfdbd2d0accecf4328b60586b6f0523d7961b5b0a72492ad95e642",
+    "main.rs": "340789cc4edba8ccebedd30bced8e5fb28357422ce2940990afb6cacd8f66fd2",
+    "old.rs": "5777aaba47389b0e363526d7bf06f996046cea3f68826d94e594b2d9de39140f",
+    "reused.rs": "c26b0ce0463acceea17d8ccf5da7a534ccc66695846cc6e877a28d92ac99c10d",
+    "separate.rs": "46c963364e8ffa17c74f28b528e21e79f3f261c44242e2b97f0e0a729ee54af8"
+  },
+  "results": [
+    {
+      "rows": 8192,
+      "nullable": false,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 408.969,
+        "arrow_composed": 393.854,
+        "df_arrow_kleene": 543.24,
+        "direct_validity": 406.698,
+        "separate_validity": 402.656,
+        "fused_direct": 400.833
+      },
+      "final_vs_pct": {
+        "fused_before": -1.9893928390660287,
+        "arrow_composed": 1.7719764176573172,
+        "df_arrow_kleene": -26.214380384360503,
+        "direct_validity": -1.442102001976886,
+        "separate_validity": -0.4527437812922197
+      }
+    },
+    {
+      "rows": 8192,
+      "nullable": false,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 372.458,
+        "arrow_composed": 361.188,
+        "df_arrow_kleene": 534.792,
+        "direct_validity": 371.781,
+        "separate_validity": 349.031,
+        "fused_direct": 362.146
+      },
+      "final_vs_pct": {
+        "fused_before": -2.768634315815477,
+        "arrow_composed": 0.2652358328626647,
+        "df_arrow_kleene": -32.28283145596793,
+        "direct_validity": -2.591579451343662,
+        "separate_validity": 3.7575458913391646
+      }
+    },
+    {
+      "rows": 8192,
+      "nullable": true,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 992.927,
+        "arrow_composed": 1368.146,
+        "df_arrow_kleene": 1589.552,
+        "direct_validity": 1679.886,
+        "separate_validity": 1081.448,
+        "fused_direct": 892.323
+      },
+      "final_vs_pct": {
+        "fused_before": -10.13206408930365,
+        "arrow_composed": -34.77867128215848,
+        "df_arrow_kleene": -43.86323945363222,
+        "direct_validity": -46.881931273907874,
+        "separate_validity": -17.48812702968613
+      }
+    },
+    {
+      "rows": 8192,
+      "nullable": true,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 983.135,
+        "arrow_composed": 1353.604,
+        "df_arrow_kleene": 1592.292,
+        "direct_validity": 1656.156,
+        "separate_validity": 1050.458,
+        "fused_direct": 897.417
+      },
+      "final_vs_pct": {
+        "fused_before": -8.718843292121626,
+        "arrow_composed": -33.701658683041714,
+        "df_arrow_kleene": -43.63992282822496,
+        "direct_validity": -45.81325672219283,
+        "separate_validity": -14.568978483670936
+      }
+    },
+    {
+      "rows": 65536,
+      "nullable": false,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 1529.334,
+        "arrow_composed": 1519.75,
+        "df_arrow_kleene": 1567.584,
+        "direct_validity": 1539.582,
+        "separate_validity": 1527.082,
+        "fused_direct": 1528.25
+      },
+      "final_vs_pct": {
+        "fused_before": -0.07088052707910908,
+        "arrow_composed": 0.5593025168613153,
+        "df_arrow_kleene": -2.50921162757467,
+        "direct_validity": -0.7360439391990936,
+        "separate_validity": 0.07648574208849457
+      }
+    },
+    {
+      "rows": 65536,
+      "nullable": false,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 1421.332,
+        "arrow_composed": 1403.084,
+        "df_arrow_kleene": 1574.584,
+        "direct_validity": 1430.416,
+        "separate_validity": 1410.5,
+        "fused_direct": 1410.416
+      },
+      "final_vs_pct": {
+        "fused_before": -0.7680119774971739,
+        "arrow_composed": 0.5225631537384645,
+        "df_arrow_kleene": -10.42611889870595,
+        "direct_validity": -1.3981946510665422,
+        "separate_validity": -0.005955334987595151
+      }
+    },
+    {
+      "rows": 65536,
+      "nullable": true,
+      "op": "and",
+      "median_ns_per_batch": {
+        "fused_before": 6373.084,
+        "arrow_composed": 5363.084,
+        "df_arrow_kleene": 7788.75,
+        "direct_validity": 10508.332,
+        "separate_validity": 6270.082,
+        "fused_direct": 5426.584
+      },
+      "final_vs_pct": {
+        "fused_before": -14.851522434036646,
+        "arrow_composed": 1.1840202391012244,
+        "df_arrow_kleene": -30.32792168191302,
+        "direct_validity": -48.35922580291525,
+        "separate_validity": -13.452742723300915
+      }
+    },
+    {
+      "rows": 65536,
+      "nullable": true,
+      "op": "or",
+      "median_ns_per_batch": {
+        "fused_before": 6282.084,
+        "arrow_composed": 5276.084,
+        "df_arrow_kleene": 7794.416,
+        "direct_validity": 10424.584,
+        "separate_validity": 6186.25,
+        "fused_direct": 5368.25
+      },
+      "final_vs_pct": {
+        "fused_before": -14.546669544692492,
+        "arrow_composed": 1.746863772449414,
+        "df_arrow_kleene": -31.12697603001944,
+        "direct_validity": -48.50394030111897,
+        "separate_validity": -13.222873307738936
+      }
+    }
+  ],
+  "sources": {
+    "fused_before": "a68b1a8f55eeae81da5cd85c39e9d14e55a50267",
+    "arrow_composed": "490e29bbcf47ad328f727ab48f4d4e1712393920",
+    "fused_direct": "2e5c1b7fa24ba75698640f9ba4909bfabc801683",
+    "measured_scope": "Independent PR17 ordinary Boolean bitmap merging. PR4 RunArray dispatch and expression evaluation are not measured."
+  }
+}

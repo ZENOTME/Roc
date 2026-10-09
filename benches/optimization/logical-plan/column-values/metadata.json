@@ -1,0 +1,33 @@
+{
+  "heads": {
+    "before": "f6f3fcbb8261e4e0128bed762db1c76333fb28af",
+    "after": "abb68b16370b000c4938bd5037932e576489e235"
+  },
+  "cases": [
+    "x + 1",
+    "x + (1 + 2)",
+    "x > 250 AND x < 750"
+  ],
+  "rows": [
+    8192,
+    65536
+  ],
+  "null_fraction": [
+    0,
+    0.25
+  ],
+  "iterations": {
+    "8192": 4000,
+    "65536": 500
+  },
+  "samples_per_process": 9,
+  "processes": 3,
+  "timing_scope": "bound expression evaluation including final array conversion; excludes binding, input creation, SQL planning and storage",
+  "validation": "exact non-null values and validity against before implementation",
+  "summary_method": "median of three process medians",
+  "binary_sha256": "a8fc3d86606f09cff5bde509579e2a913a9268c0374e3c53f9c8a1b891f360bf",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "host": "Darwin arm64",
+  "arrow": "59.3.0",
+  "note": "Both core snapshots are linked into one executable. Package names are renamed roc_before/roc_after only to make Cargo disambiguate equal versions."
+}

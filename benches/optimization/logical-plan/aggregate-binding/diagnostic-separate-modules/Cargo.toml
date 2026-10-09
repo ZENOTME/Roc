@@ -1,0 +1,8 @@
+[package]
+name = "aggregate-binding-ablation"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+arrow = { version = "=59.3.0", default-features = false }
+thiserror = "2"

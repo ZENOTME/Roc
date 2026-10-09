@@ -212,3 +212,7 @@ order. The responsible factor has not been isolated: allocation/cache state,
 wrapper execution differences, and VM conditions remain possible contributors.
 A controlled measurement of dispatch overhead would need a shared typed body,
 interleaved/reversed execution order, and controlled output allocation.
+
+## Roc execution optimization results
+
+See [the core optimization comparison](optimization/logical-plan/README.md) for per-step measurements, raw evidence and source verification. DataFusion is used only by a separately retained local test harness.

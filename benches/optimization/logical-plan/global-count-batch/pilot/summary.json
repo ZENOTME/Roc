@@ -1,0 +1,394 @@
+{
+  "scan_only/1t": {
+    "main_roc_ms": 106.50251458740225,
+    "count_roc_ms": 107.0578674583283,
+    "main_datafusion_ms": 107.67972304792231,
+    "count_datafusion_ms": 106.87427910227038,
+    "saved_ms": -0.5553528709260576,
+    "roc_elapsed_reduction_percent": -0.5214457828320196,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -2.223494528114567,
+      1.4064345665368627
+    ],
+    "main_roc_gap_to_datafusion_percent": -1.0932498962652026,
+    "count_roc_gap_to_datafusion_percent": 0.17177973746353992,
+    "datafusion_control_change_percent": -0.7479996445509673,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          108.1530625,
+          107.184375,
+          105.774437,
+          105.6250835,
+          105.79891649999999
+        ],
+        "datafusion": [
+          115.3978125,
+          105.800271,
+          105.60983350000001,
+          105.69537449999999,
+          106.22456299999999
+        ]
+      },
+      "count": {
+        "roc": [
+          104.73008300000001,
+          107.2804375,
+          106.26029199999999,
+          108.61574999999999,
+          108.4518955
+        ],
+        "datafusion": [
+          104.669,
+          107.176896,
+          106.853521,
+          107.83575,
+          107.86862450000001
+        ]
+      }
+    }
+  },
+  "scan_only/4t": {
+    "main_roc_ms": 33.775884715731436,
+    "count_roc_ms": 29.306105459131164,
+    "main_datafusion_ms": 35.70962099976983,
+    "count_datafusion_ms": 31.330019534128855,
+    "saved_ms": 4.4697792566002725,
+    "roc_elapsed_reduction_percent": 13.233640789040324,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -0.9003273584121452,
+      35.173611776575505
+    ],
+    "main_roc_gap_to_datafusion_percent": -5.415168881380339,
+    "count_roc_gap_to_datafusion_percent": -6.4599834442904625,
+    "datafusion_control_change_percent": -12.264485992918283,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          29.407083,
+          29.034979,
+          29.117687500000002,
+          29.2652915,
+          60.4157915
+        ],
+        "datafusion": [
+          31.207458499999998,
+          31.2581455,
+          31.484042000000002,
+          31.068708,
+          60.8542505
+        ]
+      },
+      "count": {
+        "roc": [
+          29.823791999999997,
+          29.298624999999998,
+          29.076791500000002,
+          29.075333,
+          29.262354000000002
+        ],
+        "datafusion": [
+          32.099083,
+          31.3163955,
+          31.034146,
+          31.0717915,
+          31.1410205
+        ]
+      }
+    }
+  },
+  "filter_project/1t": {
+    "main_roc_ms": 99.9252555538389,
+    "count_roc_ms": 99.5724316158628,
+    "main_datafusion_ms": 100.66219347284677,
+    "count_datafusion_ms": 101.53909628507553,
+    "saved_ms": 0.35282393797609757,
+    "roc_elapsed_reduction_percent": 0.3530878515351943,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -1.680505440769542,
+      2.756989052303338
+    ],
+    "main_roc_gap_to_datafusion_percent": -0.7320900663729923,
+    "count_roc_gap_to_datafusion_percent": -1.9368546118346708,
+    "datafusion_control_change_percent": 0.8711342182954773,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          102.6654795,
+          99.1070205,
+          100.1372295,
+          98.688541,
+          99.079813
+        ],
+        "datafusion": [
+          104.4798745,
+          99.6411455,
+          100.69552100000001,
+          99.02812499999999,
+          99.561604
+        ]
+      },
+      "count": {
+        "roc": [
+          97.744,
+          99.8272915,
+          98.7603125,
+          101.204917,
+          100.3626455
+        ],
+        "datafusion": [
+          97.72108349999999,
+          104.531125,
+          100.0228545,
+          102.732959,
+          102.8308745
+        ]
+      }
+    }
+  },
+  "filter_project/4t": {
+    "main_roc_ms": 34.228948048180946,
+    "count_roc_ms": 27.586649500176364,
+    "main_datafusion_ms": 38.782514924948515,
+    "count_datafusion_ms": 29.577693838473376,
+    "saved_ms": 6.642298548004582,
+    "roc_elapsed_reduction_percent": 19.405500100835205,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -1.2010184472937446,
+      48.377773130712285
+    ],
+    "main_roc_gap_to_datafusion_percent": -11.741288272768236,
+    "count_roc_gap_to_datafusion_percent": -6.731573966416371,
+    "datafusion_control_change_percent": -23.734461533214656,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          27.483271000000002,
+          27.743104000000002,
+          27.2788545,
+          27.4543335,
+          82.28245799999999
+        ],
+        "datafusion": [
+          29.405896,
+          29.665917,
+          29.281583499999996,
+          29.361833500000003,
+          116.97954200000001
+        ]
+      },
+      "count": {
+        "roc": [
+          28.021771,
+          27.720291500000002,
+          27.576542000000003,
+          27.352125,
+          27.269083000000002
+        ],
+        "datafusion": [
+          30.502395999999997,
+          29.479125000000003,
+          29.375479499999997,
+          29.3065625,
+          29.243083
+        ]
+      }
+    }
+  },
+  "global_aggregate/1t": {
+    "main_roc_ms": 54.30400912258431,
+    "count_roc_ms": 46.02403753120021,
+    "main_datafusion_ms": 39.07984121914603,
+    "count_datafusion_ms": 38.87614807602172,
+    "saved_ms": 8.279971591384104,
+    "roc_elapsed_reduction_percent": 15.247440704963665,
+    "paired_process_bootstrap_95_reduction_percent": [
+      13.864083255193371,
+      17.028785655872415
+    ],
+    "main_roc_gap_to_datafusion_percent": 38.95657563721022,
+    "count_roc_gap_to_datafusion_percent": 18.38631091022931,
+    "datafusion_control_change_percent": -0.5212230571308374,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          55.2204995,
+          54.418270500000006,
+          54.2587915,
+          53.195104,
+          54.446833
+        ],
+        "datafusion": [
+          39.737958500000005,
+          38.929542,
+          39.408728999999994,
+          37.951167,
+          39.396854
+        ]
+      },
+      "count": {
+        "roc": [
+          45.048083500000004,
+          46.0699165,
+          46.159813,
+          46.276083,
+          46.581042000000004
+        ],
+        "datafusion": [
+          37.726375000000004,
+          38.678937000000005,
+          39.0451875,
+          39.353207999999995,
+          39.604896000000004
+        ]
+      }
+    }
+  },
+  "global_aggregate/4t": {
+    "main_roc_ms": 15.257885553550137,
+    "count_roc_ms": 12.952413551231862,
+    "main_datafusion_ms": 11.817447852024872,
+    "count_datafusion_ms": 11.467954980453223,
+    "saved_ms": 2.3054720023182753,
+    "roc_elapsed_reduction_percent": 15.110036015323558,
+    "paired_process_bootstrap_95_reduction_percent": [
+      12.94401333580726,
+      16.823437752278604
+    ],
+    "main_roc_gap_to_datafusion_percent": 29.113204006529724,
+    "count_roc_gap_to_datafusion_percent": 12.94440528680878,
+    "datafusion_control_change_percent": -2.9574310455854014,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          14.7651665,
+          15.134271,
+          15.469875000000002,
+          14.854521,
+          16.103729
+        ],
+        "datafusion": [
+          11.3055005,
+          11.500437,
+          11.6610625,
+          11.230521,
+          13.535562500000001
+        ]
+      },
+      "count": {
+        "roc": [
+          13.083771,
+          12.6998125,
+          12.916041,
+          12.785729,
+          13.285208
+        ],
+        "datafusion": [
+          11.5677085,
+          11.333688,
+          11.357833,
+          11.3462705,
+          11.739854000000001
+        ]
+      }
+    }
+  },
+  "grouped_aggregate/1t": {
+    "main_roc_ms": 82.14569724611209,
+    "count_roc_ms": 74.14922127224052,
+    "main_datafusion_ms": 75.76586505077395,
+    "count_datafusion_ms": 72.39977159489862,
+    "saved_ms": 7.9964759738715685,
+    "roc_elapsed_reduction_percent": 9.734503743895162,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -1.0313625954726513,
+      25.82583089060506
+    ],
+    "main_roc_gap_to_datafusion_percent": 8.420457142623183,
+    "count_roc_gap_to_datafusion_percent": 2.4163745807523673,
+    "datafusion_control_change_percent": -4.442757241166017,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          75.3611875,
+          74.72916599999999,
+          74.5385205,
+          72.77991700000001,
+          122.431708
+        ],
+        "datafusion": [
+          72.274021,
+          72.5605625,
+          71.167125,
+          69.6124585,
+          96.09895800000001
+        ]
+      },
+      "count": {
+        "roc": [
+          72.2664585,
+          75.493667,
+          73.592208,
+          74.38856200000001,
+          75.049479
+        ],
+        "datafusion": [
+          70.62883349999998,
+          73.6417085,
+          72.582354,
+          71.3723545,
+          73.8276455
+        ]
+      }
+    }
+  },
+  "grouped_aggregate/4t": {
+    "main_roc_ms": 23.239364486426123,
+    "count_roc_ms": 20.398707043661826,
+    "main_datafusion_ms": 23.517478480138358,
+    "count_datafusion_ms": 20.976456691186534,
+    "saved_ms": 2.8406574427642965,
+    "roc_elapsed_reduction_percent": 12.223472997394126,
+    "paired_process_bootstrap_95_reduction_percent": [
+      -1.3293982998015652,
+      28.525446283342724
+    ],
+    "main_roc_gap_to_datafusion_percent": -1.182584238132145,
+    "count_roc_gap_to_datafusion_percent": -2.754276644670195,
+    "datafusion_control_change_percent": -10.804822426425687,
+    "process_medians_ms": {
+      "main": {
+        "roc": [
+          20.3500835,
+          20.4732705,
+          23.793958000000003,
+          20.017667,
+          34.157624999999996
+        ],
+        "datafusion": [
+          20.589166499999997,
+          20.9000625,
+          22.403937499999998,
+          20.627854,
+          36.1733745
+        ]
+      },
+      "count": {
+        "roc": [
+          20.226187,
+          20.840562500000004,
+          19.993021,
+          20.387125499999996,
+          20.5567915
+        ],
+        "datafusion": [
+          20.849542,
+          21.200374500000002,
+          20.840708,
+          20.776875,
+          21.219146000000002
+        ]
+      }
+    }
+  }
+}
