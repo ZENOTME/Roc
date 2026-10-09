@@ -125,7 +125,11 @@ macro_rules! group_index {
                 }
                 Ok(Self::Rows(RowIndex {
                     converter: RowConverter::new(schema.fields().iter()
-                        .map(|f| SortField::new(f.data_type().clone())).collect())?,
+                        .map(|f| SortField::new(f.data_type().clone())).collect())
+                        .map_err(|source| {
+                            Error::unsupported("unsupported group key types".into())
+                                .with_source(source)
+                        })?,
                     index: HashMap::new(),
                     keys: vec![],
                 }))
@@ -150,7 +154,10 @@ macro_rules! group_index {
                     }
                     $(Self::$variant(index) => index.intern(&columns[0], ids),)*
                     Self::Rows(index) => {
-                        let rows = index.converter.convert_columns(columns)?;
+                        let rows = index.converter.convert_columns(columns).map_err(|source| {
+                            Error::invalid_input("failed to encode group keys".into())
+                                .with_source(source)
+                        })?;
                         ids.clear();
                         ids.reserve(rows.num_rows());
                         for row in rows.iter() {
@@ -177,7 +184,11 @@ macro_rules! group_index {
                     $(Self::$variant(index) => Ok(vec![index.column()]),)*
                     Self::Rows(index) => {
                         let parser = index.converter.parser();
-                        Ok(index.converter.convert_rows(index.keys.iter().map(|key| parser.parse(key)))?)
+                        index.converter.convert_rows(index.keys.iter().map(|key| parser.parse(key)))
+                            .map_err(|source| {
+                                Error::internal("failed to decode stored group keys".into())
+                                    .with_source(source)
+                            })
                     }
                 }
             }

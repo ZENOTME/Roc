@@ -14,7 +14,7 @@
 
 use super::{GlobalExecContextRef, SourceExec, SourceExecutor};
 use crate::{
-    error::{Error, ErrorContext, Result, ResultExt},
+    error::{Error, Result, ResultExt},
     operator::{ScanConsumer, ScanHandle, ScanOperator, ScanRequest},
 };
 use arrow::record_batch::RecordBatch;
@@ -44,7 +44,7 @@ where
                 self.operator.source().clone(),
                 shutdown_guard.clone(),
             ))
-            .with_context(|| ErrorContext::new("scan.start"))?;
+            .with_location()?;
         Ok(Arc::new(ScanGlobalContext { handle }))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
@@ -66,11 +66,7 @@ where
             let global = global.downcast::<ScanGlobalContext>().map_err(|_| {
                 Error::internal("scan source received an invalid global context".into())
             })?;
-            global
-                .handle
-                .finish()
-                .await
-                .with_context(|| ErrorContext::new("scan.finish"))
+            global.handle.finish().await.with_location()
         })
     }
 }
@@ -97,7 +93,7 @@ impl SourceExecutor for ScanExecutor {
                 _ = cancelled => {
                     Err(Error::cancelled())
                 },
-                batch = next => batch.with_context(|| ErrorContext::new("scan.next")),
+                batch = next => batch.with_location(),
             }
         })
     }

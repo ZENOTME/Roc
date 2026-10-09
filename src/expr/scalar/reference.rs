@@ -61,7 +61,7 @@ impl ReferenceExpressionEvaluation {
     ) -> Result<ColumnValue> {
         let num_rows = executor.num_rows()?;
         let col = executor.columns()?.get(self.index).ok_or_else(|| {
-            Error::invalid_input(format!("column index {} out of bounds", self.index)).context(
+            Error::invalid_input(format!("column index {} out of bounds", self.index)).with_context(
                 crate::error::ErrorContext::new("reference.evaluate").field("column", self.index),
             )
         })?;

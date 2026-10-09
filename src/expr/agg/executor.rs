@@ -46,8 +46,8 @@ impl AggregateExpressionExecutor {
             .map(|argument| argument.result_type().data_type());
         // No accumulator implements it, so accepting it would silently drop DISTINCT.
         if expression.is_distinct() && expression.function() != AggregateFunction::Count {
-            return Err(Error::invalid_plan(
-                "initial aggregate implementation supports DISTINCT only for COUNT(expr)".into(),
+            return Err(Error::unsupported(
+                "DISTINCT is supported only for COUNT(expr)".into(),
             ));
         }
         let filter = expression.filter().map(|e| e.to_evaluation()).transpose()?;
@@ -118,7 +118,10 @@ impl AggregateExpressionExecutor {
                 }
                 filter_record_batch(input, &BooleanArray::from(mask))
             })
-            .transpose()?;
+            .transpose()
+            .map_err(|source| {
+                Error::internal("failed to apply aggregate filter mask".into()).with_source(source)
+            })?;
         let input = selected_input.as_ref().unwrap_or(input);
         let value = self.evaluate_argument(input)?;
         self.accumulator.update(value.as_ref(), ids)

@@ -15,7 +15,7 @@
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use super::{ColumnValue, ExpressionResultType};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use arrow::{
     array::{ArrayRef, UInt64Array, new_empty_array},
     compute::{kernels::interleave::interleave, take},
@@ -101,7 +101,12 @@ impl CoalesceExpressionEvaluation {
             interleave(
                 &input.iter().map(|value| value.as_ref()).collect::<Vec<_>>(),
                 mapping,
-            )?
+            )
+            .map_err(|source| {
+                Error::invalid_input("incompatible COALESCE result arrays".into())
+                    .with_source(source)
+            })
+            .with_location()?
         }))
     }
 
@@ -121,8 +126,12 @@ impl CoalesceExpressionEvaluation {
                 &buffers.remaining,
             )?;
             let remaining = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
-            let value = child.evaluate(&remaining)?;
-            let value = value.into_array(remaining.num_rows()?)?;
+            let value = child
+                .evaluate(&remaining)
+                .and_then(|value| value.into_array(remaining.num_rows()?))
+                .with_context(|| {
+                    ErrorContext::new("coalesce.argument").field("argument", child_index)
+                })?;
             let nulls = value.logical_nulls();
             buffers.next.clear();
             for (i, position) in buffers.remaining.drain(..).enumerate() {
@@ -148,7 +157,11 @@ fn branch_columns(columns: &[ArrayRef], num_rows: usize, rows: &[usize]) -> Resu
     let indices = UInt64Array::from_iter_values(rows.iter().map(|&row| row as u64));
     columns
         .iter()
-        .map(|col| Ok(take(col.as_ref(), &indices, None)?))
+        .map(|col| {
+            take(col.as_ref(), &indices, None).map_err(|source| {
+                Error::internal("failed to select COALESCE input rows".into()).with_source(source)
+            })
+        })
         .collect()
 }
 

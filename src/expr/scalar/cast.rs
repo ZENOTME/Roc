@@ -15,10 +15,10 @@
 use super::ScalarExprRef;
 use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use super::{ColumnValue, ExpressionResultType, ScalarValue};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use arrow::{
-    array::new_empty_array,
-    compute::{CastOptions, cast_with_options},
+    array::{Array, ArrayRef, new_empty_array},
+    compute::{CastOptions, can_cast_types, cast_with_options},
     datatypes::DataType,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,8 +71,20 @@ impl CastExpression {
     }
 
     pub(super) fn bind(&self) -> Result<CastExpressionEvaluation> {
+        let from = self.input.result_type().data_type();
+        if !can_cast_types(from, &self.result_type.data_type) {
+            return Err(Error::unsupported(format!(
+                "cannot cast {from} to {}",
+                self.result_type.data_type
+            ))
+            .with_context(
+                ErrorContext::new("cast.bind")
+                    .field("from", from)
+                    .field("to", &self.result_type.data_type),
+            ));
+        }
         Ok(CastExpressionEvaluation {
-            argument: Box::new(self.input.to_evaluation()?),
+            argument: Box::new(self.input.to_evaluation().with_location()?),
             target: self.result_type.data_type.clone(),
             options: CastOptions {
                 safe: self.mode == CastMode::Try,
@@ -87,7 +99,7 @@ impl CastExpressionEvaluation {
         if executor.num_rows()? == 0 {
             return self.eval(executor, &[]);
         }
-        let argument = self.argument.evaluate(executor)?;
+        let argument = self.argument.evaluate(executor).with_location()?;
         self.eval(executor, &[argument])
     }
     fn eval(
@@ -103,17 +115,25 @@ impl CastExpressionEvaluation {
             };
 
             match argument {
-                ColumnValue::Array(value) => ColumnValue::Array(cast_with_options(
-                    value.as_ref(),
-                    &self.target,
-                    &self.options,
-                )?),
+                ColumnValue::Array(value) => ColumnValue::Array(self.cast(value.as_ref())?),
                 ColumnValue::Scalar(value) => {
-                    let output =
-                        cast_with_options(value.to_array()?.as_ref(), &self.target, &self.options)?;
-                    ColumnValue::Scalar(ScalarValue::try_from_array(&output, 0)?)
+                    let array = value.to_array().with_location()?;
+                    let output = self.cast(array.as_ref())?;
+                    ColumnValue::Scalar(ScalarValue::try_from_array(&output, 0).with_location()?)
                 }
             }
         })
+    }
+    fn cast(&self, value: &dyn Array) -> Result<ArrayRef> {
+        // Type support is checked during binding. At this boundary a failed
+        // conversion means the input cannot be cast as requested.
+        cast_with_options(value, &self.target, &self.options)
+            .map_err(|source| Error::invalid_input("cast failed".into()).with_source(source))
+            .with_context(|| {
+                ErrorContext::new("cast.evaluate")
+                    .field("from", value.data_type())
+                    .field("to", &self.target)
+                    .field("mode", if self.options.safe { "try" } else { "strict" })
+            })
     }
 }
