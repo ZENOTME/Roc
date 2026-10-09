@@ -29,7 +29,7 @@ impl SourceExec for NoopExec {
         Ok(Arc::new(()))
     }
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        Err(Error::Execution(
+        Err(Error::internal(
             "this test only constructs the graph".into(),
         ))
     }
@@ -48,7 +48,7 @@ impl SinkExec for NoopExec {
     }
 
     fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        Err(Error::Execution(
+        Err(Error::internal(
             "this test only constructs the graph".into(),
         ))
     }
@@ -190,11 +190,9 @@ fn invalid_project_reports_operator_and_reason() {
         let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
 
         let error = build_pipeline_graph(OperatorTree::new(sink)).unwrap_err();
-        let Error::InvalidPlan(message) = error else {
-            panic!("expected InvalidPlan, got {error:?}");
-        };
+        assert_eq!(error.kind(), roc::error::ErrorKind::InvalidPlan);
         assert_eq!(
-            message,
+            error.message(),
             format!("project operator requires exactly 1 child, got {child_count}"),
         );
     }

@@ -38,7 +38,7 @@ impl ScalarExpressionExecutor {
     pub(super) fn columns(&self) -> Result<&[ArrayRef]> {
         self.columns
             .as_deref()
-            .ok_or_else(|| Error::Execution("input columns are not set".into()))
+            .ok_or_else(|| Error::internal("input columns are not set".into()))
     }
     pub fn num_rows(&self) -> Result<usize> {
         self.columns()?;

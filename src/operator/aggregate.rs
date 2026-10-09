@@ -32,7 +32,7 @@ pub struct AggregateOperator {
 impl AggregateOperator {
     pub fn try_new(groups: Projection, aggregates: Vec<Arc<AggregateExpression>>) -> Result<Self> {
         if aggregates.is_empty() && groups.expressions().is_empty() {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "aggregate needs a group or function".into(),
             ));
         }
@@ -72,7 +72,7 @@ impl Operator for AggregateOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "aggregate operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

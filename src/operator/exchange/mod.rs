@@ -97,7 +97,7 @@ impl Operator for ExchangeSourceOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "exchange source operator requires 0 children, got {}",
                 current_node.children().len(),
             )));
@@ -120,7 +120,7 @@ impl Operator for ExchangeSinkOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "exchange sink operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

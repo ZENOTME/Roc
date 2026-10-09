@@ -31,7 +31,7 @@ use std::{borrow::Cow, collections::HashSet, sync::Arc};
 fn input_type(input: Option<&DataType>) -> Result<DataType> {
     input
         .cloned()
-        .ok_or_else(|| Error::InvalidPlan("aggregate requires an argument".into()))
+        .ok_or_else(|| Error::invalid_plan("aggregate requires an argument".into()))
 }
 
 type UpdateFn = fn(&mut AccumulatorState, Option<&ArrayRef>, &[usize]) -> Result<()>;
@@ -93,7 +93,9 @@ where
     fn add(&mut self, id: usize, value: T::Native) -> Result<()> {
         // Preserve the first value (including floating-point signed zero).
         self.values[id] = if self.valid[id] {
-            self.values[id].add_checked(value).map_err(|_| overflow())?
+            self.values[id]
+                .add_checked(value)
+                .map_err(|source| overflow().with_source(source))?
         } else {
             value
         };
@@ -176,26 +178,26 @@ impl SumGroups {
             DataType::Int64 => (Self::Signed(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
                 let argument =
-                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                    value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
                 let values = cast_argument(argument, data_type)?;
                 groups.as_i64_mut().update(as_i64(&values), ids)
             }),
             DataType::UInt64 => (Self::Unsigned(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
                 let argument =
-                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                    value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
                 let values = cast_argument(argument, data_type)?;
                 groups.as_u64_mut().update(as_u64(&values), ids)
             }),
             DataType::Float64 => (Self::Float(TypedSum::new()), |state, value, ids| {
                 let (groups, data_type) = state.as_sum_mut();
                 let argument =
-                    value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+                    value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
                 let values = cast_argument(argument, data_type)?;
                 groups.as_f64_mut().update(as_f64(&values), ids)
             }),
             _ => {
-                return Err(Error::InvalidPlan(format!(
+                return Err(Error::unsupported(format!(
                     "unsupported sum result type: {data_type}"
                 )));
             }
@@ -239,8 +241,12 @@ impl SumGroups {
         }
     }
 }
+#[track_caller]
 fn overflow() -> Error {
-    Error::Execution("aggregate arithmetic overflow".into())
+    Error::new(
+        crate::error::ErrorKind::ArithmeticOverflow,
+        "aggregate arithmetic overflow",
+    )
 }
 impl Accumulator {
     pub fn new(
@@ -419,7 +425,9 @@ impl Accumulator {
             AccumulatorState::Distinct { groups, .. } => Arc::new(Int64Array::from(
                 groups
                     .iter()
-                    .map(|s| i64::try_from(s.len()).map_err(|_| overflow()))
+                    .map(|s| {
+                        i64::try_from(s.len()).map_err(|source| overflow().with_source(source))
+                    })
                     .collect::<Result<Vec<_>>>()?,
             )),
             AccumulatorState::Avg(groups) => Arc::new(Float64Array::from(
@@ -514,7 +522,8 @@ fn update_global_count(
     let null_count = value
         .and_then(|v| v.logical_nulls())
         .map_or(0, |nulls| nulls.null_count());
-    let delta = i64::try_from(ids.len() - null_count).map_err(|_| overflow())?;
+    let delta =
+        i64::try_from(ids.len() - null_count).map_err(|source| overflow().with_source(source))?;
     let total = &mut groups[0];
     let updated = total.checked_add(delta).ok_or_else(|| {
         // The row loop reaches MAX before failing on the next increment.
@@ -663,7 +672,7 @@ fn update_global_sum_i64(
 ) -> Result<()> {
     debug_assert!(ids.iter().all(|&id| id == 0));
     let (groups, data_type) = state.as_sum_mut();
-    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    let argument = value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
     debug_assert_eq!(argument.len(), ids.len());
     let values = cast_argument(argument, data_type)?;
     groups.as_i64_mut().update_global_integer(as_i64(&values))
@@ -676,7 +685,7 @@ fn update_global_sum_u64(
 ) -> Result<()> {
     debug_assert!(ids.iter().all(|&id| id == 0));
     let (groups, data_type) = state.as_sum_mut();
-    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    let argument = value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
     debug_assert_eq!(argument.len(), ids.len());
     let values = cast_argument(argument, data_type)?;
     groups.as_u64_mut().update_global_integer(as_u64(&values))
@@ -689,7 +698,7 @@ fn update_global_sum_f64(
 ) -> Result<()> {
     debug_assert!(ids.iter().all(|&id| id == 0));
     let (groups, data_type) = state.as_sum_mut();
-    let argument = value.ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
+    let argument = value.ok_or_else(|| Error::internal("sum requires one argument".into()))?;
     debug_assert_eq!(argument.len(), ids.len());
     let values = cast_argument(argument, data_type)?;
     groups
@@ -703,7 +712,7 @@ fn update_distinct(
     ids: &[usize],
 ) -> Result<()> {
     let (groups, converter) = state.as_distinct_mut();
-    let value = value.ok_or_else(|| Error::Execution("aggregate requires an argument".into()))?;
+    let value = value.ok_or_else(|| Error::internal("aggregate requires an argument".into()))?;
     let rows = converter.convert_columns(std::slice::from_ref(value))?;
     let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
@@ -717,7 +726,7 @@ fn update_distinct(
 
 fn update_avg(state: &mut AccumulatorState, value: Option<&ArrayRef>, ids: &[usize]) -> Result<()> {
     let groups = state.as_avg_mut();
-    let argument = value.ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
+    let argument = value.ok_or_else(|| Error::internal("avg requires one argument".into()))?;
     let values = cast_argument(argument, &DataType::Float64)?;
     let values = as_f64(&values);
     for (i, &id) in ids.iter().enumerate() {
@@ -737,7 +746,7 @@ fn update_extremum<const MINIMUM: bool>(
     ids: &[usize],
 ) -> Result<()> {
     let (groups, converter) = state.as_extremum_mut();
-    let value = value.ok_or_else(|| Error::Execution("aggregate requires an argument".into()))?;
+    let value = value.ok_or_else(|| Error::internal("aggregate requires an argument".into()))?;
     let rows = converter.convert_columns(std::slice::from_ref(value))?;
     let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
@@ -863,7 +872,7 @@ mod global_count_tests {
             }
             assert!(matches!(
                 count.update(None, &[0, 0, 0]),
-                Err(Error::Execution(_))
+                Err(ref error) if error.kind() == crate::error::ErrorKind::ArithmeticOverflow
             ));
             assert_eq!(as_i64(&count.evaluate().unwrap()).value(0), i64::MAX);
         }

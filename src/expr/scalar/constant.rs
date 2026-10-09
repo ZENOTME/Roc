@@ -40,7 +40,7 @@ impl ConstantExpression {
     /// Compatibility constructor for callers supplying one Arrow value.
     pub fn try_new(value: ArrayRef) -> Result<Self> {
         if value.len() != 1 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "constant must contain exactly one value".into(),
             ));
         }

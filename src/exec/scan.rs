@@ -14,7 +14,7 @@
 
 use super::{GlobalExecContextRef, SourceExec, SourceExecutor};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::{ScanConsumer, ScanHandle, ScanOperator, ScanRequest},
 };
 use arrow::record_batch::RecordBatch;
@@ -37,15 +37,19 @@ where
     StorageTaskDesc: Clone + Send + Sync + 'static,
 {
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        let handle = self.operator.storage().start_scan(ScanRequest::new(
-            self.operator.source().clone(),
-            shutdown_guard.clone(),
-        ))?;
+        let handle = self
+            .operator
+            .storage()
+            .start_scan(ScanRequest::new(
+                self.operator.source().clone(),
+                shutdown_guard.clone(),
+            ))
+            .with_context(|| ErrorContext::new("scan.start"))?;
         Ok(Arc::new(ScanGlobalContext { handle }))
     }
     fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
         let global = global.downcast::<ScanGlobalContext>().map_err(|_| {
-            Error::Execution("scan source received an invalid global context".into())
+            Error::internal("scan source received an invalid global context".into())
         })?;
         Ok(Box::new(ScanExecutor {
             consumer: global.handle.consumer(),
@@ -60,9 +64,13 @@ where
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let global = global.downcast::<ScanGlobalContext>().map_err(|_| {
-                Error::Execution("scan source received an invalid global context".into())
+                Error::internal("scan source received an invalid global context".into())
             })?;
-            global.handle.finish().await
+            global
+                .handle
+                .finish()
+                .await
+                .with_context(|| ErrorContext::new("scan.finish"))
         })
     }
 }
@@ -87,9 +95,9 @@ impl SourceExecutor for ScanExecutor {
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
                 _ = cancelled => {
-                    Err(Error::Cancelled)
+                    Err(Error::cancelled())
                 },
-                batch = next => batch,
+                batch = next => batch.with_context(|| ErrorContext::new("scan.next")),
             }
         })
     }

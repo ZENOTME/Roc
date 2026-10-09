@@ -42,7 +42,7 @@ impl Service {
     fn start(&self, shutdown_guard: ShutdownGuard) -> Result<Arc<Handle>> {
         self.guards.lock().unwrap().push(shutdown_guard.clone());
         if self.fail_start {
-            return Err(Error::Execution("start failed".into()));
+            return Err(Error::internal("start failed".into()));
         }
         Ok(Arc::new(Handle {
             _shutdown_guard: shutdown_guard,
@@ -154,7 +154,7 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
             assert!(!service.guard(2).is_shutdown_requested());
             assert!(matches!(
                 poll!(&mut next),
-                std::task::Poll::Ready(Err(Error::Cancelled))
+                std::task::Poll::Ready(Err(ref error)) if error.kind() == roc::error::ErrorKind::Cancelled
             ));
         });
         service.guards.lock().unwrap().clear();
@@ -213,7 +213,7 @@ fn failed_source_initialization_does_not_request_shutdown_or_leak_guards() {
         });
         let source = source(exchange, service.clone());
         assert!(
-            matches!(source.init_global_context(&guard), Err(Error::Execution(message)) if message == "start failed")
+            matches!(source.init_global_context(&guard), Err(ref error) if error.kind() == roc::error::ErrorKind::Internal && error.message() == "start failed")
         );
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();

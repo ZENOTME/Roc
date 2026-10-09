@@ -22,8 +22,8 @@ use arrow::{
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use roc::{
-    error::Error, expr::ExpressionResultType, expr::predicate::select_true,
-    expr::scalar::ScalarExprRef, expr::scalar::executor::ScalarExpressionExecutor, expr::scalar::*,
+    expr::ExpressionResultType, expr::predicate::select_true, expr::scalar::ScalarExprRef,
+    expr::scalar::executor::ScalarExpressionExecutor, expr::scalar::*,
 };
 use std::sync::Arc;
 
@@ -105,7 +105,7 @@ fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
     let evaluation = reference(0).to_evaluation().unwrap();
     let mut executor = ScalarExpressionExecutor::default();
     assert!(
-        matches!(evaluation.evaluate(&executor).and_then(|value| value.into_array(executor.num_rows()?)), Err(Error::Execution(message)) if message.contains("input"))
+        matches!(evaluation.evaluate(&executor).and_then(|value| value.into_array(executor.num_rows()?)), Err(ref error) if error.kind() == roc::error::ErrorKind::Internal && error.message().contains("input"))
     );
 
     let (first_result, first_input) = {
@@ -821,7 +821,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     ))
     .unwrap();
     assert!(
-        matches!(addition.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)).and_then(|value| value.into_array(num_rows)), Err(Error::Execution(message)) if message == "expected Int64 array")
+        matches!(addition.evaluate(&ScalarExpressionExecutor::new(columns, num_rows)).and_then(|value| value.into_array(num_rows)), Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput && error.message() == "expected Int64 array")
     );
 }
 
@@ -1492,7 +1492,7 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
     // description while selecting a kernel.
     assert!(matches!(
         call(FunctionKind::Add, vec![reference(0)], DataType::Int64, true).to_evaluation(),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidPlan
     ));
     // The binary entry point likewise rejects a unary-only kind.
     let binary_is_null = FunctionExpression::binary(
@@ -1504,13 +1504,13 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
     );
     assert!(matches!(
         binary_is_null.to_evaluation(),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidPlan
     ));
 
     // COALESCE has no value without at least one argument.
     assert!(matches!(
         CoalesceExpression::new(vec![], DataType::Int64, true).to_evaluation(),
-        Err(Error::InvalidPlan(message)) if message.contains("coalesce")
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidPlan && error.message().contains("coalesce")
     ));
 
     // A constant still has to hold exactly one value.
@@ -1530,7 +1530,7 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         executor
             .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
-        Err(Error::Execution(_))
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput
     ));
 
     // Mismatched operand types are accepted at plan time; the typed kernel
@@ -1546,7 +1546,7 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         executor
             .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
-        Err(Error::Execution(_))
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput
     ));
 
     // A non-Boolean CASE condition is likewise not validated up front.
@@ -1557,7 +1557,7 @@ fn plan_time_validation_is_limited_to_kernel_selection() {
         executor
             .evaluate(&ScalarExpressionExecutor::new(columns, num_rows))
             .and_then(|value| value.into_array(num_rows)),
-        Err(Error::Execution(_))
+        Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput
     ));
 
     // A branch whose type disagrees with the declared result type only fails

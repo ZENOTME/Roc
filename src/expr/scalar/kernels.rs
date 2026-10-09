@@ -35,7 +35,7 @@ pub(super) type EvalFn = fn(&[ColumnValue]) -> Result<ColumnValue>;
 
 fn unary_input(input: &[ColumnValue]) -> Result<&ColumnValue> {
     let [value] = input else {
-        return Err(Error::Execution(
+        return Err(Error::internal(
             "unary function requires one input result".into(),
         ));
     };
@@ -43,13 +43,13 @@ fn unary_input(input: &[ColumnValue]) -> Result<&ColumnValue> {
 }
 fn binary_input(input: &[ColumnValue]) -> Result<(&ColumnValue, &ColumnValue)> {
     let [left, right] = input else {
-        return Err(Error::Execution(
+        return Err(Error::internal(
             "binary function requires two input results".into(),
         ));
     };
     if let (ColumnValue::Array(left), ColumnValue::Array(right)) = (left, right) {
         if left.len() != right.len() {
-            return Err(Error::Execution("binary input lengths differ".into()));
+            return Err(Error::invalid_input("binary input lengths differ".into()));
         }
     }
     Ok((left, right))
@@ -80,12 +80,12 @@ pub(super) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result
             DataType::Float32 => negate::<Float32Type, true>,
             DataType::Float64 => negate::<Float64Type, true>,
             _ => {
-                return Err(Error::InvalidPlan(format!(
+                return Err(Error::unsupported(format!(
                     "unsupported negation type: {data_type}"
                 )));
             }
         },
-        _ => return Err(Error::InvalidPlan(format!("{function:?} is not unary"))),
+        _ => return Err(Error::invalid_plan(format!("{function:?} is not unary"))),
     })
 }
 
@@ -131,7 +131,7 @@ pub(super) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Resul
         GreaterThanOrEqual => bind_comparison::<GreaterEqualOp>(data_type),
         IsDistinctFrom => bind_comparison::<DistinctOp>(data_type),
         IsNotDistinctFrom => bind_comparison::<NotDistinctOp>(data_type),
-        _ => Err(Error::InvalidPlan(format!("{function:?} is not binary"))),
+        _ => Err(Error::invalid_plan(format!("{function:?} is not binary"))),
     }
 }
 
@@ -186,7 +186,7 @@ fn bind_arithmetic<O: ArithmeticOperation>(data_type: &DataType) -> Result<EvalF
         DataType::Float32 => arithmetic::<Float32Type, O, true>,
         DataType::Float64 => arithmetic::<Float64Type, O, true>,
         _ => {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::unsupported(format!(
                 "unsupported numeric type: {data_type}"
             )));
         }
@@ -253,7 +253,7 @@ fn primitive<T: ArrowPrimitiveType>(value: &ArrayRef) -> Result<&PrimitiveArray<
     value
         .as_any()
         .downcast_ref()
-        .ok_or_else(|| Error::Execution(format!("expected {} array", T::DATA_TYPE)))
+        .ok_or_else(|| Error::invalid_input(format!("expected {} array", T::DATA_TYPE)))
 }
 
 trait ComparisonOperation {
@@ -329,7 +329,10 @@ fn bind_comparison<O: ComparisonOperation>(data_type: &DataType) -> Result<EvalF
             // Preserve Arrow's other comparison signatures. This fallback still
             // dispatches types inside Arrow; primitive numeric kernels do not.
             let empty = new_empty_array(data_type);
-            O::arrow(&empty, &empty).map_err(|e| Error::InvalidPlan(e.to_string()))?;
+            O::arrow(&empty, &empty).map_err(|e| {
+                Error::unsupported(format!("comparison does not support {data_type}"))
+                    .with_source(e)
+            })?;
             arrow_comparison::<O>
         }
     })

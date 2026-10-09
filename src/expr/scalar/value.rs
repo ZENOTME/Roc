@@ -78,7 +78,7 @@ pub enum ScalarValue {
 impl ScalarValue {
     pub fn try_from_array(array: &ArrayRef, index: usize) -> Result<Self> {
         if index >= array.len() {
-            return Err(Error::Execution("scalar index out of bounds".into()));
+            return Err(Error::invalid_input("scalar index out of bounds".into()));
         }
         macro_rules! primitive {
             ($ty:ty, $variant:ident $(, $metadata:expr)*) => {{
@@ -223,7 +223,7 @@ impl ScalarValue {
                     DataType::UInt16 => dictionary!(UInt16Type),
                     DataType::UInt32 => dictionary!(UInt32Type),
                     DataType::UInt64 => dictionary!(UInt64Type),
-                    _ => return Err(Error::Execution("invalid dictionary key type".into())),
+                    _ => return Err(Error::invalid_input("invalid dictionary key type".into())),
                 };
                 Self::Dictionary(key_type.clone(), Box::new(value))
             }
@@ -238,7 +238,7 @@ impl ScalarValue {
                     DataType::Int16 => run!(Int16Type),
                     DataType::Int32 => run!(Int32Type),
                     DataType::Int64 => run!(Int64Type),
-                    _ => return Err(Error::Execution("invalid run-end type".into())),
+                    _ => return Err(Error::invalid_input("invalid run-end type".into())),
                 };
                 Self::RunEndEncoded(run_ends.clone(), values.clone(), Box::new(value))
             }
@@ -249,7 +249,7 @@ impl ScalarValue {
                 Self::Union(Some((id, Box::new(value))), fields.clone(), *mode)
             }
             other => {
-                return Err(Error::Execution(format!(
+                return Err(Error::unsupported(format!(
                     "unsupported scalar type: {other}"
                 )));
             }
@@ -383,7 +383,7 @@ impl ScalarValue {
         match self {
             Self::Boolean(value) => Ok(*value),
             Self::Null(DataType::Boolean) => Ok(None),
-            _ => Err(Error::Execution("expected Boolean expression".into())),
+            _ => Err(Error::invalid_input("expected Boolean expression".into())),
         }
     }
 
@@ -502,7 +502,7 @@ impl ScalarValue {
                     if !fields.iter().any(|(field_id, field)| {
                         field_id == *id && field.data_type() == &value.data_type()
                     }) {
-                        return Err(Error::Execution(
+                        return Err(Error::invalid_input(
                             "union scalar does not match its field".into(),
                         ));
                     }
@@ -521,7 +521,7 @@ impl ScalarValue {
                         .collect::<Result<Vec<_>>>()?;
                     let offsets = if *mode == UnionMode::Dense {
                         let len_i32 = i32::try_from(len)
-                            .map_err(|_| Error::Execution("union length exceeds i32".into()))?;
+                            .map_err(|_| Error::invalid_input("union length exceeds i32".into()))?;
                         Some(arrow::buffer::ScalarBuffer::from_iter(0..len_i32))
                     } else {
                         None
@@ -555,19 +555,19 @@ impl ScalarValue {
                     DataType::UInt16 => dictionary!(UInt16Type),
                     DataType::UInt32 => dictionary!(UInt32Type),
                     DataType::UInt64 => dictionary!(UInt64Type),
-                    _ => return Err(Error::Execution("invalid dictionary key type".into())),
+                    _ => return Err(Error::invalid_input("invalid dictionary key type".into())),
                 }
             }
             Self::RunEndEncoded(run_ends, values, value) => {
                 if values.data_type() != &value.data_type() {
-                    return Err(Error::Execution(
+                    return Err(Error::invalid_input(
                         "run scalar does not match its value field".into(),
                     ));
                 }
                 macro_rules! run {
                     ($ty:ty, $native:ty) => {{
                         let end = <$native>::try_from(len).map_err(|_| {
-                            Error::Execution("scalar length exceeds run-end type".into())
+                            Error::invalid_input("scalar length exceeds run-end type".into())
                         })?;
                         let ends = PrimitiveArray::<$ty>::from(vec![end]);
                         let data = ArrayData::builder(self.data_type())
@@ -585,7 +585,7 @@ impl ScalarValue {
                         DataType::Int16 => run!(Int16Type, i16),
                         DataType::Int32 => run!(Int32Type, i32),
                         DataType::Int64 => run!(Int64Type, i64),
-                        _ => return Err(Error::Execution("invalid run-end type".into())),
+                        _ => return Err(Error::invalid_input("invalid run-end type".into())),
                     }
                 }
             }
@@ -596,7 +596,7 @@ impl ScalarValue {
 /// Broadcast one typed nested value using Arrow kernels.
 fn repeat_nested(value: ArrayRef, len: usize) -> Result<ArrayRef> {
     if value.len() != 1 {
-        return Err(Error::Execution(
+        return Err(Error::invalid_input(
             "nested scalar must contain exactly one value".into(),
         ));
     }
@@ -631,7 +631,7 @@ impl ColumnValue {
     pub fn into_array(self, num_rows: usize) -> Result<ArrayRef> {
         match self {
             Self::Array(value) if value.len() == num_rows => Ok(value),
-            Self::Array(_) => Err(Error::Execution(
+            Self::Array(_) => Err(Error::invalid_input(
                 "column value length differs from input".into(),
             )),
             Self::Scalar(value) => value.to_array_of_size(num_rows),
@@ -650,7 +650,7 @@ macro_rules! scalar_primitive {
                 match value {
                     ScalarValue::$variant(value) => Ok(*value),
                     ScalarValue::Null(data_type) if *data_type == Self::DATA_TYPE => Ok(None),
-                    _ => Err(Error::Execution(format!(
+                    _ => Err(Error::invalid_input(format!(
                         "expected {} scalar",
                         Self::DATA_TYPE
                     ))),

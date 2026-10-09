@@ -69,7 +69,7 @@ impl Projection {
             .iter()
             .map(|&index| {
                 let field = input_schema.fields().get(index).ok_or_else(|| {
-                    Error::InvalidPlan(format!("column index {index} out of bounds"))
+                    Error::invalid_plan(format!("column index {index} out of bounds"))
                 })?;
                 Ok(ProjectionExpression::new(
                     ReferenceExpression::new(
@@ -130,7 +130,7 @@ impl Operator for ProjectOperator {
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "project operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

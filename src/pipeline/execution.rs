@@ -16,7 +16,7 @@
 use super::{Pipeline, PipelineGraph};
 use crate::{
     Shutdown,
-    error::{Error, Result},
+    error::{Error, ErrorContext, ErrorKind, Result, ResultExt},
     exec::{
         GlobalExecContextRef, ProcessExecutor, ProcessResult, SinkExecutor, SinkResult,
         SourceExecutor,
@@ -33,7 +33,7 @@ use std::future::Future;
 use std::{collections::VecDeque, sync::Arc};
 
 pub trait Executor: Send + Sync + 'static {
-    type JoinError: std::fmt::Display + Send + 'static;
+    type JoinError: std::error::Error + Send + Sync + 'static;
     type Handle<T>: Future<Output = std::result::Result<T, Self::JoinError>> + Send + 'static
     where
         T: Send + 'static;
@@ -64,7 +64,7 @@ impl Default for PipelineExecutionConfig {
 impl PipelineExecutionConfig {
     fn validate(self) -> Result<()> {
         if self.batch_rows == 0 || self.yield_batches == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "batch and yield sizes must be positive".into(),
             ));
         }
@@ -145,39 +145,58 @@ impl Pipeline {
     ) -> Result<()> {
         config.validate()?;
         if parallelism == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "task parallelism must be positive".into(),
             ));
         }
         if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
         let global = self.init_global_context(&shutdown_guard)?;
         let executors = (0..parallelism)
             .map(|_| self.new_executor(&global))
             .collect::<Result<Vec<_>>>()?;
         let mut tasks = FuturesUnordered::new();
-        for executor in executors {
-            tasks.push(task_executor.spawn(executor.execute(shutdown_guard.clone(), config)));
+        for (worker, executor) in executors.into_iter().enumerate() {
+            let task = task_executor.spawn(executor.execute(shutdown_guard.clone(), config));
+            tasks.push(async move {
+                task.await
+                    .map_err(|source| {
+                        Error::new(ErrorKind::TaskFailed, "worker task failed").with_source(source)
+                    })
+                    .and_then(|result| result)
+                    .with_context(|| ErrorContext::new("worker.execute").field("worker", worker))
+            });
         }
 
         while let Some(result) = tasks.next().await {
-            result.map_err(|error| Error::Execution(format!("task failed: {error}")))??;
+            result?;
         }
         if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
         self.finalize(&global, &shutdown_guard).await
     }
 
     fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<PipelineGlobalContext> {
-        let sink = self.sink.init_global_context(shutdown_guard)?;
+        let sink = self
+            .sink
+            .init_global_context(shutdown_guard)
+            .with_context(|| ErrorContext::new("sink.init"))?;
         let processors = self
             .processors
             .iter()
-            .map(|process| process.init_global_context(shutdown_guard))
+            .enumerate()
+            .map(|(index, process)| {
+                process
+                    .init_global_context(shutdown_guard)
+                    .with_context(|| ErrorContext::new("processor.init").field("processor", index))
+            })
             .collect::<Result<Vec<_>>>()?;
-        let source = self.source.init_global_context(shutdown_guard)?;
+        let source = self
+            .source
+            .init_global_context(shutdown_guard)
+            .with_context(|| ErrorContext::new("source.init"))?;
         Ok(PipelineGlobalContext {
             source,
             processors,
@@ -186,14 +205,25 @@ impl Pipeline {
     }
 
     fn new_executor(&self, global: &PipelineGlobalContext) -> Result<PipelineExecutor> {
-        let source = self.source.new_executor(global.source.clone())?;
+        let source = self
+            .source
+            .new_executor(global.source.clone())
+            .with_context(|| ErrorContext::new("source.create_executor"))?;
         let processors = self
             .processors
             .iter()
             .zip(&global.processors)
-            .map(|(operator, global)| operator.new_executor(global.clone()))
+            .enumerate()
+            .map(|(index, (operator, global))| {
+                operator.new_executor(global.clone()).with_context(|| {
+                    ErrorContext::new("processor.create_executor").field("processor", index)
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
-        let sink = self.sink.new_executor(global.sink.clone())?;
+        let sink = self
+            .sink
+            .new_executor(global.sink.clone())
+            .with_context(|| ErrorContext::new("sink.create_executor"))?;
         Ok(PipelineExecutor {
             source,
             processors,
@@ -208,10 +238,12 @@ impl Pipeline {
     ) -> Result<()> {
         self.source
             .finalize(global.source.clone(), shutdown_guard)
-            .await?;
+            .await
+            .with_context(|| ErrorContext::new("source.finalize"))?;
         self.sink
             .finalize(global.sink.clone(), shutdown_guard)
             .await
+            .with_context(|| ErrorContext::new("sink.finalize"))
     }
 }
 
@@ -238,27 +270,36 @@ impl PipelineExecutor {
         let mut finishing = None;
         loop {
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             if let Some((index, input)) = pending.pop() {
                 if index == self.processors.len() {
-                    if self.sink.sink(&shutdown_guard, &input).await? == SinkResult::Finished {
+                    if self
+                        .sink
+                        .sink(&shutdown_guard, &input)
+                        .await
+                        .with_context(|| ErrorContext::new("sink.send"))?
+                        == SinkResult::Finished
+                    {
                         break;
                     }
                 } else {
-                    let output = match self.processors[index].execute(&input)? {
-                        ProcessResult::NeedMoreInput(output) => output,
-                        ProcessResult::MoreResult(output) => {
-                            pending.push((index, input));
-                            output
-                        }
-                        ProcessResult::Finished(output) => {
-                            pending.clear();
-                            morsel = None;
-                            finishing = Some(index + 1);
-                            output
-                        }
-                    };
+                    let output =
+                        match self.processors[index].execute(&input).with_context(|| {
+                            ErrorContext::new("processor.execute").field("processor", index)
+                        })? {
+                            ProcessResult::NeedMoreInput(output) => output,
+                            ProcessResult::MoreResult(output) => {
+                                pending.push((index, input));
+                                output
+                            }
+                            ProcessResult::Finished(output) => {
+                                pending.clear();
+                                morsel = None;
+                                finishing = Some(index + 1);
+                                output
+                            }
+                        };
                     if output.num_rows() > 0 {
                         pending.push((index + 1, output));
                     }
@@ -267,7 +308,9 @@ impl PipelineExecutor {
                 if index == self.processors.len() {
                     break;
                 }
-                match self.processors[index].finish()? {
+                match self.processors[index].finish().with_context(|| {
+                    ErrorContext::new("processor.finish").field("processor", index)
+                })? {
                     Some(output) => {
                         if output.num_rows() > 0 {
                             pending.push((index + 1, output));
@@ -277,7 +320,11 @@ impl PipelineExecutor {
                 }
             } else {
                 if morsel.is_none() {
-                    morsel = self.source.next_batch(&shutdown_guard).await?;
+                    morsel = self
+                        .source
+                        .next_batch(&shutdown_guard)
+                        .await
+                        .with_context(|| ErrorContext::new("source.next_batch"))?;
                     offset = 0;
                 }
                 let Some(input) = &morsel else {
@@ -312,7 +359,10 @@ impl PipelineExecutor {
             }
         }
         pending.clear();
-        self.sink.combine(&shutdown_guard).await
+        self.sink
+            .combine(&shutdown_guard)
+            .await
+            .with_context(|| ErrorContext::new("sink.combine"))
     }
 }
 
@@ -339,7 +389,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         self.config.validate()?;
         let task_executor = Arc::new(self.task_executor);
         if self.parallelism == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "task parallelism must be positive".into(),
             ));
         }
@@ -360,7 +410,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         let mut running = FuturesUnordered::new();
         loop {
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             while let Some(id) = ready.pop_front() {
                 let pipeline = pipelines[id].take().expect("pipeline started once");
@@ -376,7 +426,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
                 return if finished == pipelines.len() {
                     Ok(())
                 } else {
-                    Err(Error::Execution(
+                    Err(Error::internal(
                         "pipeline graph has no runnable pipeline".into(),
                     ))
                 };
@@ -387,11 +437,16 @@ impl<E: Executor> PipelineGraphExecutor<E> {
             )
             .await
             {
-                Either::Left(_) => return Err(Error::Cancelled),
+                Either::Left(_) => return Err(Error::cancelled()),
                 Either::Right((completed, _)) => completed,
             };
             let (id, result) = completed.expect("running pipeline exists");
-            result.map_err(|error| Error::Execution(format!("task failed: {error}")))??;
+            result
+                .map_err(|source| {
+                    Error::new(ErrorKind::TaskFailed, "pipeline task failed").with_source(source)
+                })
+                .and_then(|result| result)
+                .with_context(|| ErrorContext::new("pipeline.execute").field("pipeline", id))?;
             finished += 1;
             for &dependent in &graph.dependents[id] {
                 let remaining = &mut remaining_dependencies[dependent];
@@ -691,12 +746,12 @@ mod tests {
                 first = false;
                 Ok(ProcessResult::MoreResult(input.clone()))
             } else {
-                Err(Error::Execution("continuation failed".into()))
+                Err(Error::internal("continuation failed".into()))
             }
         });
         let (exec, observed) = executor(vec![batch(&[1]), batch(&[2])], vec![fail], None);
         assert!(
-            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(Error::Execution(message)) if message == "continuation failed")
+            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(ref error) if error.kind() == crate::error::ErrorKind::Internal && error.message() == "continuation failed")
         );
         assert_eq!(*observed.values.lock().unwrap(), [1]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
@@ -714,7 +769,9 @@ mod tests {
                 shutdown.request_shutdown();
             })
         });
-        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == crate::error::ErrorKind::Cancelled)
+        );
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
@@ -878,7 +935,7 @@ mod tests {
                     first = false;
                     Ok(Some(batch(&[1])))
                 } else {
-                    Err(Error::Execution("finish failed".into()))
+                    Err(Error::internal("finish failed".into()))
                 }
             },
         );
@@ -888,7 +945,7 @@ mod tests {
         );
         let (exec, observed) = executor(vec![], vec![fail, downstream], None);
         assert!(
-            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(Error::Execution(message)) if message == "finish failed")
+            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(ref error) if error.kind() == crate::error::ErrorKind::Internal && error.message() == "finish failed")
         );
         assert_eq!(*observed.values.lock().unwrap(), [1]);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
@@ -908,7 +965,9 @@ mod tests {
                 shutdown.request_shutdown();
             })
         });
-        assert!(matches!(result, Err(Error::Cancelled)));
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == crate::error::ErrorKind::Cancelled)
+        );
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
     }

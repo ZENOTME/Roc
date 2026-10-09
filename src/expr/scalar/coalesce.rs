@@ -59,7 +59,7 @@ impl CoalesceExpression {
     pub(super) fn bind(&self) -> Result<CoalesceExpressionEvaluation> {
         // The executor indexes its first argument; COALESCE has no value without one.
         if self.arguments.is_empty() {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "coalesce requires at least one argument".into(),
             ));
         }
