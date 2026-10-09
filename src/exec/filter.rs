@@ -15,7 +15,7 @@
 use super::{GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult};
 use crate::expr::scalar::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
 use crate::{
-    error::{Error, ErrorContext, Result, ResultExt},
+    error::{Error, Result, ResultExt},
     expr::scalar::ScalarExprRef,
 };
 use arrow::{array::AsArray, compute::filter_record_batch, record_batch::RecordBatch};
@@ -59,10 +59,7 @@ struct FilterExecutor {
 impl ProcessExecutor for FilterExecutor {
     fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
         let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        let predicate = self
-            .predicate
-            .evaluate(&executor)
-            .with_context(|| ErrorContext::new("filter.predicate"))?;
+        let predicate = self.predicate.evaluate(&executor).with_location()?;
         let predicate = predicate.into_array(input.num_rows())?;
         let mask = predicate
             .as_boolean_opt()
@@ -74,12 +71,25 @@ impl ProcessExecutor for FilterExecutor {
         // but do not need allocation/copying by the row filter kernel.
         let projected;
         let input = if let Some(indices) = &self.output_projection {
-            projected = input.project(indices)?;
+            projected = input
+                .project(indices)
+                .map_err(|source| {
+                    Error::invalid_plan(
+                        "filter output projection contains an invalid column index".into(),
+                    )
+                    .with_source(source)
+                })
+                .with_location()?;
             &projected
         } else {
             input
         };
-        let output = filter_record_batch(input, mask)?;
+        // The batch and predicate length/type have already been checked.
+        let output = filter_record_batch(input, mask)
+            .map_err(|source| {
+                Error::internal("failed to apply validated filter mask".into()).with_source(source)
+            })
+            .with_location()?;
         Ok(ProcessResult::NeedMoreInput(output))
     }
     fn finish(&mut self) -> Result<Option<RecordBatch>> {
@@ -223,6 +233,10 @@ mod tests {
                 .unwrap(),
             output_projection: Some(vec![2]),
         };
-        assert!(invalid.execute(&input).is_err());
+        let error = invalid.execute(&input).unwrap_err();
+        assert_eq!(error.kind(), crate::error::ErrorKind::InvalidPlan);
+        let frame = error.frames().last().unwrap();
+        assert!(frame.context.is_none());
+        assert_eq!(frame.location.file(), file!());
     }
 }

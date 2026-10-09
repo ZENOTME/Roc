@@ -96,6 +96,7 @@ impl ProjectionExecutor {
             Error::invalid_input("projection output does not match its schema".into())
                 .with_source(source)
         })
+        .with_location()
     }
 }
 impl ProcessExecutor for ProjectionExecutor {

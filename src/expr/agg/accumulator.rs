@@ -265,7 +265,14 @@ impl Accumulator {
                 (
                     AccumulatorState::Distinct {
                         groups: vec![],
-                        converter: RowConverter::new(vec![SortField::new(input)])?,
+                        converter: RowConverter::new(vec![SortField::new(input)]).map_err(
+                            |source| {
+                                Error::unsupported(
+                                    "unsupported COUNT DISTINCT argument type".into(),
+                                )
+                                .with_source(source)
+                            },
+                        )?,
                     },
                     update_distinct,
                 )
@@ -287,7 +294,12 @@ impl Accumulator {
                 (
                     AccumulatorState::Extremum {
                         groups: vec![],
-                        converter: RowConverter::new(vec![SortField::new(input)])?,
+                        converter: RowConverter::new(vec![SortField::new(input)]).map_err(
+                            |source| {
+                                Error::unsupported("unsupported MIN/MAX argument type".into())
+                                    .with_source(source)
+                            },
+                        )?,
                         data_type: output.clone(),
                     },
                     if function == Min {
@@ -376,10 +388,18 @@ impl Accumulator {
                             indices.push((0, 0));
                         }
                     }
-                    vec![interleave(
-                        &arrays.iter().map(|a| a.as_ref()).collect::<Vec<_>>(),
-                        &indices,
-                    )?]
+                    vec![
+                        interleave(
+                            &arrays.iter().map(|a| a.as_ref()).collect::<Vec<_>>(),
+                            &indices,
+                        )
+                        .map_err(|source| {
+                            Error::invalid_plan(
+                                "MIN/MAX values do not match the declared result type".into(),
+                            )
+                            .with_source(source)
+                        })?,
+                    ]
                 }
             }
         })
@@ -446,7 +466,15 @@ fn cast_argument<'a>(argument: &'a ArrayRef, data_type: &DataType) -> Result<Cow
     if argument.data_type() == data_type {
         Ok(Cow::Borrowed(argument))
     } else {
-        Ok(Cow::Owned(cast(argument.as_ref(), data_type)?))
+        Ok(Cow::Owned(cast(argument.as_ref(), data_type).map_err(
+            |source| {
+                Error::invalid_input(format!(
+                    "cannot convert aggregate argument from {} to {data_type}",
+                    argument.data_type()
+                ))
+                .with_source(source)
+            },
+        )?))
     }
 }
 
@@ -713,7 +741,12 @@ fn update_distinct(
 ) -> Result<()> {
     let (groups, converter) = state.as_distinct_mut();
     let value = value.ok_or_else(|| Error::internal("aggregate requires an argument".into()))?;
-    let rows = converter.convert_columns(std::slice::from_ref(value))?;
+    let rows = converter
+        .convert_columns(std::slice::from_ref(value))
+        .map_err(|source| {
+            Error::invalid_input("failed to encode COUNT DISTINCT values".into())
+                .with_source(source)
+        })?;
     let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
         if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
@@ -747,7 +780,11 @@ fn update_extremum<const MINIMUM: bool>(
 ) -> Result<()> {
     let (groups, converter) = state.as_extremum_mut();
     let value = value.ok_or_else(|| Error::internal("aggregate requires an argument".into()))?;
-    let rows = converter.convert_columns(std::slice::from_ref(value))?;
+    let rows = converter
+        .convert_columns(std::slice::from_ref(value))
+        .map_err(|source| {
+            Error::invalid_input("failed to encode MIN/MAX values".into()).with_source(source)
+        })?;
     let nulls = value.logical_nulls();
     for (i, &id) in ids.iter().enumerate() {
         if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
@@ -764,7 +801,10 @@ fn update_extremum<const MINIMUM: bool>(
         if replace {
             // Retain the chosen row; Arrow may share backing buffers.
             let value =
-                arrow::compute::take(value.as_ref(), &UInt64Array::from(vec![i as u64]), None)?;
+                arrow::compute::take(value.as_ref(), &UInt64Array::from(vec![i as u64]), None)
+                    .map_err(|source| {
+                        Error::internal("failed to retain MIN/MAX value".into()).with_source(source)
+                    })?;
             groups[id] = Some((row.as_ref().to_vec(), value));
         }
     }

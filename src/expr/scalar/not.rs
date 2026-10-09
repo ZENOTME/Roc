@@ -91,7 +91,10 @@ impl NotExpressionEvaluation {
                     let value = value.as_boolean_opt().ok_or_else(|| {
                         Error::invalid_input("expected Boolean expression".into())
                     })?;
-                    ColumnValue::Array(Arc::new(not(value)?))
+                    ColumnValue::Array(Arc::new(not(value).map_err(|source| {
+                        Error::internal("failed to negate Boolean values".into())
+                            .with_source(source)
+                    })?))
                 }
             }
         })

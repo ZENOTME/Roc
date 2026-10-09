@@ -104,7 +104,9 @@ impl ScanStorage for MemoryStorage {
         request: ScanRequest<Self::StorageTaskDesc>,
     ) -> Result<Arc<dyn ScanHandle>> {
         assert_eq!(request.source(), &[2, 0]);
-        let batch = self.0.project(request.source())?;
+        let batch = self.0.project(request.source()).map_err(|source| {
+            roc::error::Error::invalid_plan("invalid scan projection".into()).with_source(source)
+        })?;
         Ok(Arc::new(MemoryScan(Arc::new(Mutex::new(Some(batch))))))
     }
 }
@@ -449,7 +451,7 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
 }
 
 struct MemoryExchange {
-    input: Result<Option<RecordBatch>>,
+    input: Arc<Mutex<Result<Option<RecordBatch>>>>,
     output: Collector,
     schema: arrow::datatypes::SchemaRef,
     created_sinks: std::sync::atomic::AtomicUsize,
@@ -462,9 +464,7 @@ impl roc::operator::ExchangeService for MemoryExchange {
         _shutdown_guard: &ShutdownGuard,
     ) -> Result<Arc<dyn roc::operator::ExchangeHandle>> {
         assert_eq!(exchange, 7);
-        Ok(Arc::new(MemoryExchangeInput(Arc::new(Mutex::new(
-            self.input.clone(),
-        )))))
+        Ok(Arc::new(MemoryExchangeInput(self.input.clone())))
     }
 
     fn create_sink(
@@ -493,12 +493,7 @@ impl roc::operator::ExchangeHandle for MemoryExchangeInput {
 
 impl roc::operator::ExchangeConsumer for MemoryExchangeInput {
     fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
-        Box::pin(async {
-            match &mut *self.0.lock().unwrap() {
-                Ok(batch) => Ok(batch.take()),
-                Err(error) => Err(error.clone()),
-            }
-        })
+        Box::pin(async { std::mem::replace(&mut *self.0.lock().unwrap(), Ok(None)) })
     }
 }
 
@@ -523,7 +518,7 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
         RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
     for input in [Some(batch), None] {
         let service = Arc::new(MemoryExchange {
-            input: Ok(input.clone()),
+            input: Arc::new(Mutex::new(Ok(input.clone()))),
             output: Collector::default(),
             schema: schema.clone(),
             created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -560,11 +555,11 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
     ));
     let collector = Collector::default();
     let service = Arc::new(MemoryExchange {
-        input: Err(roc::error::Error::new(
+        input: Arc::new(Mutex::new(Err(roc::error::Error::new(
             roc::error::ErrorKind::Unavailable,
             "exchange read failed",
         )
-        .with_source(read_error.clone())),
+        .with_source(read_error.clone())))),
         output: collector.clone(),
         schema: Arc::new(Schema::empty()),
         created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -586,17 +581,22 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
         .unwrap();
     assert!(Arc::ptr_eq(actual, &read_error));
     let frames = error.frames();
-    assert!(frames.iter().any(|f| f.context.operation == "exchange.next"
-        && f.context.fields.contains(&("exchange", "7".into()))));
     assert!(
         frames
             .iter()
-            .any(|f| f.context.operation == "worker.execute")
+            .filter_map(|f| f.context.as_ref())
+            .any(|context| context.operation == "exchange.next"
+                && context.fields.contains(&("exchange", "7".into())))
     );
-    assert!(
-        frames
-            .iter()
-            .any(|f| f.context.operation == "pipeline.execute")
-    );
+    assert!(frames.iter().any(|f| {
+        f.context
+            .as_ref()
+            .is_some_and(|context| context.operation == "worker.execute")
+    }));
+    assert!(frames.iter().any(|f| {
+        f.context
+            .as_ref()
+            .is_some_and(|context| context.operation == "pipeline.execute")
+    }));
     assert!(collector.0.lock().unwrap().is_empty());
 }

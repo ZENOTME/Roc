@@ -421,6 +421,7 @@ fn adapter_failure() -> Error {
 #[tokio::test]
 async fn failures_preserve_causes_and_identify_lifecycle_or_task_boundary() {
     use roc::error::ErrorKind;
+    let mut lifecycle_locations = Vec::new();
     for phase in ["init", "finalize", "pipeline", "worker"] {
         let pipeline = Pipeline {
             source: Box::new(FaultSource(phase)),
@@ -448,21 +449,43 @@ async fn failures_preserve_causes_and_identify_lifecycle_or_task_boundary() {
                 std::io::ErrorKind::ConnectionReset
             );
         }
-        let operation = match phase {
-            "init" => "source.init",
-            "finalize" => "source.finalize",
-            "worker" => "worker.execute",
-            _ => "pipeline.execute",
-        };
-        assert!(
-            error
+        if phase == "init" || phase == "finalize" {
+            let frame = error
                 .frames()
                 .iter()
-                .any(|f| f.context.operation == operation)
-        );
+                .find(|frame| frame.context.is_none())
+                .unwrap();
+            assert!(frame.location.file().ends_with("src/pipeline/execution.rs"));
+            assert!(format!("{error:?}").contains(&frame.location.to_string()));
+            lifecycle_locations.push(frame.location);
+        } else {
+            let operation = if phase == "worker" {
+                "worker.execute"
+            } else {
+                "pipeline.execute"
+            };
+            assert!(error.frames().iter().any(|frame| {
+                frame
+                    .context
+                    .as_ref()
+                    .is_some_and(|context| context.operation == operation)
+            }));
+        }
         let outer = error.frames().last().unwrap();
-        assert_eq!(outer.context.operation, "pipeline.execute");
-        assert!(outer.context.fields.contains(&("pipeline", "0".into())));
+        assert_eq!(
+            outer.context.as_ref().unwrap().operation,
+            "pipeline.execute"
+        );
+        assert!(
+            outer
+                .context
+                .as_ref()
+                .unwrap()
+                .fields
+                .contains(&("pipeline", "0".into()))
+        );
         shutdown.await;
     }
+    assert_eq!(lifecycle_locations.len(), 2);
+    assert_ne!(lifecycle_locations[0], lifecycle_locations[1]);
 }

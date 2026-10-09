@@ -182,7 +182,7 @@ impl Pipeline {
         let sink = self
             .sink
             .init_global_context(shutdown_guard)
-            .with_context(|| ErrorContext::new("sink.init"))?;
+            .with_location()?;
         let processors = self
             .processors
             .iter()
@@ -196,7 +196,7 @@ impl Pipeline {
         let source = self
             .source
             .init_global_context(shutdown_guard)
-            .with_context(|| ErrorContext::new("source.init"))?;
+            .with_location()?;
         Ok(PipelineGlobalContext {
             source,
             processors,
@@ -208,7 +208,7 @@ impl Pipeline {
         let source = self
             .source
             .new_executor(global.source.clone())
-            .with_context(|| ErrorContext::new("source.create_executor"))?;
+            .with_location()?;
         let processors = self
             .processors
             .iter()
@@ -223,7 +223,7 @@ impl Pipeline {
         let sink = self
             .sink
             .new_executor(global.sink.clone())
-            .with_context(|| ErrorContext::new("sink.create_executor"))?;
+            .with_location()?;
         Ok(PipelineExecutor {
             source,
             processors,
@@ -239,11 +239,11 @@ impl Pipeline {
         self.source
             .finalize(global.source.clone(), shutdown_guard)
             .await
-            .with_context(|| ErrorContext::new("source.finalize"))?;
+            .with_location()?;
         self.sink
             .finalize(global.sink.clone(), shutdown_guard)
             .await
-            .with_context(|| ErrorContext::new("sink.finalize"))
+            .with_location()
     }
 }
 
@@ -278,7 +278,7 @@ impl PipelineExecutor {
                         .sink
                         .sink(&shutdown_guard, &input)
                         .await
-                        .with_context(|| ErrorContext::new("sink.send"))?
+                        .with_location()?
                         == SinkResult::Finished
                     {
                         break;
@@ -324,7 +324,7 @@ impl PipelineExecutor {
                         .source
                         .next_batch(&shutdown_guard)
                         .await
-                        .with_context(|| ErrorContext::new("source.next_batch"))?;
+                        .with_location()?;
                     offset = 0;
                 }
                 let Some(input) = &morsel else {
@@ -359,10 +359,7 @@ impl PipelineExecutor {
             }
         }
         pending.clear();
-        self.sink
-            .combine(&shutdown_guard)
-            .await
-            .with_context(|| ErrorContext::new("sink.combine"))
+        self.sink.combine(&shutdown_guard).await.with_location()
     }
 }
 

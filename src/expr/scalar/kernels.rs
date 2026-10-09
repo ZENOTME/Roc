@@ -15,7 +15,7 @@
 //! Select operations and primitive types during initialization.
 use super::value::ScalarPrimitiveType;
 use super::{ColumnValue, FunctionKind, ScalarValue};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use arrow::{
     array::{
         Array, ArrayRef, ArrowNativeTypeOp, BooleanArray, Datum, PrimitiveArray, Scalar,
@@ -32,6 +32,48 @@ use arrow::{
 use std::sync::Arc;
 
 pub(super) type EvalFn = fn(&[ColumnValue]) -> Result<ColumnValue>;
+
+// Only the arithmetic kernels use this translation. Other Arrow operations
+// decide their own failure semantics at their call sites.
+#[cold]
+#[track_caller]
+fn arithmetic_error(source: ArrowError) -> Error {
+    let error = match &source {
+        ArrowError::DivideByZero => Error::new(ErrorKind::DivisionByZero, "division by zero"),
+        ArrowError::ArithmeticOverflow(_) => {
+            Error::new(ErrorKind::ArithmeticOverflow, "arithmetic overflow")
+        }
+        // Operand lengths/types are checked before invoking these primitive
+        // kernels. Other failures violate that execution invariant.
+        ArrowError::NotYetImplemented(_)
+        | ArrowError::ExternalError(_)
+        | ArrowError::IoError(_, _)
+        | ArrowError::DictionaryKeyOverflowError
+        | ArrowError::RunEndIndexOverflowError
+        | ArrowError::OffsetOverflowError(_)
+        | ArrowError::CastError(_)
+        | ArrowError::MemoryError(_)
+        | ArrowError::ParseError(_)
+        | ArrowError::SchemaError(_)
+        | ArrowError::ComputeError(_)
+        | ArrowError::CsvError(_)
+        | ArrowError::JsonError(_)
+        | ArrowError::AvroError(_)
+        | ArrowError::IpcError(_)
+        | ArrowError::InvalidArgumentError(_)
+        | ArrowError::ParquetError(_)
+        | ArrowError::CDataInterface(_) => {
+            Error::internal("checked arithmetic kernel failed".into())
+        }
+    };
+    error.with_source(source)
+}
+
+#[cold]
+#[track_caller]
+fn comparison_error(source: ArrowError) -> Error {
+    Error::invalid_input("cannot compare input values".into()).with_source(source)
+}
 
 fn unary_input(input: &[ColumnValue]) -> Result<&ColumnValue> {
     let [value] = input else {
@@ -60,9 +102,13 @@ fn null_test<const NOT: bool>(input: &[ColumnValue]) -> Result<ColumnValue> {
             ColumnValue::Scalar(ScalarValue::Boolean(Some(value.is_null() != NOT)))
         }
         ColumnValue::Array(value) => ColumnValue::Array(Arc::new(if NOT {
-            is_not_null(value.as_ref())?
+            is_not_null(value.as_ref()).map_err(|source| {
+                Error::internal("failed to evaluate IS NOT NULL".into()).with_source(source)
+            })?
         } else {
-            is_null(value.as_ref())?
+            is_null(value.as_ref()).map_err(|source| {
+                Error::internal("failed to evaluate IS NULL".into()).with_source(source)
+            })?
         })),
     })
 }
@@ -100,7 +146,8 @@ fn negate<T: ScalarPrimitiveType, const FLOAT: bool>(input: &[ColumnValue]) -> R
                         v.neg_checked()
                     }
                 })
-                .transpose()?;
+                .transpose()
+                .map_err(|source| arithmetic_error(source))?;
             ColumnValue::Scalar(T::value(value))
         }
         ColumnValue::Array(value) => {
@@ -108,7 +155,9 @@ fn negate<T: ScalarPrimitiveType, const FLOAT: bool>(input: &[ColumnValue]) -> R
             let output: PrimitiveArray<T> = if FLOAT {
                 value.unary(|v| v.neg_wrapping())
             } else {
-                value.try_unary(|v| v.neg_checked())?
+                value
+                    .try_unary(|v| v.neg_checked())
+                    .map_err(|source| arithmetic_error(source))?
             };
             ColumnValue::Array(Arc::new(output))
         }
@@ -209,15 +258,17 @@ fn arithmetic<T: ScalarPrimitiveType, O: ArithmeticOperation, const FLOAT: bool>
             let left = primitive::<T>(left)?;
             let right = primitive::<T>(right)?;
             let output: PrimitiveArray<T> = if FLOAT {
-                binary(left, right, O::float)?
+                binary(left, right, O::float).map_err(|source| arithmetic_error(source))?
             } else {
-                try_binary(left, right, O::checked)?
+                try_binary(left, right, O::checked).map_err(|source| arithmetic_error(source))?
             };
             ColumnValue::Array(Arc::new(output))
         }
         (ColumnValue::Scalar(left), ColumnValue::Scalar(right)) => {
             let value = match (T::scalar(left)?, T::scalar(right)?) {
-                (Some(left), Some(right)) => Some(operation(left, right)?),
+                (Some(left), Some(right)) => {
+                    Some(operation(left, right).map_err(|source| arithmetic_error(source))?)
+                }
                 _ => None,
             };
             ColumnValue::Scalar(T::value(value))
@@ -236,13 +287,15 @@ fn arithmetic<T: ScalarPrimitiveType, O: ArithmeticOperation, const FLOAT: bool>
                     }
                 }),
                 // Checked Arrow unary evaluates only valid slots; NULL/0 must not fail.
-                Some(scalar) => array.try_unary(|v| {
-                    if left_scalar {
-                        O::checked(scalar, v)
-                    } else {
-                        O::checked(v, scalar)
-                    }
-                })?,
+                Some(scalar) => array
+                    .try_unary(|v| {
+                        if left_scalar {
+                            O::checked(scalar, v)
+                        } else {
+                            O::checked(v, scalar)
+                        }
+                    })
+                    .map_err(|source| arithmetic_error(source))?,
             };
             ColumnValue::Array(Arc::new(output))
         }
@@ -329,9 +382,9 @@ fn bind_comparison<O: ComparisonOperation>(data_type: &DataType) -> Result<EvalF
             // Preserve Arrow's other comparison signatures. This fallback still
             // dispatches types inside Arrow; primitive numeric kernels do not.
             let empty = new_empty_array(data_type);
-            O::arrow(&empty, &empty).map_err(|e| {
-                Error::unsupported(format!("comparison does not support {data_type}"))
-                    .with_source(e)
+            O::arrow(&empty, &empty).map_err(|source| {
+                Error::unsupported(format!("unsupported comparison type: {data_type}"))
+                    .with_source(source)
             })?;
             arrow_comparison::<O>
         }
@@ -399,18 +452,25 @@ fn comparison<T: ScalarPrimitiveType, O: ComparisonOperation>(
 fn arrow_comparison<O: ComparisonOperation>(input: &[ColumnValue]) -> Result<ColumnValue> {
     let (left, right) = binary_input(input)?;
     let output = match (left, right) {
-        (ColumnValue::Array(left), ColumnValue::Array(right)) => O::arrow(left, right)?,
+        (ColumnValue::Array(left), ColumnValue::Array(right)) => {
+            O::arrow(left, right).map_err(|source| comparison_error(source))?
+        }
         (ColumnValue::Scalar(left), ColumnValue::Array(right)) => {
-            O::arrow(&Scalar::new(left.to_array()?), right)?
+            O::arrow(&Scalar::new(left.to_array()?), right)
+                .map_err(|source| comparison_error(source))?
         }
         (ColumnValue::Array(left), ColumnValue::Scalar(right)) => {
-            O::arrow(left, &Scalar::new(right.to_array()?))?
+            O::arrow(left, &Scalar::new(right.to_array()?))
+                .map_err(|source| comparison_error(source))?
         }
         (ColumnValue::Scalar(left), ColumnValue::Scalar(right)) => {
-            let value: ArrayRef = Arc::new(O::arrow(
-                &Scalar::new(left.to_array()?),
-                &Scalar::new(right.to_array()?),
-            )?);
+            let value: ArrayRef = Arc::new(
+                O::arrow(
+                    &Scalar::new(left.to_array()?),
+                    &Scalar::new(right.to_array()?),
+                )
+                .map_err(|source| comparison_error(source))?,
+            );
             return Ok(ColumnValue::Scalar(ScalarValue::try_from_array(&value, 0)?));
         }
     };
@@ -426,9 +486,15 @@ fn scalar_comparison<T: ScalarPrimitiveType, O: ComparisonOperation, const LEFT:
     primitive::<T>(array)?;
     let scalar = Scalar::new(scalar.to_array()?);
     Ok(Arc::new(if LEFT {
-        O::arrow(&scalar, array)?
+        O::arrow(&scalar, array).map_err(|source| {
+            Error::internal("failed to compare validated numeric operands".into())
+                .with_source(source)
+        })?
     } else {
-        O::arrow(array, &scalar)?
+        O::arrow(array, &scalar).map_err(|source| {
+            Error::internal("failed to compare validated numeric operands".into())
+                .with_source(source)
+        })?
     }))
 }
 

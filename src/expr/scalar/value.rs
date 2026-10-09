@@ -433,16 +433,24 @@ impl ScalarValue {
                 Arc::new(primitive!(IntervalMonthDayNanoArray, value))
             }
             Self::Decimal32(value, precision, scale) => Arc::new(
-                primitive!(Decimal32Array, value).with_precision_and_scale(*precision, *scale)?,
+                primitive!(Decimal32Array, value)
+                    .with_precision_and_scale(*precision, *scale)
+                    .map_err(|source| invalid_decimal_metadata(source))?,
             ),
             Self::Decimal64(value, precision, scale) => Arc::new(
-                primitive!(Decimal64Array, value).with_precision_and_scale(*precision, *scale)?,
+                primitive!(Decimal64Array, value)
+                    .with_precision_and_scale(*precision, *scale)
+                    .map_err(|source| invalid_decimal_metadata(source))?,
             ),
             Self::Decimal128(value, precision, scale) => Arc::new(
-                primitive!(Decimal128Array, value).with_precision_and_scale(*precision, *scale)?,
+                primitive!(Decimal128Array, value)
+                    .with_precision_and_scale(*precision, *scale)
+                    .map_err(|source| invalid_decimal_metadata(source))?,
             ),
             Self::Decimal256(value, precision, scale) => Arc::new(
-                primitive!(Decimal256Array, value).with_precision_and_scale(*precision, *scale)?,
+                primitive!(Decimal256Array, value)
+                    .with_precision_and_scale(*precision, *scale)
+                    .map_err(|source| invalid_decimal_metadata(source))?,
             ),
             Self::TimestampSecond(value, timezone) => Arc::new(
                 primitive!(TimestampSecondArray, value).with_timezone_opt(timezone.clone()),
@@ -483,12 +491,16 @@ impl ScalarValue {
                 value.as_deref(),
                 len,
             ))),
-            Self::FixedSizeBinary(width, value) => {
-                Arc::new(FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            Self::FixedSizeBinary(width, value) => Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
                     std::iter::repeat_n(value.as_deref(), len),
                     *width,
-                )?)
-            }
+                )
+                .map_err(|source| {
+                    Error::invalid_input("fixed-size binary value does not match its width".into())
+                        .with_source(source)
+                })?,
+            ),
             Self::FixedSizeList(value) => repeat_nested(value.clone(), len)?,
             Self::List(value) => repeat_nested(value.clone(), len)?,
             Self::LargeList(value) => repeat_nested(value.clone(), len)?,
@@ -526,12 +538,17 @@ impl ScalarValue {
                     } else {
                         None
                     };
-                    Arc::new(UnionArray::try_new(
-                        fields.clone(),
-                        std::iter::repeat_n(*id, len).collect(),
-                        offsets,
-                        children,
-                    )?)
+                    Arc::new(
+                        UnionArray::try_new(
+                            fields.clone(),
+                            std::iter::repeat_n(*id, len).collect(),
+                            offsets,
+                            children,
+                        )
+                        .map_err(|source| {
+                            Error::invalid_input("invalid union scalar".into()).with_source(source)
+                        })?,
+                    )
                 }
             },
             Self::Dictionary(key, value) => {
@@ -542,8 +559,16 @@ impl ScalarValue {
                         } else {
                             PrimitiveArray::<$ty>::from_value(0, len)
                         };
-                        Arc::new(DictionaryArray::<$ty>::try_new(keys, value.to_array()?)?)
-                            as ArrayRef
+                        Arc::new(
+                            DictionaryArray::<$ty>::try_new(keys, value.to_array()?).map_err(
+                                |source| {
+                                    Error::internal(
+                                        "failed to build dictionary scalar with key zero".into(),
+                                    )
+                                    .with_source(source)
+                                },
+                            )?,
+                        ) as ArrayRef
                     }};
                 }
                 match key.as_ref() {
@@ -574,7 +599,11 @@ impl ScalarValue {
                             .len(len)
                             .add_child_data(ends.to_data())
                             .add_child_data(value.to_array()?.to_data())
-                            .build()?;
+                            .build()
+                            .map_err(|source| {
+                                Error::invalid_input("invalid run-end encoded scalar".into())
+                                    .with_source(source)
+                            })?;
                         Arc::new(RunArray::<$ty>::from(data)) as ArrayRef
                     }};
                 }
@@ -593,6 +622,12 @@ impl ScalarValue {
     }
 }
 
+#[cold]
+#[track_caller]
+fn invalid_decimal_metadata(source: arrow::error::ArrowError) -> Error {
+    Error::invalid_input("invalid decimal precision or scale".into()).with_source(source)
+}
+
 /// Broadcast one typed nested value using Arrow kernels.
 fn repeat_nested(value: ArrayRef, len: usize) -> Result<ArrayRef> {
     if value.len() != 1 {
@@ -607,7 +642,9 @@ fn repeat_nested(value: ArrayRef, len: usize) -> Result<ArrayRef> {
     } else if value.logical_null_count() != 0 {
         new_null_array(value.data_type(), len)
     } else {
-        take(value.as_ref(), &UInt64Array::from(vec![0; len]), None)?
+        take(value.as_ref(), &UInt64Array::from(vec![0; len]), None).map_err(|source| {
+            Error::internal("failed to broadcast nested scalar".into()).with_source(source)
+        })?
     })
 }
 

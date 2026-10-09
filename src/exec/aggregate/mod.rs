@@ -152,7 +152,11 @@ impl AggregateState {
             self.groups.output_schema().clone(),
             self.group_columns()?,
             &RecordBatchOptions::new().with_row_count(Some(count)),
-        )?;
+        )
+        .map_err(|source| {
+            Error::internal("partial group columns do not match their schema".into())
+                .with_source(source)
+        })?;
         let states = self
             .accumulators
             .iter()
@@ -178,11 +182,15 @@ impl AggregateState {
                 ErrorContext::new("aggregate.evaluate").field("aggregate", index)
             })?);
         }
-        Ok(RecordBatch::try_new_with_options(
+        RecordBatch::try_new_with_options(
             schema,
             columns,
             &RecordBatchOptions::new().with_row_count(Some(count)),
-        )?)
+        )
+        .map_err(|source| {
+            Error::invalid_plan("aggregate output does not match its declared schema".into())
+                .with_source(source)
+        })
     }
 }
 
@@ -915,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_signatures_without_usable_kernels_are_plan_errors() {
+    fn aggregate_signatures_with_missing_arguments_are_plan_errors() {
         // DISTINCT and MIN/MAX derive their state key type from an argument, so
         // a missing argument has no kernel to build. The operator itself only
         // assembles descriptions; executor construction is the first point that
@@ -925,14 +933,6 @@ mod tests {
                 .with_distinct(),
             AggregateExpression::new(AggregateFunction::Min, None, DataType::Utf8, true),
             AggregateExpression::new(AggregateFunction::Max, None, DataType::Utf8, true),
-            // Only COUNT keeps a DISTINCT set; the others would silently drop it.
-            AggregateExpression::new(
-                AggregateFunction::Sum,
-                Some(value()),
-                DataType::Float64,
-                true,
-            )
-            .with_distinct(),
         ] {
             let operator = AggregateOperator::try_new(
                 groups(false),
@@ -944,6 +944,43 @@ mod tests {
                 Err(ref error) if error.kind() == crate::error::ErrorKind::InvalidPlan
             ));
         }
+    }
+
+    #[test]
+    fn unsupported_distinct_keeps_aggregate_binding_context() {
+        let expression = AggregateExpression::new(
+            AggregateFunction::Sum,
+            Some(value()),
+            DataType::Float64,
+            true,
+        )
+        .with_distinct();
+        let operator =
+            AggregateOperator::try_new(groups(false), vec![Arc::new(expression)]).unwrap();
+        let error = AggregateState::new(&operator).err().unwrap();
+        assert_eq!(error.kind(), crate::error::ErrorKind::Unsupported);
+        assert_eq!(
+            error
+                .frames()
+                .last()
+                .unwrap()
+                .context
+                .as_ref()
+                .unwrap()
+                .operation,
+            "aggregate.bind"
+        );
+        assert_eq!(
+            error
+                .frames()
+                .last()
+                .unwrap()
+                .context
+                .as_ref()
+                .unwrap()
+                .fields,
+            vec![("aggregate", "0".into())]
+        );
     }
 
     #[test]
