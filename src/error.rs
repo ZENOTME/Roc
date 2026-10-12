@@ -19,7 +19,7 @@ pub enum Error {
     #[error("invalid plan: {0}")]
     InvalidPlan(String),
     #[error(transparent)]
-    Arrow(Arc<arrow::error::ArrowError>),
+    Arrow(Arc<crate::arrow::error::ArrowError>),
     #[error(transparent)]
     Io(Arc<std::io::Error>),
     #[error("query cancelled")]
@@ -27,8 +27,8 @@ pub enum Error {
     #[error("execution failed: {0}")]
     Execution(String),
 }
-impl From<arrow::error::ArrowError> for Error {
-    fn from(error: arrow::error::ArrowError) -> Self {
+impl From<crate::arrow::error::ArrowError> for Error {
+    fn from(error: crate::arrow::error::ArrowError) -> Self {
         Self::Arrow(Arc::new(error))
     }
 }

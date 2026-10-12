@@ -17,13 +17,13 @@ mod service;
 pub use service::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink};
 
 use super::Operator;
+use crate::arrow::datatypes::SchemaRef;
 use crate::{
     error::{Error, Result},
     exec::{ExchangeSinkExec, ExchangeSourceExec},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::SchemaRef;
 use std::{fmt, sync::Arc};
 
 pub type ExchangeId = usize;

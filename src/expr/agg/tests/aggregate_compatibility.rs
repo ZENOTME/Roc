@@ -14,16 +14,16 @@
 
 use std::sync::Arc;
 
-use crate::expr::{
-    ExpressionResultType,
-    agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
-    scalar::ReferenceExpression,
-};
-use arrow::{
+use crate::arrow::{
     array::{Array, ArrayRef, Float64Array, UInt64Array},
     buffer::NullBuffer,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
+};
+use crate::expr::{
+    ExpressionResultType,
+    agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
+    scalar::ReferenceExpression,
 };
 
 fn avg_executor() -> AccumulatorTestHarness {

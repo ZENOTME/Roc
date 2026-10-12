@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::arrow::record_batch::RecordBatch;
 use crate::error::Result;
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 

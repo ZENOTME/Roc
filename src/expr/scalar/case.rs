@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{ExpressionResultType, ScalarExprRef};
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 #[derive(Clone, Debug)]
 pub struct CaseExpression {
     branches: Vec<(ScalarExprRef, ScalarExprRef)>,
@@ -23,7 +23,7 @@ pub struct CaseExpression {
 impl CaseExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         let branches = self
             .branches()

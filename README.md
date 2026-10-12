@@ -47,32 +47,60 @@ interface. Physical operators first build their children, then append directly t
 lowering hook. Each operator and expression owns its `build_suboperator` logic:
 aggregation registers grouping state, each aggregate expression registers its
 accumulator, and scalar expressions build their own inputs and compute nodes.
-`SuboperatorBuilder` provides individual suboperator construction, state
+`SuboperatorScopeBuilder` provides individual suboperator construction, state
 registration, column bindings, and validation; it does not traverse physical
-operators or expression trees. Each pipeline lowers into one context of `Suboperator` enums connected by dense
-`VariableId`s. `ProgramContext` binds native kernels; each in-flight batch owns a reusable
-`ProgramExecutionContext` with vector buffer slots and ordinary state slots.
-State factories are generic: the runtime does not have a special aggregate-state
-variant. The independent scalar `Evaluation` API has been removed.
+operators or expression trees. Each pipeline lowers into a `SuboperatorScope`:
+ordinary `Suboperator`s form a data DAG connected by dense `VariableId`s, while
+ordered `ScopeBoundary`s seal each DAG segment and open its nested successor.
+`ScopeSuboperator::Filter` opens an `if` body without changing column bindings or
+creating a new source batch. Ancestor variables remain visible to descendants.
+The compiler completes each local DAG before opening the next scope and closes
+scopes in reverse order. Separate local/scope emission contexts keep ordinary
+suboperators from leaving a control scope open.
+Scope suboperators can also define fresh body variables. `filter_with_outputs`
+returns selected-value bindings that become visible only after body entry;
+ordinary `filter` needs no such bindings. Both kinds of producer participate in
+variable lookup and visibility checks. `DependencyToken` expresses ordering
+without allocating a value buffer: `dependency_of(value)` names its producer,
+state updates return a token, and `with_dependencies` attaches prerequisites to
+newly constructed nodes. A scope token means body entry, not loop completion.
+Token producers execute once in their owning scope; local conditional programs
+capture completed definitions instead of repeating their side effects.
 
-Sources remain asynchronous. Rayon runs synchronous processing and sink local
-updates with exclusive ownership of each instance. The pipeline collects local
-states for combination before asynchronous finalization. Exchange sinks flush
-bounded batches asynchronously after CPU completion.
+`ProgramContext` owns a generated Cranelift entry point. Each in-flight batch
+owns a reusable `ProgramExecutionContext` with ordinary state slots. The runtime
+retains no expression graph, vector instruction dispatcher, or native fallback.
+`Program` entries exposed for inspection describe the compile-time schedule only.
 
-Native execution is the default and never invokes a runtime compiler. Optional
-Cranelift compilation fuses scalar regions across consecutive physical projections.
-`Staged` execution limits each compiled loop to four scalar operations. Selection,
-stateful kernels, and source/sink I/O are explicit boundaries; compilation
-continues on both sides of native boundaries. Group lookup and each accumulator
-update are distinct suboperators using ordinary state slots.
+All query computation uses generated row code. A pipeline compiles to one row
+loop; Filter opens a nested `if`, and CASE/COALESCE emit balanced local branches
+with short-circuit semantics. Intermediate numeric values use their actual SSA
+types. Arithmetic, comparisons, integer division/remainder, and numeric casts
+emit typed instructions. Type and cast-mode dispatch happens during compilation,
+not inside the generated loop. String parsing/formatting and mutable hash-table
+or aggregate state operations use scalar runtime functions with bound signatures.
+These helpers never receive a batch, operation tag, or expression tree.
 
-Compiled scalar operations cover signed/unsigned integers of all standard widths,
-Float32/64, and Boolean, including NULL propagation and checked integer arithmetic.
-Integer division/remainder, general casts, complex Arrow types, and aggregation
-kernels retain native vector calls. All existing operators and expression types
-remain executable in every mode; this is not a claim that every kernel is JIT
-compiled. Arrow supplies owned storage layouts and complex-type primitives.
+Roc depends on `arrow-array`, `arrow-buffer`, and `arrow-schema` for interchange. Arrow compute and
+row kernels are absent from the library dependency graph; the umbrella `arrow`
+crate is used only as an independent test oracle. Generated numeric loads read Arrow
+buffers and null bitmaps directly. Generated 64-bit outputs become Arrow buffers
+without a scalar conversion pass; other outputs retain scalar ABI conversion.
+Identity outputs
+retain their Arrow owners when all rows survive. Variable-width state values own
+their bytes beyond the current batch. Supported generated values include standard
+integers, Float32/64, Boolean, strings/binary, dates/timestamps, and NULL. Unsupported
+signatures fail explicitly; there is no interpreter fallback.
+
+Cranelift is always enabled. `ExecutionMode::Compiled` is the sole mode; the `jit`
+Cargo feature remains an empty compatibility feature. Sources remain asynchronous.
+Parallel execution uses Rayon with exclusive state ownership; single-worker
+execution runs inline and yields between bounded work intervals. Generated
+output ports collect rows for the batch sink interface; publication and async I/O
+happen after successful computation. Batch sinks terminate row computation; a
+continuation requiring the published batch belongs to another pipeline.
+Aggregation exports/merges local partial
+states during the pipeline lifecycle. Exchange sinks flush asynchronously.
 
 ```rust,ignore
 use roc::{pipeline::build_pipeline_graph, suboperator::ExecutionMode};
@@ -88,16 +116,19 @@ cargo run --example execution_architecture --features jit
 cargo test --workspace --all-features --all-targets
 ```
 
-Compilation happens during graph construction; `PipelineGraph::explain()` prints
-its executable program/state schedule. `SuboperatorContext::compile(mode)` consumes
-the build IR and returns a `ProgramContext` containing only programs and state
-builders. Selection, projection materialization, and sink local updates are
-ordinary programs; the runtime retains no physical process callbacks or outer
-region interpreter. Each program owns its bound kernel parameters or JIT code.
+Compilation happens during graph construction. `PipelineGraph::explain()` prints
+the generated schedule; `ProgramContext::generated_ir()` exposes the typed
+Cranelift IR. `SuboperatorScope::compile(mode)` validates data/control/effect
+visibility, generates code, and discards the construction graph. State bindings
+and source/output layouts are fixed before execution. Generated loops poll
+cancellation at bounded row intervals and propagate helper/arithmetic failures without
+publishing partial output batches.
 
 One async `Pipeline::execute` coordinator owns a single source cursor and a bounded
-pool of exclusive `ProgramExecutionContext`s. Synchronous program calls run on
-Rayon and return local state for asynchronous flushing and reuse. Once all work
+pool of exclusive `ProgramExecutionContext`s. Parallel program calls run on
+Rayon and return local state for asynchronous flushing and reuse. Immediately
+available source batches share a bounded CPU task to amortize dispatch; pending
+source reads remain alive, preserving asynchronous source/sink feedback. Once all work
 succeeds, the coordinator combines locals and asynchronously finalizes the sink.
 `Pipeline.sink` is a `Box<dyn SinkExec>`. Physical operators register ordinary
 states while building suboperators and give their IDs to the concrete sink.
@@ -108,10 +139,10 @@ there is no generic global-state reference or lock around mutable merge state.
 The `SourceExec` itself owns its cursor and runtime resources; `start` opens I/O
 only when the pipeline runs. Aggregation has no extra sink-update call or wrapper state.
 Exchange queues batches into an ordinary local state and drains it asynchronously.
-Custom result sinks can register a `Vec<RecordBatch>` with a native `BatchUpdate`
-program, then consume that vector in `combine`. There is no separate local sink
-executor interface. Dead intermediate arrays are
-released at their planned last use. There is no execution-time compilation API.
+Custom result sinks can register a `Vec<RecordBatch>` with a `BatchUpdate`
+output port, then consume that vector in `combine`. There is no separate local sink
+executor interface. Intermediate expressions remain scalar SSA values rather
+than Arrow arrays. There is no execution-time compilation API.
 
 Run the fixed-condition CPU benchmark (preparation and execution reported separately):
 
@@ -119,10 +150,19 @@ Run the fixed-condition CPU benchmark (preparation and execution reported separa
 cargo run --release --features jit --example vector_program_bench
 ```
 
-The benchmark checks output equality before timing and rotates mode order.
+The benchmark separates compilation from execution and checks results before timing.
 It measures compute loops, not storage, scheduling, or a DuckDB comparison.
-JIT speedups depend on the workload; nullable frame conversion, allocation,
-random memory accesses, and CPU scheduling still have costs.
+JIT speedups depend on the workload; allocation, output materialization,
+random memory accesses, and CPU scheduling still have costs. Global integer
+SUM/COUNT reductions lower to SIMD with sparse/dense null handling. Ordinary
+SUM/COUNT state updates are emitted directly; word-key grouping uses a bounded,
+collision-checked lookup cache with a hash-table slow path.
+
+For a whole-engine comparison against a pinned main commit, use
+`python3 benches/main_compare/run.py --baseline <commit>`. The shared harness
+validates every output row, builds isolated release binaries, and separates
+preparation/JIT time from execution. It covers resident scan, filter/project,
+arithmetic, division, global aggregation, and grouped aggregation with 1/4 workers.
 
 ## DataFusion Parquet integration
 

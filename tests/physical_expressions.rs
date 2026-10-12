@@ -76,21 +76,21 @@ impl BatchProgram {
     }
 }
 fn filter_program(predicate: ScalarExprRef) -> Result<BatchProgram> {
-    let mut b = roc::suboperator::SuboperatorBuilder::new();
+    let mut b = roc::suboperator::SuboperatorScopeBuilder::new();
     roc::operator::FilterOperator::new(predicate).build_suboperator(&mut b)?;
     let program = b
         .finish(vec![])?
-        .compile(roc::suboperator::ExecutionMode::Native)?;
+        .compile(roc::suboperator::ExecutionMode::Compiled)?;
     let local = program.new_execution_context();
     Ok(BatchProgram { program, local })
 }
 fn project_program(projection: Projection) -> BatchProgram {
-    let mut b = roc::suboperator::SuboperatorBuilder::new();
+    let mut b = roc::suboperator::SuboperatorScopeBuilder::new();
     projection.build_suboperator(&mut b).unwrap();
     let program = b
         .finish(vec![])
         .unwrap()
-        .compile(roc::suboperator::ExecutionMode::Native)
+        .compile(roc::suboperator::ExecutionMode::Compiled)
         .unwrap();
     let local = program.new_execution_context();
     BatchProgram { program, local }
@@ -193,11 +193,7 @@ impl Executor for TestExecutor {
 
 #[tokio::test]
 async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions() {
-    run_bound_tree(roc::suboperator::ExecutionMode::Native).await;
-    #[cfg(feature = "jit")]
     run_bound_tree(roc::suboperator::ExecutionMode::Compiled).await;
-    #[cfg(feature = "jit")]
-    run_bound_tree(roc::suboperator::ExecutionMode::Staged).await;
 }
 async fn run_bound_tree(mode: roc::suboperator::ExecutionMode) {
     let storage_schema = Arc::new(
@@ -537,7 +533,7 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
         );
         let graph = build_pipeline_graph(
             OperatorTree::new(sink),
-            roc::suboperator::ExecutionMode::Native,
+            roc::suboperator::ExecutionMode::Compiled,
         )
         .unwrap();
         assert_eq!(
@@ -584,7 +580,7 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
     );
     let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![source]));
     let error = PipelineGraphExecutor::new(
-        build_pipeline_graph(tree, roc::suboperator::ExecutionMode::Native).unwrap(),
+        build_pipeline_graph(tree, roc::suboperator::ExecutionMode::Compiled).unwrap(),
     )
     .with_task_executor(TestExecutor)
     .execute()

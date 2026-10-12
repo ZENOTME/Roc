@@ -1,17 +1,18 @@
 use super::*;
+use crate::arrow::array::{AsArray, BooleanArray};
+use crate::arrow::record_batch::RecordBatch;
 use crate::operator::Projection;
-use arrow::record_batch::RecordBatch;
 
 #[cfg(test)]
 mod lowering {
     use super::*;
+    use crate::arrow::{
+        array::Int64Array,
+        datatypes::{DataType, Field, Schema},
+    };
     use crate::{
         expr::{ExpressionResultType, agg::*, scalar::*},
         operator::{AggregateOperator, ProjectionExpression},
-    };
-    use arrow::{
-        array::Int64Array,
-        datatypes::{DataType, Field, Schema},
     };
     fn reference(index: usize) -> ScalarExprRef {
         ReferenceExpression::new(index, ExpressionResultType::new(DataType::Int64, true)).into_ref()
@@ -37,18 +38,7 @@ mod lowering {
         .unwrap()
     }
     fn modes() -> Vec<ExecutionMode> {
-        #[cfg(feature = "jit")]
-        {
-            vec![
-                ExecutionMode::Native,
-                ExecutionMode::Compiled,
-                ExecutionMode::Staged,
-            ]
-        }
-        #[cfg(not(feature = "jit"))]
-        {
-            vec![ExecutionMode::Native]
-        }
+        vec![ExecutionMode::Compiled]
     }
     fn execute(
         p: &ProgramContext,
@@ -60,7 +50,7 @@ mod lowering {
     #[test]
     fn projections_share_ids_and_fuse_across_physical_boundaries() {
         for mode in modes() {
-            let mut b = SuboperatorBuilder::new();
+            let mut b = SuboperatorScopeBuilder::new();
             for _ in 0..8 {
                 project(add(reference(0), 1))
                     .build_suboperator(&mut b)
@@ -80,7 +70,7 @@ mod lowering {
                 out.column(0).as_ref(),
                 &Int64Array::from(vec![Some(9), None, Some(0)])
             );
-            if mode != ExecutionMode::Native {
+            if mode == ExecutionMode::Compiled {
                 assert!(p.explain().contains("cranelift_loop"));
             }
         }
@@ -89,7 +79,7 @@ mod lowering {
     fn shared_expression_rebinds_after_projection_and_selection() {
         for mode in modes() {
             let expression = add(reference(0), 1);
-            let mut b = SuboperatorBuilder::new();
+            let mut b = SuboperatorScopeBuilder::new();
             // Both columns reuse the same node in one view. Reusing that node
             // after a projection must instead read the new column 0.
             Projection::new(vec![
@@ -141,7 +131,7 @@ mod lowering {
     #[test]
     fn discarded_projection_still_reports_errors_but_filter_skips_later_work() {
         for mode in modes() {
-            let mut b = SuboperatorBuilder::new();
+            let mut b = SuboperatorScopeBuilder::new();
             project(add(reference(0), 1))
                 .build_suboperator(&mut b)
                 .unwrap();
@@ -155,7 +145,7 @@ mod lowering {
                 (0, 2)
             );
 
-            let mut b = SuboperatorBuilder::new();
+            let mut b = SuboperatorScopeBuilder::new();
             let predicate = FunctionExpression::binary(
                 FunctionKind::LessThan,
                 reference(0),
@@ -174,9 +164,9 @@ mod lowering {
             assert_eq!(
                 p.programs()
                     .iter()
-                    .filter(|p| p.kind() == "materialize")
+                    .filter(|p| p.kind() == "projection")
                     .count(),
-                2
+                1
             );
             let mut local = p.new_execution_context();
             let out = execute(&p, &mut local, batch(vec![Some(i64::MAX), None, Some(2)])).unwrap();
@@ -186,7 +176,7 @@ mod lowering {
     #[test]
     fn aggregate_kernels_use_ordinary_slots_and_instances_do_not_share_updates() {
         for mode in modes() {
-            let mut b = SuboperatorBuilder::new();
+            let mut b = SuboperatorScopeBuilder::new();
             project(add(reference(0), 1))
                 .build_suboperator(&mut b)
                 .unwrap();
@@ -228,13 +218,54 @@ mod lowering {
         }
     }
     #[test]
+    fn filtered_aggregate_updates_only_surviving_rows_across_batches() {
+        for mode in modes() {
+            let mut b = SuboperatorScopeBuilder::new();
+            let x = reference(0).build_suboperator(&mut b).unwrap();
+            let zero = b.constant(Arc::new(Int64Array::from(vec![0]))).unwrap();
+            let positive = b.binary(FunctionKind::GreaterThan, x, zero).unwrap();
+            b.filter(positive).unwrap();
+            let ten = b.constant(Arc::new(Int64Array::from(vec![10]))).unwrap();
+            let small = b.binary(FunctionKind::LessThan, x, ten).unwrap();
+            b.filter(small).unwrap();
+            let aggregate = AggregateOperator::try_new(
+                Projection::new(vec![]),
+                vec![Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Sum,
+                        vec![reference(0)],
+                        DataType::Int64,
+                        true,
+                    )
+                    .with_alias("sum"),
+                )],
+            )
+            .unwrap();
+            let states = aggregate.build_suboperator(&mut b).unwrap();
+            let p = b.finish(vec![]).unwrap().compile(mode).unwrap();
+            assert!(!p.explain().contains("materialize"));
+            let mut local = p.new_execution_context();
+            for values in [
+                vec![Some(0), None, Some(2), Some(i64::MAX)],
+                vec![],
+                vec![Some(3), Some(-1)],
+            ] {
+                execute(&p, &mut local, batch(values)).unwrap();
+            }
+            let (_, result) =
+                crate::suboperator::aggregation::partial(&mut local, &states).unwrap();
+            assert_eq!(result[0][0].as_ref(), &Int64Array::from(vec![5]));
+        }
+    }
+
+    #[test]
     fn external_states_validate_types_at_binding() {
-        let mut b = SuboperatorBuilder::new();
+        let mut b = SuboperatorScopeBuilder::new();
         let state = b.state(StateBuilder::external::<Vec<i64>>());
         let context = b
             .finish(vec![])
             .unwrap()
-            .compile(ExecutionMode::Native)
+            .compile(ExecutionMode::Compiled)
             .unwrap();
         let mut local = ProgramExecutionContext::default();
         assert!(local.bind_state(&context, state, State::new(3u32)).is_err());
@@ -254,20 +285,20 @@ mod lowering {
 #[cfg(test)]
 mod filter_tests {
     use super::*;
-    use crate::expr::{
-        ExpressionResultType,
-        scalar::{ConstantExpression, ReferenceExpression},
-    };
-    use arrow::{
+    use crate::arrow::{
         array::{BooleanArray, Int64Array},
         buffer::{BooleanBuffer, NullBuffer},
         datatypes::{DataType, Field, Schema},
     };
+    use crate::expr::{
+        ExpressionResultType,
+        scalar::{ConstantExpression, ReferenceExpression},
+    };
 
     fn filter(input: &RecordBatch, predicate: ScalarExprRef) -> Result<RecordBatch> {
-        let mut builder = SuboperatorBuilder::new();
+        let mut builder = SuboperatorScopeBuilder::new();
         crate::operator::FilterOperator::new(predicate).build_suboperator(&mut builder)?;
-        let program = builder.finish(vec![])?.compile(ExecutionMode::Native)?;
+        let program = builder.finish(vec![])?.compile(ExecutionMode::Compiled)?;
         let mut local = program.new_execution_context();
         program.execute_record_batch(input, &mut local)
     }
@@ -303,7 +334,7 @@ mod filter_tests {
         assert_eq!(
             output
                 .column(0)
-                .as_primitive::<arrow::datatypes::Int64Type>()
+                .as_primitive::<crate::arrow::datatypes::Int64Type>()
                 .values()
                 .as_ref(),
             &[1, 4]
@@ -329,4 +360,171 @@ mod filter_tests {
             Err(Error::InvalidPlan(_))
         ));
     }
+}
+
+#[test]
+fn reject_boundaries_and_data_edges_that_escape_their_scope() {
+    let mut b = SuboperatorScopeBuilder::new();
+    let predicate = b.input(
+        0,
+        crate::expr::ExpressionResultType::new(DataType::Boolean, false),
+    );
+    b.filter(predicate).unwrap();
+    let second = b.not(predicate).unwrap();
+    b.filter(second).unwrap();
+    let scope = b.finish(vec![second]).unwrap();
+    let mut backwards = scope.clone();
+    backwards.boundaries.swap(0, 1);
+    assert!(matches!(
+        backwards.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+    let mut forward_control = scope.clone();
+    forward_control.boundaries[0].operator = ScopeSuboperator::Filter {
+        predicate: second,
+        body_inputs: vec![],
+        body_outputs: vec![],
+    };
+    assert!(matches!(
+        forward_control.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+    let mut invalid_end = scope.clone();
+    invalid_end.boundaries[0].end = usize::MAX;
+    assert!(matches!(
+        invalid_end.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+    let mut cycle = scope;
+    if let Suboperator::Not { input, .. } = &mut cycle.suboperators[1] {
+        *input = second;
+    }
+    assert!(matches!(
+        cycle.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+}
+
+#[test]
+fn effect_tokens_order_shared_consumers_without_repeating_updates() {
+    use super::super::aggregation::{AccumulatorState, GroupState};
+    use crate::arrow::{array::Int64Array, datatypes::Schema};
+    use crate::{
+        exec::aggregate::group_index::GroupIndex,
+        expr::{
+            ExpressionResultType,
+            agg::{AggregateFunction, accumulator::Accumulator},
+        },
+    };
+    let modes = vec![ExecutionMode::Compiled];
+    for mode in modes {
+        let mut b = SuboperatorScopeBuilder::new();
+        let groups = b.state(StateBuilder::new(|| {
+            let schema = Arc::new(Schema::empty());
+            Ok(GroupState {
+                index: GroupIndex::new(&schema)?,
+                schema,
+            })
+        }));
+        let sum = b.state(StateBuilder::new(|| {
+            let mut accumulator = Accumulator::new(
+                AggregateFunction::Sum,
+                false,
+                &[DataType::Int64],
+                &DataType::Int64,
+            )?;
+            accumulator.resize(1);
+            Ok(AccumulatorState { accumulator })
+        }));
+        let ids = b.group_lookup(groups, vec![]).unwrap();
+        let x = b.input(0, ExpressionResultType::new(DataType::Int64, false));
+        let done = b
+            .aggregate_update([groups, sum], vec![ids, x], AggregateKernel::SumI64)
+            .unwrap();
+        let a = b
+            .with_dependencies(&[done], |b| b.group_lookup(groups, vec![]))
+            .unwrap();
+        let c = b
+            .with_dependencies(&[done], |b| b.group_lookup(groups, vec![]))
+            .unwrap();
+        // A dependency used in a local branch must not execute again in that branch.
+        let mask = b
+            .constant(Arc::new(BooleanArray::from(vec![true])))
+            .unwrap();
+        let zero = b
+            .constant(Arc::new(crate::arrow::array::UInt64Array::from(vec![0])))
+            .unwrap();
+        let branch = b.case(vec![(mask, a)], zero).unwrap();
+        let p = b.finish(vec![branch, c]).unwrap().compile(mode).unwrap();
+        let kinds = p.programs().iter().map(Program::kind).collect::<Vec<_>>();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|&&kind| kind == "aggregate_update")
+                .count(),
+            1
+        );
+        let update = kinds
+            .iter()
+            .position(|&kind| kind == "aggregate_update")
+            .unwrap();
+        assert_eq!(
+            kinds[..update]
+                .iter()
+                .filter(|&&kind| kind == "group_lookup")
+                .count(),
+            1
+        );
+        assert_eq!(
+            kinds[update + 1..]
+                .iter()
+                .filter(|&&kind| kind == "group_lookup")
+                .count(),
+            2
+        );
+        let mut local = p.new_execution_context();
+        let input: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
+        p.execute(&[input], 3, &mut local).unwrap();
+        let (_, values) = super::super::aggregation::partial(&mut local, &[groups, sum]).unwrap();
+        assert_eq!(values[0][0].as_ref(), &Int64Array::from(vec![6]));
+    }
+}
+
+#[test]
+fn scope_output_and_token_visibility_is_checked_before_codegen() {
+    use super::super::context::{DependencyToken, Producer};
+    let mut b = SuboperatorScopeBuilder::new();
+    let predicate = b.input(
+        0,
+        crate::expr::ExpressionResultType::new(DataType::Boolean, false),
+    );
+    let output = b.filter_with_outputs(predicate, vec![predicate]).unwrap()[0];
+    let token = b.dependency_of(output).unwrap();
+    let next = b.with_dependencies(&[token], |b| b.not(output)).unwrap();
+    let scope = b.finish(vec![next]).unwrap();
+    let mut invalid = scope.clone();
+    let ScopeSuboperator::Filter { body_inputs, .. } = &mut invalid.boundaries[0].operator;
+    body_inputs[0] = output;
+    assert!(matches!(
+        invalid.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+    let mut invalid = scope.clone();
+    invalid.dependencies.insert(Producer::Node(0), vec![token]);
+    assert!(matches!(
+        invalid.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
+    let mut invalid = scope;
+    invalid.dependencies.insert(
+        Producer::Node(1),
+        vec![DependencyToken {
+            scope: token.scope,
+            producer: Producer::Node(1),
+        }],
+    );
+    assert!(matches!(
+        invalid.compile(ExecutionMode::Compiled),
+        Err(Error::InvalidPlan(_))
+    ));
 }

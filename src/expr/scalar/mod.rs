@@ -16,7 +16,7 @@
 use crate::{
     error::{Error, Result},
     expr::ExpressionResultType,
-    suboperator::{SuboperatorBuilder, VariableId},
+    suboperator::{SuboperatorScopeBuilder, VariableId},
 };
 use std::sync::Arc;
 
@@ -57,7 +57,7 @@ impl ScalarExpression {
     /// the builder only retains the shared-node binding and suboperator graph.
     pub fn build_suboperator(
         self: &Arc<Self>,
-        builder: &mut SuboperatorBuilder,
+        builder: &mut SuboperatorScopeBuilder,
     ) -> Result<VariableId> {
         if let Some(id) = builder.cached(self) {
             return Ok(id);

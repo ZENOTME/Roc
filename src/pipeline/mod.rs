@@ -36,7 +36,7 @@ pub struct Pipeline {
 impl Pipeline {
     pub fn new(
         source: Box<dyn SourceExec>,
-        builder: crate::suboperator::SuboperatorBuilder,
+        builder: crate::suboperator::SuboperatorScopeBuilder,
         sink: Box<dyn SinkExec>,
         mode: crate::suboperator::ExecutionMode,
     ) -> Result<Self> {
@@ -52,7 +52,7 @@ impl Pipeline {
 /// Operators append suboperators directly, after building their children.
 pub struct PipelineBuilder {
     source: Option<Box<dyn SourceExec>>,
-    pub suboperators: crate::suboperator::SuboperatorBuilder,
+    pub suboperators: crate::suboperator::SuboperatorScopeBuilder,
     sink: Option<Box<dyn SinkExec>>,
 }
 
@@ -60,7 +60,7 @@ impl PipelineBuilder {
     pub(super) fn new() -> Self {
         Self {
             source: None,
-            suboperators: crate::suboperator::SuboperatorBuilder::new(),
+            suboperators: crate::suboperator::SuboperatorScopeBuilder::new(),
             sink: None,
         }
     }

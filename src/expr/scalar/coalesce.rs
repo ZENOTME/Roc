@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{ExpressionResultType, ScalarExprRef};
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 #[derive(Clone, Debug)]
 pub struct CoalesceExpression {
     arguments: Vec<ScalarExprRef>,
@@ -22,7 +22,7 @@ pub struct CoalesceExpression {
 impl CoalesceExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         let inputs = self
             .arguments()

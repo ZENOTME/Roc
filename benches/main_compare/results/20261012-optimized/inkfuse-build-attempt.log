@@ -1,0 +1,20 @@
+[  1%] Performing update step for 'xxhash_src'
+[  1%] Building CXX object CMakeFiles/inkfuse_runtime_static.dir/src/runtime/HashTables.cpp.o
+[  5%] Building CXX object CMakeFiles/inkfuse_runtime_static.dir/src/runtime/NewHashTables.cpp.o
+[  5%] Building CXX object CMakeFiles/inkfuse_runtime_static.dir/src/runtime/ExternRuntime.cpp.o
+-- Already at requested tag: v0.8.1
+[  7%] No patch step for 'xxhash_src'
+[  9%] No configure step for 'xxhash_src'
+[ 11%] Performing build step for 'xxhash_src'
+[ 12%] No install step for 'xxhash_src'
+[ 12%] Completed 'xxhash_src'
+[ 12%] Built target xxhash_src
+[ 14%] Building CXX object CMakeFiles/inkfuse_runtime_static.dir/src/runtime/MemoryRuntime.cpp.o
+[ 14%] Building CXX object CMakeFiles/inkfuse_runtime_static.dir/src/runtime/TupleMaterializer.cpp.o
+[ 16%] Linking CXX static library libinkfuse_runtime_static.a
+[ 16%] Built target inkfuse_runtime_static
+make[3]: clang-14: No such file or directory
+make[3]: *** [CMakeFiles/inkfuse_install_runtime] Error 1
+make[2]: *** [CMakeFiles/inkfuse_install_runtime.dir/all] Error 2
+make[1]: *** [CMakeFiles/inkfuse.dir/rule] Error 2
+make: *** [inkfuse] Error 2

@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use super::ExpressionResultType;
-use crate::error::{Error, Result};
-use arrow::{
+use crate::arrow::{
     array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, new_null_array},
     datatypes::DataType,
 };
+use crate::error::{Error, Result};
 use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct ConstantExpression {
@@ -27,7 +27,7 @@ pub struct ConstantExpression {
 impl ConstantExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         builder.constant(self.value().clone())
     }

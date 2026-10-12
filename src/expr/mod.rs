@@ -15,7 +15,7 @@
 pub mod agg;
 pub mod scalar;
 
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 
 /// An expression's result type.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,217 +1,12 @@
-// Copyright 2026 The Roc Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
+//! Aggregate state helpers called from generated row code. Update dispatch is
+//! bound once when the state is constructed; helpers never receive a batch.
 use crate::{
+    arrow::{array::*, datatypes::*},
     error::{Error, Result},
     expr::agg::AggregateFunction,
+    suboperator::scalar::{self, Cell, OwnedCell},
 };
-use arrow::{
-    array::{
-        Array, ArrayRef, ArrowNativeTypeOp, BinaryArray, BinaryBuilder, Float64Array, Int64Array,
-        ListArray, ListBuilder, PrimitiveArray, UInt64Array, new_empty_array, new_null_array,
-    },
-    buffer::NullBuffer,
-    compute::{cast, kernels::interleave::interleave, sum},
-    datatypes::{ArrowPrimitiveType, DataType, Field, Float64Type, Int64Type, UInt64Type},
-    row::{RowConverter, SortField},
-};
-use std::{borrow::Cow, collections::HashSet, sync::Arc};
-
-fn input_type(inputs: &[DataType]) -> Result<DataType> {
-    inputs
-        .first()
-        .cloned()
-        .ok_or_else(|| Error::InvalidPlan("aggregate requires an argument".into()))
-}
-
-pub(crate) enum Accumulator {
-    Count(Vec<i64>),
-    Distinct {
-        groups: Vec<HashSet<Vec<u8>>>,
-        converter: RowConverter,
-    },
-    Sum {
-        groups: SumGroups,
-        data_type: DataType,
-    },
-    Avg(Vec<(u64, f64)>),
-    Covar(Vec<Covariance>),
-    Extremum {
-        groups: Vec<Option<(Vec<u8>, ArrayRef)>>,
-        converter: RowConverter,
-        data_type: DataType,
-        minimum: bool,
-    },
-}
-/// Dispatch once per batch; each group holds a native value and an independent
-/// validity flag so an untouched group remains distinguishable from a zero sum.
-pub(crate) enum SumGroups {
-    Signed(TypedSum<Int64Type, false>),
-    Unsigned(TypedSum<UInt64Type, false>),
-    Float(TypedSum<Float64Type, true>),
-    // Keep construction permissive: unsupported SUM result types have always
-    // been reported when executing or materializing the aggregate.
-    Unsupported(DataType),
-}
-
-pub(crate) struct TypedSum<T: ArrowPrimitiveType, const PRESERVE_FIRST: bool> {
-    values: Vec<T::Native>,
-    valid: Vec<bool>,
-}
-
-impl<T: ArrowPrimitiveType, const PRESERVE_FIRST: bool> TypedSum<T, PRESERVE_FIRST>
-where
-    T::Native: ArrowNativeTypeOp,
-{
-    fn new() -> Self {
-        Self {
-            values: Vec::new(),
-            valid: Vec::new(),
-        }
-    }
-
-    fn resize(&mut self, count: usize) {
-        self.values.resize(count, T::Native::ZERO);
-        self.valid.resize(count, false);
-    }
-
-    #[inline]
-    fn add(&mut self, id: usize, value: T::Native) {
-        // Integers can always add into the initial zero. Floating-point groups
-        // retain their first value, including its signed-zero representation.
-        self.values[id] = if PRESERVE_FIRST && !self.valid[id] {
-            value
-        } else {
-            self.values[id].add_wrapping(value)
-        };
-        self.valid[id] = true;
-    }
-
-    fn update(&mut self, array: &PrimitiveArray<T>, ids: &[usize]) {
-        let values = array.values();
-        if array.null_count() == 0 {
-            for (&id, &value) in ids.iter().zip(values.iter()) {
-                self.add(id, value);
-            }
-        } else if array.null_count() > array.len() / 2 {
-            // Sparse inputs are cheaper to visit by their set-bit positions.
-            for index in array.nulls().unwrap().valid_indices() {
-                self.add(ids[index], values[index]);
-            }
-        } else {
-            // For dense inputs, traverse values and IDs sequentially, reusing
-            // each 64-bit validity word. Arrow accounts for sliced bit offsets.
-            let nulls = array.nulls().unwrap();
-            let bits = nulls.inner().bit_chunks();
-            let ids_chunks = ids.chunks_exact(64);
-            let values_chunks = values.chunks_exact(64);
-            let ids_remainder = ids_chunks.remainder();
-            let values_remainder = values_chunks.remainder();
-            for ((ids, values), mut mask) in ids_chunks.zip(values_chunks).zip(bits.iter()) {
-                for (&id, value) in ids.iter().zip(values) {
-                    if mask & 1 != 0 {
-                        // Dereference only after validity; null payloads do not
-                        // participate in arithmetic (notably floating NaNs).
-                        self.add(id, *value);
-                    }
-                    mask >>= 1;
-                }
-            }
-            let mut mask = bits.remainder_bits();
-            for (&id, value) in ids_remainder.iter().zip(values_remainder) {
-                if mask & 1 != 0 {
-                    self.add(id, *value);
-                }
-                mask >>= 1;
-            }
-        }
-    }
-
-    fn state(&self) -> ArrayRef {
-        Arc::new(PrimitiveArray::<T>::new(
-            self.values.clone().into(),
-            Some(NullBuffer::from(self.valid.clone())),
-        ))
-    }
-}
-
-impl SumGroups {
-    fn new(data_type: &DataType) -> Self {
-        match data_type {
-            DataType::Int64 => Self::Signed(TypedSum::new()),
-            DataType::UInt64 => Self::Unsigned(TypedSum::new()),
-            DataType::Float64 => Self::Float(TypedSum::new()),
-            _ => Self::Unsupported(data_type.clone()),
-        }
-    }
-
-    fn resize(&mut self, count: usize) {
-        match self {
-            Self::Signed(groups) => groups.resize(count),
-            Self::Unsigned(groups) => groups.resize(count),
-            Self::Float(groups) => groups.resize(count),
-            Self::Unsupported(_) => {}
-        }
-    }
-
-    fn update(&mut self, values: &ArrayRef, ids: &[usize]) -> Result<()> {
-        match self {
-            Self::Signed(groups) => groups.update(as_i64(values), ids),
-            Self::Unsigned(groups) => groups.update(as_u64(values), ids),
-            Self::Float(groups) => groups.update(as_f64(values), ids),
-            Self::Unsupported(data_type) => {
-                if values.null_count() != values.len() {
-                    return Err(unsupported_sum_type(data_type));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn update_single(&mut self, values: &ArrayRef) -> Result<()> {
-        match self {
-            Self::Signed(groups) => {
-                if let Some(value) = sum(as_i64(values)) {
-                    groups.add(0, value);
-                }
-            }
-            Self::Unsigned(groups) => {
-                if let Some(value) = sum(as_u64(values)) {
-                    groups.add(0, value);
-                }
-            }
-            Self::Float(groups) => {
-                // Preserve the grouped path's first value (including -0.0)
-                // and accumulation order across both rows and batches.
-                for value in as_f64(values).iter().flatten() {
-                    groups.add(0, value);
-                }
-            }
-            Self::Unsupported(data_type) => return Err(unsupported_sum_type(data_type)),
-        }
-        Ok(())
-    }
-
-    fn state(&self) -> Result<ArrayRef> {
-        Ok(match self {
-            Self::Signed(groups) => groups.state(),
-            Self::Unsigned(groups) => groups.state(),
-            Self::Float(groups) => groups.state(),
-            Self::Unsupported(data_type) => return Err(unsupported_sum_type(data_type)),
-        })
-    }
-}
+use std::{collections::HashSet, sync::Arc};
 fn overflow() -> Error {
     Error::Execution("aggregate arithmetic overflow".into())
 }
@@ -250,6 +45,39 @@ impl Covariance {
         Ok(())
     }
 }
+
+#[derive(Default)]
+#[repr(C)]
+pub(crate) struct Group {
+    pub count: i64,
+    pub sum: Cell,
+    avg: (u64, f64),
+    covar: Covariance,
+    distinct: HashSet<Vec<u8>>,
+    extremum: Option<(Vec<u8>, OwnedCell)>,
+}
+#[derive(Default)]
+#[repr(C)]
+pub(crate) struct GroupView {
+    pub data: *mut Group,
+    pub len: usize,
+}
+// The pointer is only used while its owning accumulator is exclusively borrowed.
+unsafe impl Send for GroupView {}
+#[repr(C)]
+pub(crate) struct Accumulator {
+    pub generated: GroupView,
+    groups: Vec<Group>,
+    function: AggregateFunction,
+    distinct: bool,
+    #[cfg(test)]
+    float_inputs: Vec<fn(Cell) -> f64>,
+    key: scalar::KeyEncoder,
+    own: scalar::OwnValue,
+    output: DataType,
+    #[cfg(test)]
+    update_row: fn(&mut Self, usize, &[Cell]) -> Result<()>,
+}
 impl Accumulator {
     pub fn new(
         function: AggregateFunction,
@@ -258,207 +86,214 @@ impl Accumulator {
         output: &DataType,
     ) -> Result<Self> {
         use AggregateFunction::*;
-        Ok(match function {
-            Count if distinct => {
-                let input = input_type(inputs)?;
-                Self::Distinct {
-                    groups: vec![],
-                    converter: RowConverter::new(vec![SortField::new(input)])?,
+        if distinct && (function != Count || inputs.len() != 1) {
+            return Err(Error::InvalidPlan("DISTINCT requires COUNT(expr)".into()));
+        }
+        let arity = match function {
+            Count => inputs.len() <= 1,
+            CovarPop => inputs.len() == 2,
+            _ => inputs.len() == 1,
+        };
+        if !arity || inputs.iter().any(|t| !scalar::supported(t)) {
+            return Err(Error::InvalidPlan("unsupported aggregate arguments".into()));
+        }
+        let valid_output = match function {
+            Count => output == &DataType::Int64,
+            Avg | CovarPop => output == &DataType::Float64,
+            Min | Max => inputs.first() == Some(output),
+            Sum => true,
+        };
+        if !valid_output {
+            return Err(Error::InvalidPlan(
+                "aggregate output type does not match its kernel".into(),
+            ));
+        }
+        if function == Sum
+            && !matches!(
+                output,
+                DataType::Int64 | DataType::UInt64 | DataType::Float64
+            )
+        {
+            return Err(Error::InvalidPlan(format!(
+                "unsupported SUM output type: {output}"
+            )));
+        }
+        #[cfg(test)]
+        let update_row = match function {
+            Count if distinct => Self::distinct_row,
+            Count => Self::count_row,
+            Sum => match output {
+                DataType::Float64 => Self::sum_float_row,
+                DataType::Int64 | DataType::UInt64 => {
+                    if matches!(inputs.first(), Some(DataType::Float32 | DataType::Float64)) {
+                        Self::sum_float_integer_row
+                    } else {
+                        Self::sum_integer_row
+                    }
                 }
-            }
-            Count => Self::Count(vec![]),
-            Sum => Self::Sum {
-                groups: SumGroups::new(output),
-                data_type: output.clone(),
+                _ => Self::unsupported_sum_row,
             },
-            Avg => Self::Avg(vec![]),
-            CovarPop => Self::Covar(vec![]),
-            Min | Max => {
-                let input = input_type(inputs)?;
-                Self::Extremum {
-                    groups: vec![],
-                    converter: RowConverter::new(vec![SortField::new(input)])?,
-                    data_type: output.clone(),
-                    minimum: function == Min,
-                }
-            }
+            Avg => Self::avg_row,
+            CovarPop => Self::covar_row,
+            Min => Self::extremum_row::<true>,
+            Max => Self::extremum_row::<false>,
+        };
+        #[cfg(test)]
+        let float_inputs = if matches!(function, Sum | Avg | CovarPop) {
+            inputs
+                .iter()
+                .map(scalar::bind_float)
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            vec![]
+        };
+        let key = scalar::bind_key(inputs.first().unwrap_or(&DataType::Null))?;
+        let own = scalar::bind_owner(inputs.first().unwrap_or(&DataType::Null));
+        Ok(Self {
+            generated: GroupView::default(),
+            groups: vec![],
+            function,
+            distinct,
+            #[cfg(test)]
+            float_inputs,
+            key,
+            own,
+            output: output.clone(),
+            #[cfg(test)]
+            update_row,
         })
     }
     pub fn resize(&mut self, count: usize) {
-        match self {
-            Self::Count(groups) => groups.resize(count, 0),
-            Self::Distinct { groups, .. } => groups.resize_with(count, HashSet::new),
-            Self::Sum { groups, .. } => groups.resize(count),
-            Self::Avg(groups) => groups.resize(count, (0, 0.0)),
-            Self::Covar(groups) => groups.resize(count, Covariance::default()),
-            Self::Extremum { groups, .. } => groups.resize(count, None),
+        if count > self.groups.len() {
+            self.groups.resize_with(count, Group::default);
         }
+        self.generated = GroupView {
+            data: self.groups.as_mut_ptr(),
+            len: self.groups.len(),
+        };
     }
+    #[cfg(test)]
+    pub(crate) fn update_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        self.resize(id + 1);
+        (self.update_row)(self, id, values)
+    }
+    fn count_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values.first().is_none_or(|v| v.valid != 0) {
+            self.groups[id].count = self.groups[id].count.checked_add(1).ok_or_else(overflow)?;
+        }
+        Ok(())
+    }
+    fn distinct_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values[0].valid != 0 {
+            let mut key = vec![];
+            (self.key)(values[0], &mut key);
+            self.groups[id].distinct.insert(key);
+        }
+        Ok(())
+    }
+    fn sum_integer_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        let v = values[0];
+        if v.valid != 0 {
+            let sum = &mut self.groups[id].sum;
+            sum.bits = sum.bits.wrapping_add(v.bits);
+            sum.valid = 1;
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn sum_float_integer_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        let v = values[0];
+        let v = Cell {
+            bits: (self.float_inputs[0])(v) as i64 as u64,
+            ..v
+        };
+        self.sum_integer_row(id, &[v])
+    }
+    #[cfg(test)]
+    fn sum_float_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        let v = values[0];
+        if v.valid != 0 {
+            let v = (self.float_inputs[0])(v);
+            let sum = &mut self.groups[id].sum;
+            sum.bits = if sum.valid == 0 {
+                v
+            } else {
+                f64::from_bits(sum.bits) + v
+            }
+            .to_bits();
+            sum.valid = 1;
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn unsupported_sum_row(&mut self, _id: usize, _values: &[Cell]) -> Result<()> {
+        Err(Error::Execution(format!(
+            "unsupported sum result type: {}",
+            self.output
+        )))
+    }
+    #[cfg(test)]
+    fn avg_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values[0].valid != 0 {
+            let g = &mut self.groups[id].avg;
+            g.0 = g.0.checked_add(1).ok_or_else(overflow)?;
+            g.1 += (self.float_inputs[0])(values[0]);
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn covar_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values.iter().all(|v| v.valid != 0) {
+            self.groups[id].covar.update(
+                (self.float_inputs[0])(values[0]),
+                (self.float_inputs[1])(values[1]),
+            )?;
+        }
+        Ok(())
+    }
+    fn extremum_row<const MIN: bool>(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values[0].valid == 0 {
+            return Ok(());
+        }
+        let mut key = vec![];
+        (self.key)(values[0], &mut key);
+        let g = &mut self.groups[id].extremum;
+        if g.as_ref()
+            .is_none_or(|(old, _)| if MIN { key < *old } else { key > *old })
+        {
+            *g = Some((key, (self.own)(values[0])));
+        }
+        Ok(())
+    }
+    #[cfg(test)]
     pub fn update(&mut self, values: &[ArrayRef], ids: &[usize]) -> Result<()> {
-        match self {
-            Self::Count(groups) => {
-                let nulls = values.first().and_then(|v| v.logical_nulls());
-                if let Some(nulls) = nulls.filter(|nulls| nulls.null_count() != 0) {
-                    if nulls.null_count() > nulls.len() / 2 {
-                        for index in nulls.valid_indices() {
-                            let id = ids[index];
-                            groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
-                        }
-                    } else {
-                        let bits = nulls.inner().bit_chunks();
-                        let chunks = ids.chunks_exact(64);
-                        let remainder = chunks.remainder();
-                        for (ids, mut mask) in chunks.zip(bits.iter()) {
-                            for &id in ids {
-                                if mask & 1 != 0 {
-                                    groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
-                                }
-                                mask >>= 1;
-                            }
-                        }
-                        let mut mask = bits.remainder_bits();
-                        for &id in remainder {
-                            if mask & 1 != 0 {
-                                groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
-                            }
-                            mask >>= 1;
-                        }
-                    }
-                } else {
-                    for &id in ids {
-                        groups[id] = groups[id].checked_add(1).ok_or_else(overflow)?;
-                    }
-                }
-            }
-            Self::Distinct { groups, converter } => {
-                let rows = converter.convert_columns(values)?;
-                let nulls = values[0].logical_nulls();
-                for (i, &id) in ids.iter().enumerate() {
-                    if nulls.as_ref().is_none_or(|n| n.is_valid(i)) {
-                        groups[id].insert(rows.row(i).as_ref().to_vec());
-                    }
-                }
-            }
-            Self::Sum { groups, data_type } => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast_argument(argument, data_type)?;
-                groups.update(&values, ids)?;
-            }
-            Self::Avg(groups) => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
-                let values = cast_argument(argument, &DataType::Float64)?;
-                let values = as_f64(&values);
-                for (i, &id) in ids.iter().enumerate() {
-                    if values.is_null(i) {
-                        continue;
-                    }
-                    groups[id].0 = groups[id].0.checked_add(1).ok_or_else(overflow)?;
-                    groups[id].1 += values.value(i);
-                }
-            }
-            Self::Covar(groups) => {
-                let (x, y) = values
-                    .split_first()
-                    .and_then(|(x, rest)| rest.first().map(|y| (x, y)))
-                    .ok_or_else(|| Error::Execution("covariance requires two arguments".into()))?;
-                let x = cast_argument(x, &DataType::Float64)?;
-                let y = cast_argument(y, &DataType::Float64)?;
-                let (x, y) = (as_f64(&x), as_f64(&y));
-                for (i, &id) in ids.iter().enumerate() {
-                    if x.is_valid(i) && y.is_valid(i) {
-                        groups[id].update(x.value(i), y.value(i))?;
-                    }
-                }
-            }
-            Self::Extremum {
-                groups,
-                converter,
-                minimum,
-                ..
-            } => {
-                let rows = converter.convert_columns(values)?;
-                let nulls = values[0].logical_nulls();
-                for (i, &id) in ids.iter().enumerate() {
-                    if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
-                        continue;
-                    }
-                    let row = rows.row(i);
-                    let replace = groups[id].as_ref().is_none_or(|(key, _)| {
-                        if *minimum {
-                            row.as_ref() < key.as_slice()
-                        } else {
-                            row.as_ref() > key.as_slice()
-                        }
-                    });
-                    if replace {
-                        // Retain the chosen row; Arrow may share backing buffers.
-                        let value = arrow::compute::take(
-                            values[0].as_ref(),
-                            &UInt64Array::from(vec![i as u64]),
-                            None,
-                        )?;
-                        groups[id] = Some((row.as_ref().to_vec(), value));
-                    }
-                }
-            }
+        let columns = values
+            .iter()
+            .map(scalar::decode)
+            .collect::<Result<Vec<_>>>()?;
+        for (row, &id) in ids.iter().enumerate() {
+            let args = columns.iter().map(|c| c[row]).collect::<Vec<_>>();
+            self.update_row(id, &args)?;
         }
         Ok(())
     }
-    /// Reduce a whole batch into the sole global group without materializing IDs.
+    #[cfg(test)]
     pub fn update_single(&mut self, values: &[ArrayRef], rows: usize) -> Result<()> {
-        match self {
-            Self::Count(groups) => {
-                let null_count = values
-                    .first()
-                    .and_then(|value| value.logical_nulls())
-                    .map_or(0, |nulls| nulls.null_count());
-                let count = i64::try_from(rows - null_count).map_err(|_| overflow())?;
-                groups[0] = groups[0].checked_add(count).ok_or_else(overflow)?;
-            }
-            Self::Sum { groups, data_type } => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("sum requires one argument".into()))?;
-                let values = cast_argument(argument, data_type)?;
-                // Integer batch reductions retain wrapping overflow; floating
-                // updates retain the grouped path's order and signed zeros.
-                groups.update_single(&values)?;
-            }
-            Self::Avg(groups) => {
-                let argument = values
-                    .first()
-                    .ok_or_else(|| Error::Execution("avg requires one argument".into()))?;
-                let values = cast_argument(argument, &DataType::Float64)?;
-                let values = as_f64(&values);
-                // AVG's floating sum must accumulate into the existing state
-                // in input order, just like grouped updates. A batch subtotal
-                // would reassociate additions and change cancellation results.
-                for value in values.iter().flatten() {
-                    groups[0].0 = groups[0].0.checked_add(1).ok_or_else(overflow)?;
-                    groups[0].1 += value;
-                }
-            }
-            _ => self.update(values, &vec![0; rows])?,
-        }
-        Ok(())
+        self.resize(1);
+        self.update(values, &vec![0; rows])
     }
     pub fn state_types(&self) -> Vec<DataType> {
-        match self {
-            Self::Count(_) => vec![DataType::Int64],
-            Self::Distinct { .. } => vec![DataType::List(Arc::new(Field::new(
+        use AggregateFunction::*;
+        match self.function {
+            Count if self.distinct => vec![DataType::List(Arc::new(Field::new(
                 "item",
                 DataType::Binary,
                 true,
             )))],
-            Self::Sum { data_type, .. } | Self::Extremum { data_type, .. } => {
-                vec![data_type.clone()]
-            }
-            Self::Avg(_) => vec![DataType::UInt64, DataType::Float64],
-            Self::Covar(_) => vec![
+            Count => vec![DataType::Int64],
+            Sum | Min | Max => vec![self.output.clone()],
+            Avg => vec![DataType::UInt64, DataType::Float64],
+            CovarPop => vec![
                 DataType::UInt64,
                 DataType::Float64,
                 DataType::Float64,
@@ -467,182 +302,234 @@ impl Accumulator {
         }
     }
     pub fn state(&self) -> Result<Vec<ArrayRef>> {
-        Ok(match self {
-            Self::Count(groups) => vec![Arc::new(Int64Array::from(groups.clone()))],
-            Self::Distinct { groups, .. } => {
-                let mut builder = ListBuilder::new(BinaryBuilder::new());
-                for group in groups {
-                    for key in group {
-                        builder.values().append_value(key);
+        use AggregateFunction::*;
+        Ok(match self.function {
+            Count if self.distinct => {
+                let mut b = ListBuilder::new(BinaryBuilder::new());
+                for g in &self.groups {
+                    for k in &g.distinct {
+                        b.values().append_value(k);
                     }
-                    builder.append(true);
+                    b.append(true);
                 }
-                vec![Arc::new(builder.finish())]
+                vec![Arc::new(b.finish())]
             }
-            Self::Sum { groups, .. } => vec![groups.state()?],
-            // Both state columns are null for groups without contributing values,
-            // matching grouped AVG states without confusing an empty sum with zero.
-            Self::Avg(groups) => vec![
+            Count => vec![Arc::new(Int64Array::from_iter_values(
+                self.groups.iter().map(|g| g.count),
+            ))],
+            Sum => {
+                if !matches!(
+                    self.output,
+                    DataType::Int64 | DataType::UInt64 | DataType::Float64
+                ) {
+                    return Err(Error::Execution(format!(
+                        "unsupported sum result type: {}",
+                        self.output
+                    )));
+                }
+                vec![scalar::encode(
+                    &self.output,
+                    &self.groups.iter().map(|g| g.sum).collect::<Vec<_>>(),
+                )?]
+            }
+            Min | Max => vec![scalar::encode(
+                &self.output,
+                &self
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        g.extremum
+                            .as_ref()
+                            .map_or(Cell::default(), |(_, v)| v.get())
+                    })
+                    .collect::<Vec<_>>(),
+            )?],
+            Avg => vec![
                 Arc::new(UInt64Array::from_iter(
-                    groups
+                    self.groups
                         .iter()
-                        .map(|(count, _)| (*count != 0).then_some(*count)),
+                        .map(|g| (g.avg.0 != 0).then_some(g.avg.0)),
                 )),
                 Arc::new(Float64Array::from_iter(
-                    groups
+                    self.groups
                         .iter()
-                        .map(|(count, sum)| (*count != 0).then_some(*sum)),
+                        .map(|g| (g.avg.0 != 0).then_some(g.avg.1)),
                 )),
             ],
-            Self::Covar(groups) => vec![
+            CovarPop => vec![
                 Arc::new(UInt64Array::from_iter_values(
-                    groups.iter().map(|g| g.count),
+                    self.groups.iter().map(|g| g.covar.count),
                 )),
                 Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.mean_x),
+                    self.groups.iter().map(|g| g.covar.mean_x),
                 )),
                 Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.mean_y),
+                    self.groups.iter().map(|g| g.covar.mean_y),
                 )),
                 Arc::new(Float64Array::from_iter_values(
-                    groups.iter().map(|g| g.co_moment),
+                    self.groups.iter().map(|g| g.covar.co_moment),
                 )),
             ],
-            Self::Extremum {
-                groups, data_type, ..
-            } => {
-                if groups.is_empty() {
-                    vec![new_empty_array(data_type)]
-                } else {
-                    let mut arrays = vec![new_null_array(data_type, 1)];
-                    let mut indices = vec![];
-                    for group in groups {
-                        if let Some((_, value)) = group {
-                            indices.push((arrays.len(), 0));
-                            arrays.push(value.clone());
-                        } else {
-                            indices.push((0, 0));
-                        }
-                    }
-                    vec![interleave(
-                        &arrays.iter().map(|a| a.as_ref()).collect::<Vec<_>>(),
-                        &indices,
-                    )?]
-                }
-            }
         })
     }
     pub fn merge(&mut self, states: &[ArrayRef], ids: &[usize]) -> Result<()> {
-        match self {
-            Self::Count(groups) => {
-                let values = as_i64(&states[0]);
-                for (i, &id) in ids.iter().enumerate() {
-                    groups[id] = groups[id]
-                        .checked_add(values.value(i))
-                        .ok_or_else(overflow)?;
+        use AggregateFunction::*;
+        if self.function == Count && self.distinct {
+            let lists = states[0].as_any().downcast_ref::<ListArray>().unwrap();
+            for (i, &id) in ids.iter().enumerate() {
+                let a = lists.value(i);
+                let a = a.as_any().downcast_ref::<BinaryArray>().unwrap();
+                for k in a.iter().flatten() {
+                    self.groups[id].distinct.insert(k.to_vec());
                 }
             }
-            Self::Distinct { groups, .. } => {
-                let lists = states[0].as_any().downcast_ref::<ListArray>().unwrap();
-                for (i, &id) in ids.iter().enumerate() {
-                    let values = lists.value(i);
-                    let values = values.as_any().downcast_ref::<BinaryArray>().unwrap();
-                    for key in values.iter().flatten() {
-                        groups[id].insert(key.to_vec());
+            return Ok(());
+        }
+        let cols = states
+            .iter()
+            .map(scalar::decode)
+            .collect::<Result<Vec<_>>>()?;
+        for (i, &id) in ids.iter().enumerate() {
+            let g = &mut self.groups[id];
+            match self.function {
+                Count => {
+                    g.count = g
+                        .count
+                        .checked_add(cols[0][i].bits as i64)
+                        .ok_or_else(overflow)?
+                }
+                Avg => {
+                    if cols[0][i].valid != 0 {
+                        g.avg.0 = g.avg.0.checked_add(cols[0][i].bits).ok_or_else(overflow)?;
+                    }
+                    if cols[1][i].valid != 0 {
+                        g.avg.1 += f64::from_bits(cols[1][i].bits);
                     }
                 }
-            }
-            Self::Avg(groups) => {
-                let (counts, sums) = (as_u64(&states[0]), as_f64(&states[1]));
-                for (i, &id) in ids.iter().enumerate() {
-                    if counts.is_valid(i) {
-                        groups[id].0 = groups[id]
-                            .0
-                            .checked_add(counts.value(i))
-                            .ok_or_else(overflow)?;
-                    }
-                    if sums.is_valid(i) {
-                        groups[id].1 += sums.value(i);
+                CovarPop => g.covar.merge(Covariance {
+                    count: cols[0][i].bits,
+                    mean_x: f64::from_bits(cols[1][i].bits),
+                    mean_y: f64::from_bits(cols[2][i].bits),
+                    co_moment: f64::from_bits(cols[3][i].bits),
+                })?,
+                Sum => {
+                    let v = cols[0][i];
+                    if v.valid != 0 {
+                        if self.output == DataType::Float64 {
+                            let v = f64::from_bits(v.bits);
+                            g.sum.bits = if g.sum.valid == 0 {
+                                v
+                            } else {
+                                f64::from_bits(g.sum.bits) + v
+                            }
+                            .to_bits();
+                        } else {
+                            g.sum.bits = g.sum.bits.wrapping_add(v.bits);
+                        }
+                        g.sum.valid = 1;
                     }
                 }
+                Min => self.extremum_row::<true>(id, &[cols[0][i]])?,
+                Max => self.extremum_row::<false>(id, &[cols[0][i]])?,
             }
-            Self::Covar(groups) => {
-                let count = as_u64(&states[0]);
-                let (x, y, c) = (as_f64(&states[1]), as_f64(&states[2]), as_f64(&states[3]));
-                for (i, &id) in ids.iter().enumerate() {
-                    groups[id].merge(Covariance {
-                        count: count.value(i),
-                        mean_x: x.value(i),
-                        mean_y: y.value(i),
-                        co_moment: c.value(i),
-                    })?;
-                }
-            }
-            Self::Sum { .. } | Self::Extremum { .. } => self.update(states, ids)?,
         }
         Ok(())
     }
     pub fn evaluate(&self) -> Result<ArrayRef> {
-        Ok(match self {
-            Self::Distinct { groups, .. } => Arc::new(Int64Array::from(
-                groups
+        use AggregateFunction::*;
+        Ok(match self.function {
+            Count if self.distinct => Arc::new(Int64Array::from(
+                self.groups
                     .iter()
-                    .map(|s| i64::try_from(s.len()).map_err(|_| overflow()))
+                    .map(|g| i64::try_from(g.distinct.len()).map_err(|_| overflow()))
                     .collect::<Result<Vec<_>>>()?,
             )),
-            Self::Avg(groups) => Arc::new(Float64Array::from(
-                groups
+            Avg => Arc::new(Float64Array::from_iter(
+                self.groups
                     .iter()
-                    .map(|(count, sum)| (*count != 0).then(|| *sum / *count as f64))
-                    .collect::<Vec<_>>(),
+                    .map(|g| (g.avg.0 != 0).then(|| g.avg.1 / g.avg.0 as f64)),
             )),
-            Self::Covar(groups) => Arc::new(Float64Array::from(
-                groups
-                    .iter()
-                    .map(|g| (g.count != 0).then(|| g.co_moment / g.count as f64))
-                    .collect::<Vec<_>>(),
-            )),
+            CovarPop => Arc::new(Float64Array::from_iter(self.groups.iter().map(|g| {
+                (g.covar.count != 0).then(|| g.covar.co_moment / g.covar.count as f64)
+            }))),
             _ => self.state()?.remove(0),
         })
     }
 }
-/// Identical types can borrow the original array. Calling Arrow's cast in
-/// that case reconstructs an array wrapper and clones its backing buffers.
-fn cast_argument<'a>(argument: &'a ArrayRef, data_type: &DataType) -> Result<Cow<'a, ArrayRef>> {
-    if argument.data_type() == data_type {
-        Ok(Cow::Borrowed(argument))
-    } else {
-        Ok(Cow::Owned(cast(argument.as_ref(), data_type)?))
+
+/// Monomorphized scalar entry points. Production generated code binds one of
+/// these directly; the state contains no row-level operation dispatcher.
+pub(crate) trait RowKernel {
+    fn update(a: &mut Accumulator, id: usize, values: &[Cell]) -> Result<()>;
+}
+macro_rules! row_kernel {
+    ($name:ident,$method:ident) => {
+        pub(crate) struct $name;
+        impl RowKernel for $name {
+            fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+                a.$method(id, v)
+            }
+        }
+    };
+}
+row_kernel!(CountValues, count_row);
+row_kernel!(CountDistinct, distinct_row);
+row_kernel!(SumInteger, sum_integer_row);
+pub(crate) struct CountRows;
+impl RowKernel for CountRows {
+    fn update(a: &mut Accumulator, id: usize, _: &[Cell]) -> Result<()> {
+        a.groups[id].count = a.groups[id].count.checked_add(1).ok_or_else(overflow)?;
+        Ok(())
     }
 }
-
-fn as_i64(a: &ArrayRef) -> &Int64Array {
-    a.as_any().downcast_ref().unwrap()
+pub(crate) struct SumFloat;
+impl RowKernel for SumFloat {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        if v[0].valid != 0 {
+            let value = f64::from_bits(v[0].bits);
+            let sum = &mut a.groups[id].sum;
+            sum.bits = if sum.valid == 0 {
+                value
+            } else {
+                f64::from_bits(sum.bits) + value
+            }
+            .to_bits();
+            sum.valid = 1;
+        }
+        Ok(())
+    }
 }
-fn as_u64(a: &ArrayRef) -> &UInt64Array {
-    a.as_any().downcast_ref().unwrap()
+pub(crate) struct Average;
+impl RowKernel for Average {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        if v[0].valid != 0 {
+            let g = &mut a.groups[id].avg;
+            g.0 = g.0.checked_add(1).ok_or_else(overflow)?;
+            g.1 += f64::from_bits(v[0].bits);
+        }
+        Ok(())
+    }
 }
-fn as_f64(a: &ArrayRef) -> &Float64Array {
-    a.as_any().downcast_ref().unwrap()
+pub(crate) struct CovarianceUpdate;
+impl RowKernel for CovarianceUpdate {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        if v[0].valid != 0 && v[1].valid != 0 {
+            a.groups[id]
+                .covar
+                .update(f64::from_bits(v[0].bits), f64::from_bits(v[1].bits))?;
+        }
+        Ok(())
+    }
 }
-fn unsupported_sum_type(data_type: &DataType) -> Error {
-    Error::Execution(format!("unsupported sum result type: {data_type}"))
+pub(crate) struct Minimum;
+impl RowKernel for Minimum {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        a.extremum_row::<true>(id, v)
+    }
 }
-
-#[cfg(test)]
-mod cast_argument_tests {
-    use super::*;
-    use arrow::array::Int32Array;
-
-    #[test]
-    fn same_type_borrows_and_numeric_coercion_still_casts() {
-        let source = Arc::new(Int64Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
-        let borrowed = cast_argument(&source, &DataType::Int64).unwrap();
-        assert!(matches!(&borrowed, Cow::Borrowed(_)));
-        assert!(Arc::ptr_eq(&source, borrowed.as_ref()));
-        let narrow = Arc::new(Int32Array::from(vec![Some(4), None, Some(-2)])) as ArrayRef;
-        let converted = cast_argument(&narrow, &DataType::Int64).unwrap();
-        assert!(matches!(&converted, Cow::Owned(_)));
-        assert_eq!(converted.to_data(), source.to_data());
+pub(crate) struct Maximum;
+impl RowKernel for Maximum {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        a.extremum_row::<false>(id, v)
     }
 }

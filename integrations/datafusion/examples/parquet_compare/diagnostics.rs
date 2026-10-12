@@ -446,7 +446,7 @@ async fn run_roc_with_yield(
     let sink = CollectSink::build(output.clone(), &mut pipeline.suboperators)?;
     pipeline.set_sink(Box::new(sink))?;
     let executor =
-        PipelineGraphExecutor::new(graph.finish(roc::suboperator::ExecutionMode::Native)?)
+        PipelineGraphExecutor::new(graph.finish(roc::suboperator::ExecutionMode::Compiled)?)
             .with_task_executor(TokioExecutor(tokio::runtime::Handle::current()))
             .with_parallelism(threads)
             .with_config(PipelineExecutionConfig {

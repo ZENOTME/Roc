@@ -1,29 +1,25 @@
-//! Dense Variables connect immutable suboperators. Prepared vector Programs bind
-//! native entry points or Cranelift code; mutable state belongs to each instance.
+//! Dense variables and explicit scope boundaries lower to typed machine code.
+//! Mutable state belongs exclusively to each execution instance.
 pub(crate) mod aggregation;
-mod buffer;
+mod column;
 mod context;
-#[cfg(feature = "jit")]
 mod jit;
-pub(crate) mod native;
 mod program;
+mod runtime;
+pub(crate) mod scalar;
+mod signatures;
 pub use crate::expr::scalar::{CastMode, Conjunction, FunctionKind};
-pub use buffer::ColumnBuffer;
 pub use context::{
-    SourceId, State, StateBuilder, StateId, Suboperator, SuboperatorBuilder, SuboperatorContext,
-    Variable, VariableId,
+    AggregateKernel, DependencyToken, ScopeBoundary, ScopeSuboperator, SourceId, State,
+    StateBuilder, StateId, Suboperator, SuboperatorScope, SuboperatorScopeBuilder, Variable,
+    VariableId,
 };
 pub use program::{Program, ProgramBuilder, ProgramContext, ProgramExecutionContext};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExecutionMode {
     #[default]
-    Native,
-    /// Fuse supported regions; other operations retain explicit native programs.
     Compiled,
-    /// Compile short compute phases (at most four scalar operations per loop).
-    /// Stateful and selection boundaries are retained in both compiled modes.
-    Staged,
 }
 
 #[cfg(test)]
@@ -36,5 +32,7 @@ pub enum ProgramControl {
     Stop,
 }
 /// Precompiled batch update. Receives an ordinary typed state slot, not an executor.
-pub type BatchUpdate =
-    fn(&mut State, &arrow::record_batch::RecordBatch) -> crate::error::Result<ProgramControl>;
+pub type BatchUpdate = fn(
+    &mut State,
+    &crate::arrow::record_batch::RecordBatch,
+) -> crate::error::Result<ProgramControl>;

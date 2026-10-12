@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use super::accumulator::Accumulator;
+use crate::arrow::datatypes::DataType;
 use crate::expr::scalar::ScalarExprRef;
 use crate::{
     error::{Error, Result},
     expr::{ExpressionResultType, scalar::ConstantExpression},
     suboperator::{
-        StateBuilder, StateId, SuboperatorBuilder, VariableId, aggregation::AccumulatorState,
+        StateBuilder, StateId, SuboperatorScopeBuilder, VariableId, aggregation::AccumulatorState,
     },
 };
-use arrow::datatypes::DataType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AggregateFunction {
@@ -62,7 +62,7 @@ impl AggregateExpression {
     /// to the grouping operator through its state handle and group-ID variable.
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut SuboperatorBuilder,
+        builder: &mut SuboperatorScopeBuilder,
         grouping: StateId,
         group_ids: VariableId,
         global: bool,
@@ -78,6 +78,38 @@ impl AggregateExpression {
         if self.filter.is_some() && arguments.is_empty() {
             arguments.push(ConstantExpression::int64(Some(1)).into_ref());
         }
+        // Numeric coercions are explicit scalar nodes, generated alongside the
+        // aggregate update. Runtime state never interprets source Arrow types.
+        let target = match self.function {
+            AggregateFunction::Sum
+                if matches!(
+                    self.result_type.data_type(),
+                    DataType::Int64 | DataType::UInt64 | DataType::Float64
+                ) =>
+            {
+                Some(self.result_type.data_type().clone())
+            }
+            AggregateFunction::Avg | AggregateFunction::CovarPop => Some(DataType::Float64),
+            _ => None,
+        };
+        if let Some(target) = target {
+            arguments = arguments
+                .into_iter()
+                .map(|a| {
+                    if a.result_type().data_type() == &target {
+                        a
+                    } else {
+                        crate::expr::scalar::CastExpression::new(
+                            a,
+                            target.clone(),
+                            crate::expr::scalar::CastMode::Try,
+                            true,
+                        )
+                        .into_ref()
+                    }
+                })
+                .collect();
+        }
         let types = arguments
             .iter()
             .map(|e| e.result_type().data_type().clone())
@@ -92,11 +124,7 @@ impl AggregateExpression {
             if global {
                 accumulator.resize(1);
             }
-            Ok(AccumulatorState {
-                accumulator,
-                global,
-                ids: vec![],
-            })
+            Ok(AccumulatorState { accumulator })
         }));
         let mask = self
             .filter
@@ -107,7 +135,7 @@ impl AggregateExpression {
         for argument in arguments {
             let value = argument.build_suboperator(builder)?;
             let value = if let Some(mask) = mask {
-                let null = builder.constant(arrow::array::new_null_array(
+                let null = builder.constant(crate::arrow::array::new_null_array(
                     argument.result_type().data_type(),
                     1,
                 ))?;
@@ -117,7 +145,23 @@ impl AggregateExpression {
             };
             inputs.push(value);
         }
-        builder.aggregate_update([grouping, accumulator], inputs)?;
+        use crate::suboperator::AggregateKernel;
+        let kernel = match self.function {
+            AggregateFunction::Count if self.distinct => AggregateKernel::CountDistinct,
+            AggregateFunction::Count if inputs.len() == 1 => AggregateKernel::CountRows,
+            AggregateFunction::Count => AggregateKernel::CountValues,
+            AggregateFunction::Sum => match self.result_type.data_type() {
+                DataType::Int64 => AggregateKernel::SumI64,
+                DataType::UInt64 => AggregateKernel::SumU64,
+                DataType::Float64 => AggregateKernel::SumF64,
+                _ => return Err(Error::InvalidPlan("unsupported SUM output".into())),
+            },
+            AggregateFunction::Avg => AggregateKernel::Avg,
+            AggregateFunction::CovarPop => AggregateKernel::CovarPop,
+            AggregateFunction::Min => AggregateKernel::Min,
+            AggregateFunction::Max => AggregateKernel::Max,
+        };
+        builder.aggregate_update([grouping, accumulator], inputs, kernel)?;
         Ok(accumulator)
     }
 

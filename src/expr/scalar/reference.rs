@@ -21,7 +21,7 @@ pub struct ReferenceExpression {
 impl ReferenceExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         builder.column(self.index(), self.result_type().clone())
     }

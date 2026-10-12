@@ -30,10 +30,10 @@ pub struct FilterOperator {
 impl FilterOperator {
     pub fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> Result<()> {
         let predicate = self.predicate.build_suboperator(builder)?;
-        builder.materialize(Some(predicate))
+        builder.filter(predicate).map(|_| ())
     }
 
     pub fn new(predicate: ScalarExprRef) -> Self {

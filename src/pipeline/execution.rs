@@ -14,15 +14,15 @@
 
 //! Pipeline task execution and pipeline-graph scheduling.
 use super::{Pipeline, PipelineGraph};
+use crate::arrow::record_batch::RecordBatch;
 use crate::suboperator::ProgramExecutionContext;
 use crate::{
     Shutdown,
     error::{Error, Result},
 };
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::{
-    StreamExt,
+    FutureExt, StreamExt,
     future::{Either, select},
     stream::FuturesUnordered,
 };
@@ -143,6 +143,63 @@ impl Pipeline {
         }
         self.sink.start(&shutdown_guard)?;
         self.source.start(&shutdown_guard)?;
+        // A single worker has no CPU parallelism to schedule, so run inline
+        // and yield after bounded work instead of dispatching each batch.
+        if parallelism == 1 {
+            let mut local = self.program.new_execution_context();
+            self.program.initialize(&mut local)?;
+            let mut completed = 0;
+            while let Some(batch) = self.source.next_batch(&shutdown_guard).await? {
+                if shutdown_guard.is_shutdown_requested() {
+                    return Err(Error::Cancelled);
+                }
+                for offset in (0..batch.num_rows()).step_by(config.batch_rows) {
+                    let rows = config.batch_rows.min(batch.num_rows() - offset);
+                    if offset == 0 && rows == batch.num_rows() {
+                        run_inline(&self.program, &batch, &mut local, &shutdown_guard)?;
+                    } else {
+                        run_inline(
+                            &self.program,
+                            &batch.slice(offset, rows),
+                            &mut local,
+                            &shutdown_guard,
+                        )?;
+                    }
+                    self.sink.flush(&mut local, &shutdown_guard).await?;
+                    if local.stopped {
+                        break;
+                    }
+                    completed += 1;
+                    if completed % config.yield_batches == 0 {
+                        yield_now().await;
+                    }
+                }
+                if local.stopped {
+                    break;
+                }
+                if batch.num_rows() == 0 {
+                    yield_now().await;
+                }
+            }
+            if shutdown_guard.is_shutdown_requested() {
+                return Err(Error::Cancelled);
+            }
+            self.sink.combine(local, &shutdown_guard).await?;
+            self.source.finish(&shutdown_guard).await?;
+            return self.sink.finish(&shutdown_guard).await;
+        }
+        let source_guard = &shutdown_guard;
+        let mut source = Box::pin(futures::stream::try_unfold(
+            self.source.as_mut(),
+            |source| async move {
+                Ok::<_, Error>(
+                    source
+                        .next_batch(source_guard)
+                        .await?
+                        .map(|batch| (batch, source)),
+                )
+            },
+        ));
         let program = Arc::new(self.program);
         let mut idle = Vec::with_capacity(parallelism);
         for _ in 0..parallelism {
@@ -175,11 +232,36 @@ impl Pipeline {
                     }
                     batch
                 };
+                // Amortize dispatch over immediately available input only. Unfold
+                // retains a pending source read, so feedback/async I/O is never
+                // cancelled or blocked waiting for a full work chunk.
+                let mut batches = vec![batch];
+                if morsel.is_none() {
+                    while batches.len() < 128 && !eof {
+                        match source.next().now_or_never() {
+                            Some(Some(Ok(batch))) if batch.num_rows() > config.batch_rows => {
+                                morsel = Some(batch);
+                                offset = 0;
+                                break;
+                            }
+                            Some(Some(Ok(batch))) if batch.num_rows() != 0 => batches.push(batch),
+                            Some(Some(Ok(_))) => break,
+                            Some(Some(Err(e))) => return Err(e),
+                            Some(None) => eof = true,
+                            None => break,
+                        }
+                    }
+                }
                 let mut local = idle.pop().unwrap();
                 let code = program.clone();
                 let guard = shutdown_guard.clone();
                 jobs.push(on_cpu(move || {
-                    code.run(&batch, &mut local, &guard)?;
+                    for batch in batches {
+                        code.run(&batch, &mut local, &guard)?;
+                        if local.stopped {
+                            break;
+                        }
+                    }
                     Ok(local)
                 }));
                 continue;
@@ -191,7 +273,7 @@ impl Pipeline {
                 // This borrow stays alive while CPU completions are drained.
                 // Early stop drops only the read future; the source remains
                 // owned by the Pipeline and can still finish its resources.
-                let mut next = self.source.next_batch(&shutdown_guard);
+                let mut next = Box::pin(async { source.next().await.transpose() });
                 loop {
                     enum Event {
                         Input(Result<Option<RecordBatch>>),
@@ -271,9 +353,22 @@ impl Pipeline {
         if shutdown_guard.is_shutdown_requested() {
             return Err(Error::Cancelled);
         }
+        drop(source);
         self.source.finish(&shutdown_guard).await?;
         self.sink.finish(&shutdown_guard).await
     }
+}
+
+fn run_inline(
+    program: &crate::suboperator::ProgramContext,
+    batch: &RecordBatch,
+    local: &mut ProgramExecutionContext,
+    guard: &ShutdownGuard,
+) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        program.run(batch, local, guard)
+    }))
+    .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())))
 }
 
 async fn return_local(
@@ -290,15 +385,19 @@ async fn return_local(
 
 /// Rayon runs synchronous work only. Catch worker panics and return them through
 /// the completion channel rather than unwinding across the async runtime.
-async fn on_cpu<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+fn on_cpu<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> impl Future<Output = Result<T>> {
     let (tx, rx) = futures::channel::oneshot::channel();
     rayon::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
             .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())));
         let _ = tx.send(result);
     });
-    rx.await
-        .map_err(|_| Error::Execution("CPU task did not return its state".into()))?
+    async move {
+        rx.await
+            .map_err(|_| Error::Execution("CPU task did not return its state".into()))?
+    }
 }
 
 pub async fn yield_now() {
@@ -391,14 +490,14 @@ impl<E: Executor> PipelineGraphExecutor<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exec::{SinkExec, SourceExec};
-    use crate::suboperator::{
-        ExecutionMode, ProgramControl, StateBuilder, StateId, SuboperatorBuilder,
-    };
-    use arrow::{
+    use crate::arrow::{
         array::Int64Array,
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
+    };
+    use crate::exec::{SinkExec, SourceExec};
+    use crate::suboperator::{
+        ExecutionMode, ProgramControl, StateBuilder, StateId, SuboperatorScopeBuilder,
     };
     use futures::{executor::block_on, future::BoxFuture};
     use std::sync::{
@@ -515,7 +614,7 @@ mod tests {
     }
     fn executor(
         batches: Vec<RecordBatch>,
-        mut builder: SuboperatorBuilder,
+        mut builder: SuboperatorScopeBuilder,
         stop_after: Option<usize>,
     ) -> (Pipeline, Arc<Observed>) {
         let observed = Arc::new(Observed::default());
@@ -542,13 +641,13 @@ mod tests {
                 state,
                 observed: observed.clone(),
             }),
-            ExecutionMode::Native,
+            ExecutionMode::Compiled,
         )
         .unwrap();
         (pipeline, observed)
     }
-    fn empty_program() -> SuboperatorBuilder {
-        SuboperatorBuilder::new()
+    fn empty_program() -> SuboperatorScopeBuilder {
+        SuboperatorScopeBuilder::new()
     }
     #[test]
     fn source_morsels_split_and_empty_batches_are_skipped() {
@@ -598,7 +697,7 @@ mod tests {
             false,
         )
         .into_ref();
-        let mut builder = SuboperatorBuilder::new();
+        let mut builder = SuboperatorScopeBuilder::new();
         Projection::new(vec![ProjectionExpression::new(division, "x")])
             .build_suboperator(&mut builder)
             .unwrap();
@@ -694,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn pending_source_read_keeps_progress_while_completed_batches_flush() {
         let (send, receive) = futures::channel::oneshot::channel();
-        let mut builder = SuboperatorBuilder::new();
+        let mut builder = SuboperatorScopeBuilder::new();
         let state = builder.state(StateBuilder::new(|| Ok(false)));
         builder
             .batch_update(state, |state, _| {
@@ -713,7 +812,7 @@ mod tests {
                 send: Some(send),
                 state,
             }),
-            ExecutionMode::Native,
+            ExecutionMode::Compiled,
         )
         .unwrap();
         tokio::time::timeout(
@@ -757,7 +856,7 @@ mod tests {
         let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let finished = Arc::new(AtomicUsize::new(0));
         let observed = Arc::new(Observed::default());
-        let mut builder = SuboperatorBuilder::new();
+        let mut builder = SuboperatorScopeBuilder::new();
         let monitor = observed.clone();
         let state = builder.state(StateBuilder::new(move || {
             Ok(RecordingState {
@@ -797,7 +896,7 @@ mod tests {
                 state,
                 observed: observed.clone(),
             }),
-            ExecutionMode::Native,
+            ExecutionMode::Compiled,
         )
         .unwrap();
         tokio::time::timeout(

@@ -14,15 +14,15 @@
 
 use super::Operator;
 use super::Projection;
+use crate::arrow::datatypes::{Field, Schema, SchemaRef};
 use crate::exec::aggregate::group_index::GroupIndex;
 use crate::expr::agg::AggregateExpression;
-use crate::suboperator::{StateBuilder, StateId, SuboperatorBuilder, aggregation::GroupState};
+use crate::suboperator::{StateBuilder, StateId, SuboperatorScopeBuilder, aggregation::GroupState};
 use crate::{
     error::{Error, Result},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::sync::Arc;
 
 /// Fully specified grouping and aggregate descriptions, without execution state.
@@ -34,14 +34,13 @@ pub struct AggregateOperator {
 impl AggregateOperator {
     /// This operator chooses its grouping state and each aggregate chooses its
     /// accumulator state. The returned ordinary IDs are also used by sink.combine.
-    pub fn build_suboperator(&self, builder: &mut SuboperatorBuilder) -> Result<Vec<StateId>> {
+    pub fn build_suboperator(&self, builder: &mut SuboperatorScopeBuilder) -> Result<Vec<StateId>> {
         let schema = self.groups.output_schema();
         let group_schema = schema.clone();
         let grouping = builder.state(StateBuilder::new(move || {
             Ok(GroupState {
                 index: GroupIndex::new(&group_schema)?,
                 schema: group_schema.clone(),
-                ids: vec![],
             })
         }));
         let keys = self

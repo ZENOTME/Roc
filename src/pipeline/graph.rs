@@ -240,7 +240,7 @@ mod tests {
         fn next_batch<'a>(
             &'a mut self,
             _: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<Option<arrow::record_batch::RecordBatch>>> {
+        ) -> BoxFuture<'a, Result<Option<crate::arrow::record_batch::RecordBatch>>> {
             Box::pin(async {
                 Err(Error::Execution(
                     "not executed in graph construction tests".into(),
@@ -255,9 +255,9 @@ mod tests {
             .map(|_| {
                 Pipeline::new(
                     Box::new(UnusedExec),
-                    crate::suboperator::SuboperatorBuilder::new(),
+                    crate::suboperator::SuboperatorScopeBuilder::new(),
                     Box::new(UnusedExec),
-                    crate::suboperator::ExecutionMode::Native,
+                    crate::suboperator::ExecutionMode::Compiled,
                 )
                 .unwrap()
             })

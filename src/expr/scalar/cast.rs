@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{ExpressionResultType, ScalarExprRef};
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CastMode {
     Strict,
@@ -29,7 +29,7 @@ pub struct CastExpression {
 impl CastExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         let input = self.input().build_suboperator(builder)?;
         builder.cast(input, self.target().clone(), self.mode())

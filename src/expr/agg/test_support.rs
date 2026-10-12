@@ -13,18 +13,18 @@
 // limitations under the License.
 
 use super::accumulator::Accumulator;
+use crate::arrow::{
+    array::{Array, ArrayRef, BooleanArray},
+    compute::filter_record_batch,
+    datatypes::DataType,
+    record_batch::RecordBatch,
+};
 use crate::expr::scalar::ScalarExpression;
 use crate::suboperator::test_support::select_true;
 use crate::suboperator::{ProgramContext, ProgramExecutionContext};
 use crate::{
     error::{Error, Result},
     expr::agg::{AggregateExpression, AggregateFunction},
-};
-use arrow::{
-    array::{Array, ArrayRef, BooleanArray},
-    compute::filter_record_batch,
-    datatypes::DataType,
-    record_batch::RecordBatch,
 };
 use std::{borrow::Cow, sync::Arc};
 
@@ -54,7 +54,7 @@ impl AccumulatorTestHarness {
                 _ => Ok(AggregateArgument::Program(Box::new((
                     ProgramContext::from_expressions(
                         std::slice::from_ref(argument),
-                        crate::suboperator::ExecutionMode::Native,
+                        crate::suboperator::ExecutionMode::Compiled,
                     )?,
                     ProgramExecutionContext::default(),
                 )))),
@@ -77,7 +77,7 @@ impl AccumulatorTestHarness {
                 Ok::<_, Error>((
                     ProgramContext::from_expressions(
                         std::slice::from_ref(e),
-                        crate::suboperator::ExecutionMode::Native,
+                        crate::suboperator::ExecutionMode::Compiled,
                     )?,
                     ProgramExecutionContext::default(),
                 ))
@@ -248,12 +248,12 @@ impl AccumulatorTestHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::ExpressionResultType;
-    use crate::expr::scalar::{ConstantExpression, ReferenceExpression};
-    use arrow::{
+    use crate::arrow::{
         array::Int64Array,
         datatypes::{Field, Schema},
     };
+    use crate::expr::ExpressionResultType;
+    use crate::expr::scalar::{ConstantExpression, ReferenceExpression};
 
     #[test]
     fn filtered_arguments_and_constants_follow_original_group_ids() {
@@ -388,8 +388,8 @@ mod tests {
 
     #[test]
     fn mixed_bound_and_computed_arguments_use_filtered_input() {
+        use crate::arrow::array::Float64Array;
         use crate::expr::scalar::{FunctionExpression, FunctionKind};
-        use arrow::array::Float64Array;
 
         let input = RecordBatch::try_new(
             Arc::new(Schema::new(vec![

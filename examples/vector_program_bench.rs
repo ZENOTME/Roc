@@ -47,23 +47,10 @@ fn main() -> Result<()> {
         let input: Vec<ArrayRef> = vec![Arc::new(Int64Array::from_iter(
             (0..batch_rows).map(|i| if i % 7 == 0 { None } else { Some(i as i64) }),
         ))];
-        let modes = {
-            #[cfg(feature = "jit")]
-            {
-                vec![
-                    ExecutionMode::Native,
-                    ExecutionMode::Compiled,
-                    ExecutionMode::Staged,
-                ]
-            }
-            #[cfg(not(feature = "jit"))]
-            {
-                vec![ExecutionMode::Native]
-            }
-        };
+        let modes = { vec![ExecutionMode::Compiled] };
         let reference = ProgramContext::from_expressions(
             &[expression(barrier)],
-            roc::suboperator::ExecutionMode::Native,
+            roc::suboperator::ExecutionMode::Compiled,
         )?;
         let expected =
             reference.execute(&input, batch_rows, &mut reference.new_execution_context())?;
@@ -77,8 +64,7 @@ fn main() -> Result<()> {
             assert_eq!(p.execute(&input, batch_rows, &mut local)?, expected);
             prepared.push((mode, p, local, prepare_ms, vec![]));
         }
-        // Rotate modes every round to avoid always measuring one mode at a
-        // different thermal/turbo state. Three whole-workload rounds warm up.
+        // Three whole-workload warmup rounds precede measurements.
         for round in 0..samples + 3 {
             for shift in 0..prepared.len() {
                 let index = (round + shift) % prepared.len();
@@ -97,7 +83,7 @@ fn main() -> Result<()> {
             println!(
                 "{},{mode:?},{prepare:.3},{:.3},{:.3},{:.3},{}",
                 if barrier {
-                    "native_division_boundary"
+                    "integer_division"
                 } else {
                     "arithmetic_chain"
                 },

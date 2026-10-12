@@ -14,6 +14,7 @@
 
 //! Projection operator descriptor.
 use super::Operator;
+use crate::arrow::datatypes::{Field, Schema, SchemaRef};
 use crate::expr::ExpressionResultType;
 use crate::expr::scalar::{ReferenceExpression, ScalarExprRef};
 use crate::{
@@ -21,7 +22,6 @@ use crate::{
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -55,7 +55,7 @@ pub struct Projection {
 impl Projection {
     pub fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> Result<()> {
         let columns = self
             .expressions

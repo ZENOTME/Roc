@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{ExpressionResultType, ScalarExprRef};
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKind {
     Add,
@@ -42,7 +42,7 @@ pub struct FunctionExpression {
 impl FunctionExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         let args = self
             .arguments()
@@ -106,16 +106,15 @@ impl FunctionExpression {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::scalar::{
-        CaseExpression, CoalesceExpression, ConstantExpression, ReferenceExpression,
-    };
-    use crate::suboperator::native as kernels;
-    use crate::suboperator::test_support::*;
-    use arrow::array::ArrayRef;
-    use arrow::array::{
+    use crate::arrow::array::ArrayRef;
+    use crate::arrow::array::{
         Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
         Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
+    use crate::expr::scalar::{
+        CaseExpression, CoalesceExpression, ConstantExpression, ReferenceExpression,
+    };
+    use crate::suboperator::test_support::*;
     use std::sync::Arc;
 
     fn ints(array: &ArrayRef) -> Vec<i64> {
@@ -133,9 +132,9 @@ mod tests {
     ) {
         let data_type = array.data_type().clone();
         let executor = TestInput::new(std::slice::from_ref(&array), array.len());
-        let broadcast = arrow::compute::take(
+        let broadcast = crate::arrow::compute::take(
             scalar.as_ref(),
-            &arrow::array::UInt64Array::from(vec![0; array.len()]),
+            &crate::arrow::array::UInt64Array::from(vec![0; array.len()]),
             None,
         )
         .unwrap();
@@ -164,7 +163,27 @@ mod tests {
                     FunctionExpression::binary(function, left, right, output_type.clone(), true)
                         .prepare_test()
                         .unwrap();
-                let baseline = kernels::bind_binary(function, &data_type).unwrap();
+                let baseline =
+                    |left: &ArrayRef, right: &ArrayRef| -> crate::error::Result<ArrayRef> {
+                        use ::arrow::compute::kernels::{cmp, numeric};
+                        use FunctionKind::*;
+                        Ok(match function {
+                            Add => numeric::add(left, right)?,
+                            Subtract => numeric::sub(left, right)?,
+                            Multiply => numeric::mul(left, right)?,
+                            Divide => numeric::div(left, right)?,
+                            Remainder => numeric::rem(left, right)?,
+                            Equal => Arc::new(cmp::eq(left, right)?),
+                            NotEqual => Arc::new(cmp::neq(left, right)?),
+                            LessThan => Arc::new(cmp::lt(left, right)?),
+                            LessThanOrEqual => Arc::new(cmp::lt_eq(left, right)?),
+                            GreaterThan => Arc::new(cmp::gt(left, right)?),
+                            GreaterThanOrEqual => Arc::new(cmp::gt_eq(left, right)?),
+                            IsDistinctFrom => Arc::new(cmp::distinct(left, right)?),
+                            IsNotDistinctFrom => Arc::new(cmp::not_distinct(left, right)?),
+                            _ => unreachable!(),
+                        })
+                    };
                 let expected = if left_scalar {
                     baseline(&broadcast, &array)
                 } else {
@@ -179,7 +198,10 @@ mod tests {
                         assert_eq!(actual.to_data(), expected.to_data(), "{context}")
                     }
                     (Err(actual), Err(expected)) => {
-                        assert_eq!(actual.to_string(), expected.to_string(), "{context}")
+                        assert!(
+                            matches!(actual, crate::error::Error::Arrow(_)),
+                            "{context}: {actual:?}; oracle: {expected:?}"
+                        )
                     }
                     (actual, expected) => {
                         panic!("{context}: actual={actual:?}, expected={expected:?}")

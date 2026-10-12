@@ -13,12 +13,12 @@
 // limitations under the License.
 
 use super::{SinkExec, SourceExec};
+use crate::arrow::record_batch::RecordBatch;
 use crate::{
     error::{Error, Result},
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
     operator::{ExchangeId, ExchangeSinkOperator, ExchangeSourceOperator},
 };
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::{FutureExt, future::BoxFuture};
 use std::sync::Arc;
@@ -95,7 +95,7 @@ impl ExchangeSinkExec {
 impl ExchangeSinkOperator {
     pub fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> Result<crate::suboperator::StateId> {
         let (exchanges, schema, service) = self.clone().into_parts();
         let state = builder.state(crate::suboperator::StateBuilder::new(move || {

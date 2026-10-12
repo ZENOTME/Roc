@@ -15,15 +15,15 @@
 pub(crate) mod group_index;
 
 use super::{SinkExec, SourceExec};
+use crate::arrow::datatypes::SchemaRef;
+use crate::arrow::{
+    array::ArrayRef,
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
 use crate::expr::agg::accumulator::Accumulator;
 use crate::{
     error::{Error, Result},
     operator::AggregateOperator,
-};
-use arrow::datatypes::SchemaRef;
-use arrow::{
-    array::ArrayRef,
-    record_batch::{RecordBatch, RecordBatchOptions},
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
@@ -77,6 +77,16 @@ impl AggregateMergeState {
                 .iter()
                 .map(|e| e.result_type().data_type().clone())
                 .collect::<Vec<_>>();
+            let types = match aggregate.function() {
+                crate::expr::agg::AggregateFunction::Sum => {
+                    vec![aggregate.result_type().data_type().clone(); types.len()]
+                }
+                crate::expr::agg::AggregateFunction::Avg
+                | crate::expr::agg::AggregateFunction::CovarPop => {
+                    vec![crate::arrow::datatypes::DataType::Float64; types.len()]
+                }
+                _ => types,
+            };
             let mut accumulator = Accumulator::new(
                 aggregate.function(),
                 aggregate.is_distinct(),
@@ -274,11 +284,11 @@ mod tests {
     }
     impl AggregateState {
         fn new(operator: &crate::operator::AggregateOperator) -> crate::error::Result<Self> {
-            let mut builder = crate::suboperator::SuboperatorBuilder::new();
+            let mut builder = crate::suboperator::SuboperatorScopeBuilder::new();
             let states = operator.build_suboperator(&mut builder)?;
             let program = builder
                 .finish(vec![])?
-                .compile(crate::suboperator::ExecutionMode::Native)?;
+                .compile(crate::suboperator::ExecutionMode::Compiled)?;
             let mut local = program.new_execution_context();
             program.initialize(&mut local)?;
             Ok(Self {
@@ -288,7 +298,10 @@ mod tests {
                 merged: super::AggregateMergeState::new(operator)?,
             })
         }
-        fn update(&mut self, batch: &arrow::record_batch::RecordBatch) -> crate::error::Result<()> {
+        fn update(
+            &mut self,
+            batch: &crate::arrow::record_batch::RecordBatch,
+        ) -> crate::error::Result<()> {
             self.program.execute_batch(batch, &mut self.local)?;
             Ok(())
         }
@@ -300,7 +313,7 @@ mod tests {
         fn merge(&mut self, partial: &super::PartialAggregate) -> crate::error::Result<()> {
             self.merged.merge(partial)
         }
-        fn finish(mut self) -> crate::error::Result<arrow::record_batch::RecordBatch> {
+        fn finish(mut self) -> crate::error::Result<crate::arrow::record_batch::RecordBatch> {
             let (groups, states) =
                 crate::suboperator::aggregation::partial(&mut self.local, &self.states)?;
             self.merged
@@ -310,6 +323,10 @@ mod tests {
     }
 
     use super::*;
+    use crate::arrow::{
+        array::{Array, Float64Array, Int64Array, StringArray},
+        datatypes::{DataType, Field, Schema, SchemaRef},
+    };
     use crate::{
         expr::ExpressionResultType,
         expr::scalar::ScalarExprRef,
@@ -318,10 +335,6 @@ mod tests {
             scalar::ReferenceExpression,
         },
         operator::Projection,
-    };
-    use arrow::{
-        array::{Array, Float64Array, Int64Array, StringArray},
-        datatypes::{DataType, Field, Schema, SchemaRef},
     };
 
     fn schema() -> SchemaRef {
@@ -381,6 +394,66 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn generated_global_reductions_handle_sliced_bitmaps_arbitrary_null_payloads_and_tails() {
+        use crate::arrow::buffer::NullBuffer;
+        use crate::expr::agg::AggregateFunction::{Count, Sum};
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let reference =
+            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
+                .into_ref();
+        let operator = AggregateOperator::try_new(
+            Projection::new(vec![]),
+            vec![
+                Arc::new(AggregateExpression::new(
+                    Sum,
+                    vec![reference.clone()],
+                    DataType::Int64,
+                    true,
+                )),
+                Arc::new(AggregateExpression::new(
+                    Count,
+                    vec![reference],
+                    DataType::Int64,
+                    false,
+                )),
+            ],
+        )
+        .unwrap();
+        for pattern in [0, 1, 2, 17] {
+            for offset in [0, 1, 7, 9] {
+                let values = (0..150)
+                    .map(|i| if i % 3 == 0 { i64::MAX } else { -(i as i64) })
+                    .collect::<Vec<_>>();
+                let valid = (0..150)
+                    .map(|i| pattern == 0 || (pattern != 1 && i % pattern != 0))
+                    .collect::<Vec<_>>();
+                let input = Int64Array::new(values.into(), Some(NullBuffer::from(valid)))
+                    .slice(offset, 140);
+                for len in [0, 1, 7, 8, 63, 64, 65, 127, 129] {
+                    let input = input.slice(0, len);
+                    let expected = input.iter().flatten().fold(0i64, i64::wrapping_add);
+                    let count = input.len() - input.null_count();
+                    let batch =
+                        RecordBatch::try_new(schema.clone(), vec![Arc::new(input)]).unwrap();
+                    let mut state = AggregateState::new(&operator).unwrap();
+                    let (_, guard) = asyncband::shutdown::new();
+                    state.program.run(&batch, &mut state.local, &guard).unwrap();
+                    // Repeated calls also exercise persisted state and wrapping merges.
+                    state.program.run(&batch, &mut state.local, &guard).unwrap();
+                    let out = state.finish().unwrap();
+                    let sum = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+                    let actual_count = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+                    assert_eq!(sum.is_null(0), count == 0);
+                    if count != 0 {
+                        assert_eq!(sum.value(0), expected.wrapping_mul(2));
+                    }
+                    assert_eq!(actual_count.value(0), 2 * count as i64);
+                }
+            }
+        }
     }
 
     #[test]
@@ -756,7 +829,7 @@ mod tests {
 
     #[test]
     fn integer_sum_stays_exact_and_wraps_on_update_and_partial_merge() {
-        use arrow::array::UInt64Array;
+        use crate::arrow::array::UInt64Array;
         for (array, expected) in [
             (
                 Arc::new(UInt64Array::from(vec![
@@ -908,39 +981,14 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_executor_defers_other_signature_checks_to_runtime() {
-        // Arity and argument types are host responsibilities now. COUNT simply
-        // ignores arguments beyond the first; SUM, AVG, and COVAR_POP build
-        // argument-independent state and reject a missing argument once values
-        // arrive, because their arity is not checked while constructing.
-        let count_two = AggregateExpression::new(
-            AggregateFunction::Count,
-            vec![value(), value()],
-            DataType::Int64,
-            false,
-        );
-        let operator = AggregateOperator::try_new(
-            groups(false),
-            vec![Arc::new(count_two.with_alias("count_two"))],
-        )
-        .unwrap();
-        let mut state = AggregateState::new(&operator).unwrap();
-        state
-            .update(&batch(vec![Some("a")], vec![None]))
-            .expect("extra COUNT arguments are accepted");
-        assert_eq!(
-            state
-                .finish()
-                .unwrap()
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(0),
-            0
-        );
-
+    fn aggregate_signatures_are_checked_before_code_generation() {
         for expr in [
+            AggregateExpression::new(
+                AggregateFunction::Count,
+                vec![value(), value()],
+                DataType::Int64,
+                false,
+            ),
             AggregateExpression::new(AggregateFunction::Sum, vec![], DataType::Float64, true),
             AggregateExpression::new(AggregateFunction::Avg, vec![], DataType::Float64, true),
             AggregateExpression::new(
@@ -949,23 +997,18 @@ mod tests {
                 DataType::Float64,
                 true,
             ),
+            AggregateExpression::new(AggregateFunction::Min, vec![value()], DataType::Utf8, true),
+            AggregateExpression::new(AggregateFunction::Count, vec![], DataType::Float64, false),
         ] {
-            let operator = AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(expr.with_alias("missing_argument"))],
-            )
-            .unwrap();
-            let mut state = AggregateState::new(&operator).unwrap();
-            assert!(
-                state
-                    .update(&batch(vec![Some("a")], vec![Some(1.)]))
-                    .is_err()
-            );
+            let operator = AggregateOperator::try_new(groups(false), vec![Arc::new(expr)]).unwrap();
+            assert!(matches!(
+                AggregateState::new(&operator),
+                Err(Error::InvalidPlan(_))
+            ));
         }
 
         use crate::expr::scalar::ConstantExpression;
-        // SUM does not validate that its argument is numeric: Arrow's safe cast
-        // turns an unparseable text value into NULL, and the row is skipped.
+        // SUM inserts a generated TRY cast; unparseable text becomes NULL.
         let operator = Arc::new(
             AggregateOperator::try_new(
                 groups(false),
@@ -1011,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sum_result_type_is_an_execution_error() {
+    fn unsupported_sum_result_type_is_rejected_before_codegen() {
         // The host declares the SUM result type; an unusable one must not panic.
         let operator = Arc::new(
             AggregateOperator::try_new(
@@ -1028,10 +1071,9 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut state = AggregateState::new(&operator).unwrap();
         assert!(matches!(
-            state.update(&batch(vec![Some("a")], vec![Some(1.)])),
-            Err(Error::Execution(_))
+            AggregateState::new(&operator),
+            Err(Error::InvalidPlan(_))
         ));
     }
 

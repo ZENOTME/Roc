@@ -125,7 +125,7 @@ fn host_operator_builds_a_dependency_without_core_dispatch() {
     let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
     let graph = build_pipeline_graph(
         OperatorTree::new(sink),
-        roc::suboperator::ExecutionMode::Native,
+        roc::suboperator::ExecutionMode::Compiled,
     )
     .unwrap();
     assert_eq!(graph.len(), 2);
@@ -145,7 +145,7 @@ fn two_input_operator_chooses_both_child_pipelines() {
     let sink = OperatorTreeNode::new(CustomSink, vec![tree]);
     let graph = build_pipeline_graph(
         OperatorTree::new(sink),
-        roc::suboperator::ExecutionMode::Native,
+        roc::suboperator::ExecutionMode::Compiled,
     )
     .unwrap();
     assert_eq!(graph.len(), 3);
@@ -176,7 +176,7 @@ fn invalid_project_reports_operator_and_reason() {
 
         let error = build_pipeline_graph(
             OperatorTree::new(sink),
-            roc::suboperator::ExecutionMode::Native,
+            roc::suboperator::ExecutionMode::Compiled,
         )
         .unwrap_err();
         let Error::InvalidPlan(message) = error else {

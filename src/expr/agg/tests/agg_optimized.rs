@@ -3,15 +3,15 @@
 
 use std::sync::Arc;
 
+use crate::arrow::{
+    array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use crate::expr::{
     ExpressionResultType,
     agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
     scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression},
-};
-use arrow::{
-    array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array},
-    datatypes::{DataType, Field, Schema},
-    record_batch::RecordBatch,
 };
 
 fn batch(array: ArrayRef) -> RecordBatch {
@@ -330,7 +330,7 @@ fn public_grouped_update_still_rejects_invalid_ids() {
 
 #[test]
 fn grouped_count_and_sum_cross_bitmap_words_without_reading_null_payloads() {
-    use arrow::buffer::NullBuffer;
+    use crate::arrow::buffer::NullBuffer;
 
     let values = (0..151).map(|index| index as i64 - 70).collect::<Vec<_>>();
     let valid = (0..151).map(|index| index % 7 != 0).collect::<Vec<_>>();
@@ -399,7 +399,7 @@ fn assert_float_aggregate_state_eq(
 
 #[test]
 fn global_float_sum_keeps_first_negative_zero_and_ignores_null_payloads() {
-    use arrow::buffer::NullBuffer;
+    use crate::arrow::buffer::NullBuffer;
 
     let expr = expression(AggregateFunction::Sum, DataType::Float64, DataType::Float64);
     let mut single = executor(expr.clone());

@@ -26,7 +26,7 @@ impl TestProgram {
     pub fn try_new(expression: ScalarExprRef) -> Result<Self> {
         Ok(Self(ProgramContext::from_expressions(
             &[expression],
-            crate::suboperator::ExecutionMode::Native,
+            crate::suboperator::ExecutionMode::Compiled,
         )?))
     }
     pub fn evaluate(&self, input: &TestInput) -> Result<ArrayRef> {

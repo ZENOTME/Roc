@@ -20,3 +20,26 @@ pub mod pipeline;
 pub mod suboperator;
 
 pub use asyncband::shutdown::Shutdown;
+
+// Arrow is the interchange format only. Execution uses Roc's generated code.
+pub(crate) mod arrow {
+    pub mod array {
+        pub use arrow_array::builder::*;
+        pub use arrow_array::cast::AsArray;
+        pub use arrow_array::*;
+    }
+    #[cfg(test)]
+    pub use ::arrow::buffer;
+    pub mod datatypes {
+        pub use arrow_array::types::*;
+        pub use arrow_schema::*;
+    }
+    pub mod record_batch {
+        pub use arrow_array::{RecordBatch, RecordBatchOptions};
+    }
+    pub mod error {
+        pub use arrow_schema::ArrowError;
+    }
+    #[cfg(test)]
+    pub use ::arrow::compute;
+}

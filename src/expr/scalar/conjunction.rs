@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{ExpressionResultType, ScalarExprRef};
-use arrow::datatypes::DataType;
+use crate::arrow::datatypes::DataType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Conjunction {
     And,
@@ -28,7 +28,7 @@ pub struct ConjunctionExpression {
 impl ConjunctionExpression {
     pub(crate) fn build_suboperator(
         &self,
-        builder: &mut crate::suboperator::SuboperatorBuilder,
+        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
     ) -> crate::error::Result<crate::suboperator::VariableId> {
         let inputs = self
             .arguments()

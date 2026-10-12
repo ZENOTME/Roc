@@ -1,0 +1,79 @@
+    Updating crates.io index
+    Blocking waiting for file lock on package cache
+     Locking 1 package to latest Rust 1.95.0 compatible version
+ Downgrading arrow v59.3.0 -> v59.2.0 (available: v59.3.0)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.26
+   Compiling quote v1.0.47
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling zerocopy v0.8.59
+   Compiling cfg-if v1.0.5
+   Compiling libc v0.2.189
+   Compiling getrandom v0.3.4
+   Compiling version_check v0.9.5
+   Compiling bytes v1.12.1
+   Compiling core-foundation-sys v0.8.7
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling arrow-schema v59.3.0
+   Compiling hashbrown v0.17.1
+   Compiling lexical-util v1.0.7
+   Compiling iana-time-zone v0.1.65
+   Compiling ahash v0.8.12
+   Compiling num-traits v0.2.19
+   Compiling regex-syntax v0.8.11
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling aho-corasick v1.1.5
+   Compiling futures-sink v0.3.34
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.34
+   Compiling lexical-parse-float v1.0.6
+   Compiling lexical-write-float v1.0.6
+   Compiling futures-channel v0.3.34
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling lexical-core v1.0.6
+   Compiling ryu v1.0.23
+   Compiling serde_core v1.0.229
+   Compiling thiserror v2.0.21
+   Compiling zmij v1.0.23
+   Compiling base64 v0.23.1
+   Compiling regex-automata v0.4.18
+   Compiling serde_json v1.0.151
+   Compiling syn v2.0.119
+   Compiling syn v3.0.6
+   Compiling itoa v1.0.18
+   Compiling asyncband v0.7.3
+   Compiling foldhash v0.2.0
+   Compiling regex v1.13.1
+   Compiling tokio v1.53.1
+   Compiling num-integer v0.1.47
+   Compiling zerocopy-derive v0.8.59
+   Compiling chrono v0.4.45
+   Compiling num-bigint v0.5.1
+   Compiling num-complex v0.4.6
+   Compiling atoi v2.0.0
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.21
+   Compiling futures-util v0.3.34
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling half v2.7.1
+   Compiling arrow-buffer v59.3.0
+   Compiling arrow-data v59.3.0
+   Compiling arrow-array v59.3.0
+   Compiling arrow-select v59.3.0
+   Compiling arrow-arith v59.3.0
+   Compiling arrow-row v59.3.0
+   Compiling arrow-ord v59.3.0
+   Compiling arrow-string v59.3.0
+   Compiling arrow-cast v59.3.0
+   Compiling arrow v59.2.0
+   Compiling roc v0.1.0 (/Users/dongzejiong/Project/Roc/target/main-compare-optimized-20261012/main/source)
+   Compiling roc-main-compare v0.1.0 (/Users/dongzejiong/Project/Roc/target/main-compare-optimized-20261012/main/harness)
+    Finished `release` profile [optimized] target(s) in 30.35s

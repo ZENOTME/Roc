@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use super::SourceExec;
+use crate::arrow::record_batch::RecordBatch;
 use crate::{
     error::{Error, Result},
     operator::{ScanConsumer, ScanHandle, ScanOperator, ScanRequest},
 };
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use std::{future::Future, sync::Arc, task::Poll};

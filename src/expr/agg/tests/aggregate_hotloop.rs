@@ -1,16 +1,16 @@
 // Copyright 2026 The Roc Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::expr::{
-    ExpressionResultType,
-    agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
-    scalar::ReferenceExpression,
-};
-use arrow::{
+use crate::arrow::{
     array::{Array, ArrayRef, Float64Array, Int64Array},
     buffer::NullBuffer,
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
+};
+use crate::expr::{
+    ExpressionResultType,
+    agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
+    scalar::ReferenceExpression,
 };
 use std::sync::Arc;
 

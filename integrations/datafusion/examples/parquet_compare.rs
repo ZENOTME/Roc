@@ -468,7 +468,7 @@ struct CollectSink {
 impl CollectSink {
     fn build(
         output: Arc<Mutex<Vec<RecordBatch>>>,
-        builder: &mut roc::suboperator::SuboperatorBuilder,
+        builder: &mut roc::suboperator::SuboperatorScopeBuilder,
     ) -> RocResult<Self> {
         let state = builder.state(roc::suboperator::StateBuilder::new(|| {
             Ok(Vec::<RecordBatch>::new())
@@ -506,7 +506,7 @@ async fn run_roc(tree: &OperatorTreeNode, parallelism: usize) -> Result<(f64, Ve
     let sink = CollectSink::build(output.clone(), &mut pipeline.suboperators)?;
     pipeline.set_sink(Box::new(sink))?;
     let executor =
-        PipelineGraphExecutor::new(graph.finish(roc::suboperator::ExecutionMode::Native)?)
+        PipelineGraphExecutor::new(graph.finish(roc::suboperator::ExecutionMode::Compiled)?)
             .with_task_executor(TokioExecutor(tokio::runtime::Handle::current()))
             .with_parallelism(parallelism)
             .with_config(PipelineExecutionConfig {

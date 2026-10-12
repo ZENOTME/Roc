@@ -2,7 +2,6 @@ use arrow::{
     array::{Array, ArrayRef, AsArray, Int64Array, StringArray},
     datatypes::DataType,
 };
-#[cfg(feature = "jit")]
 use arrow::{
     array::{Float64Array, Int32Array},
     buffer::{NullBuffer, ScalarBuffer},
@@ -22,9 +21,9 @@ fn binary(kind: FunctionKind, a: ScalarExprRef, b: ScalarExprRef, ty: DataType) 
 }
 #[test]
 fn dense_ids_reject_foreign_variables_and_share_common_dependencies() {
-    let mut a = SuboperatorBuilder::new();
+    let mut a = SuboperatorScopeBuilder::new();
     let x = a.input(0, ExpressionResultType::new(DataType::Int64, true));
-    let mut b = SuboperatorBuilder::new();
+    let mut b = SuboperatorScopeBuilder::new();
     let y = b.input(0, ExpressionResultType::new(DataType::Int64, true));
     assert_eq!(x.index(), y.index());
     assert!(matches!(
@@ -39,7 +38,7 @@ fn dense_ids_reject_foreign_variables_and_share_common_dependencies() {
     );
     let p = ProgramContext::from_expressions(
         &[sum.clone(), sum],
-        roc::suboperator::ExecutionMode::Native,
+        roc::suboperator::ExecutionMode::Compiled,
     )
     .unwrap();
     // Constant is a bound state parameter, not a broadcast temporary.
@@ -55,7 +54,7 @@ fn dense_ids_reject_foreign_variables_and_share_common_dependencies() {
 }
 #[test]
 fn empty_expression_list_exports_no_columns() {
-    let program = ProgramContext::from_expressions(&[], ExecutionMode::Native).unwrap();
+    let program = ProgramContext::from_expressions(&[], ExecutionMode::Compiled).unwrap();
     let columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(vec![1, 2, 3]))];
     assert!(
         program
@@ -67,38 +66,128 @@ fn empty_expression_list_exports_no_columns() {
 #[test]
 fn arrow_buffers_keep_slices_children_and_owners() {
     let a: ArrayRef = Arc::new(StringArray::from(vec![Some("before"), None, Some("after")]));
-    let buffer = ColumnBuffer::from_arrow(a.clone()).slice(1, 2).unwrap();
+    let p =
+        ProgramContext::from_expressions(&[reference(0, DataType::Utf8)], ExecutionMode::Compiled)
+            .unwrap();
+    let buffer = p
+        .execute(&[a.slice(1, 2)], 2, &mut p.new_execution_context())
+        .unwrap()
+        .remove(0);
     drop(a);
     assert_eq!(
-        buffer
-            .as_arrow()
-            .as_string::<i32>()
-            .iter()
-            .collect::<Vec<_>>(),
+        buffer.as_string::<i32>().iter().collect::<Vec<_>>(),
         vec![None, Some("after")]
     );
-    assert!(buffer.slice(2, 1).is_err());
 }
-#[cfg(feature = "jit")]
+// Independent test oracle: one Arrow scalar per row, with lazy branches.
+fn oracle(expr: &ScalarExprRef, columns: &[ArrayRef], row: usize) -> roc::error::Result<ArrayRef> {
+    use ScalarExpression::*;
+    use arrow::{
+        array::{BooleanArray, new_null_array},
+        compute::{
+            self,
+            kernels::{cmp, numeric},
+        },
+    };
+    Ok(match expr.as_ref() {
+        Reference(e) => columns[e.index()].slice(row, 1),
+        Constant(e) => e.value().clone(),
+        Function(e) => {
+            use FunctionKind::*;
+            let args = e
+                .arguments()
+                .iter()
+                .map(|a| oracle(a, columns, row))
+                .collect::<roc::error::Result<Vec<_>>>()?;
+            let a = &args[0];
+            let b = args.get(1).unwrap_or(a);
+            match e.function() {
+                Add => numeric::add(a, b)?,
+                Subtract => numeric::sub(a, b)?,
+                Multiply => numeric::mul(a, b)?,
+                Divide => numeric::div(a, b)?,
+                Remainder => numeric::rem(a, b)?,
+                Negate => numeric::neg(a.as_ref())?,
+                IsNull => Arc::new(compute::is_null(a.as_ref())?),
+                IsNotNull => Arc::new(compute::is_not_null(a.as_ref())?),
+                Equal => Arc::new(cmp::eq(a, b)?),
+                NotEqual => Arc::new(cmp::neq(a, b)?),
+                LessThan => Arc::new(cmp::lt(a, b)?),
+                LessThanOrEqual => Arc::new(cmp::lt_eq(a, b)?),
+                GreaterThan => Arc::new(cmp::gt(a, b)?),
+                GreaterThanOrEqual => Arc::new(cmp::gt_eq(a, b)?),
+                IsDistinctFrom => Arc::new(cmp::distinct(a, b)?),
+                IsNotDistinctFrom => Arc::new(cmp::not_distinct(a, b)?),
+            }
+        }
+        Cast(e) => compute::cast_with_options(
+            oracle(e.input(), columns, row)?.as_ref(),
+            e.target(),
+            &compute::CastOptions {
+                safe: e.mode() == CastMode::Try,
+                ..Default::default()
+            },
+        )?,
+        Not(e) => Arc::new(compute::not(oracle(e.input(), columns, row)?.as_boolean())?),
+        Conjunction(e) => {
+            let and = e.conjunction() == self::Conjunction::And;
+            let mut out = BooleanArray::from(vec![and]);
+            for arg in e.arguments() {
+                let a = oracle(arg, columns, row)?;
+                out = if and {
+                    compute::and_kleene(&out, a.as_boolean())?
+                } else {
+                    compute::or_kleene(&out, a.as_boolean())?
+                };
+            }
+            Arc::new(out)
+        }
+        Case(e) => {
+            for (cond, value) in e.branches() {
+                let c = oracle(cond, columns, row)?;
+                let c = c.as_boolean();
+                if c.is_valid(0) && c.value(0) {
+                    return oracle(value, columns, row);
+                }
+            }
+            oracle(e.else_expr(), columns, row)?
+        }
+        Coalesce(e) => {
+            for arg in e.arguments() {
+                let a = oracle(arg, columns, row)?;
+                if a.is_valid(0) {
+                    return Ok(a);
+                }
+            }
+            new_null_array(e.result_type().data_type(), 1)
+        }
+    })
+}
 fn compare_compiled(expr: ScalarExprRef, columns: &[ArrayRef], rows: usize, compiled: bool) {
-    let native = ProgramContext::from_expressions(
-        std::slice::from_ref(&expr),
-        roc::suboperator::ExecutionMode::Native,
-    )
-    .unwrap();
-    let expected = native.execute(columns, rows, &mut native.new_execution_context());
+    let expected = (|| {
+        let values = (0..rows)
+            .map(|row| oracle(&expr, columns, row))
+            .collect::<roc::error::Result<Vec<_>>>()?;
+        Ok::<_, Error>(if rows == 0 {
+            arrow::array::new_empty_array(expr.result_type().data_type())
+        } else {
+            arrow::compute::concat(&values.iter().map(|a| a.as_ref()).collect::<Vec<_>>())?
+        })
+    })();
     let jit = ProgramContext::from_expressions(&[expr], ExecutionMode::Compiled).unwrap();
     assert_eq!(jit.is_compiled(), compiled);
-    let actual = jit.execute(columns, rows, &mut jit.new_execution_context());
+    let actual = jit
+        .execute(columns, rows, &mut jit.new_execution_context())
+        .map(|mut v| v.remove(0));
     match (expected, actual) {
-        (Ok(a), Ok(b)) => assert_eq!(a, b),
+        (Ok(a), Ok(b)) => assert_eq!(a.as_ref(), b.as_ref()),
         (Err(Error::Arrow(_)), Err(Error::Arrow(_))) => {}
-        (a, b) => panic!("native={a:?}, compiled={b:?}"),
+        (a, b) => panic!("oracle={a:?}, compiled={b:?}"),
     }
 }
-#[cfg(feature = "jit")]
+
 #[test]
-fn compiled_loop_matches_native_with_nulls_offsets_overflow_and_multiple_outputs() {
+fn compiled_loop_matches_arrow_with_nulls_offsets_overflow_and_multiple_outputs() {
     let values = Int64Array::new(
         ScalarBuffer::from(vec![99, i64::MAX, 7, -3, 0, 123]),
         Some(NullBuffer::from(vec![true, false, true, true, true, true])),
@@ -194,9 +283,8 @@ fn compiled_loop_matches_native_with_nulls_offsets_overflow_and_multiple_outputs
         }
     });
 }
-#[cfg(feature = "jit")]
 #[test]
-fn compiled_float_and_explicit_native_boundaries() {
+fn compiled_float_and_lazy_case_share_the_generated_backend() {
     let cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![
         Some(1.5),
         None,
@@ -252,7 +340,6 @@ fn compiled_float_and_explicit_native_boundaries() {
     compare_compiled(ConstantExpression::boolean(None).into_ref(), &[], 3, true);
 }
 
-#[cfg(feature = "jit")]
 #[test]
 fn compiled_signed_boundaries_and_float_total_comparison() {
     for (kind, left, right) in [
@@ -310,7 +397,6 @@ fn compiled_signed_boundaries_and_float_total_comparison() {
     );
 }
 
-#[cfg(feature = "jit")]
 #[test]
 fn compiled_primitive_widths_overflow_unsigned_order_and_null_safe_comparisons() {
     use arrow::array::*;
@@ -385,7 +471,6 @@ fn compiled_primitive_widths_overflow_unsigned_order_and_null_safe_comparisons()
     );
 }
 
-#[cfg(feature = "jit")]
 #[test]
 fn compiled_boolean_kleene_tables_and_sliced_bitmaps() {
     use arrow::array::BooleanArray;
@@ -442,9 +527,8 @@ fn compiled_boolean_kleene_tables_and_sliced_bitmaps() {
     }
 }
 
-#[cfg(feature = "jit")]
 #[test]
-fn staged_partition_and_native_barriers_preserve_values() {
+fn division_and_arithmetic_share_one_generated_loop() {
     let mut expr = reference(0, DataType::Int64);
     for _ in 0..10 {
         expr = binary(
@@ -473,16 +557,13 @@ fn staged_partition_and_native_barriers_preserve_values() {
     let columns: Vec<ArrayRef> = vec![Arc::new(Int64Array::from(vec![Some(10), None, Some(-10)]))];
     let program = ProgramContext::from_expressions(
         std::slice::from_ref(&expr),
-        roc::suboperator::ExecutionMode::Native,
+        roc::suboperator::ExecutionMode::Compiled,
     )
     .unwrap();
     let mut local = program.new_execution_context();
     let expected = program.execute(&columns, 3, &mut local).unwrap();
-    for (mode, count) in [
-        (ExecutionMode::Compiled, 2),
-        (ExecutionMode::Staged, 5),
-        (ExecutionMode::Native, 0),
-    ] {
+    {
+        let (mode, count) = (ExecutionMode::Compiled, 1);
         let program = ProgramContext::from_expressions(std::slice::from_ref(&expr), mode).unwrap();
         assert_eq!(
             program.compiled_program_count(),
@@ -494,7 +575,6 @@ fn staged_partition_and_native_barriers_preserve_values() {
     }
 }
 
-#[cfg(feature = "jit")]
 #[test]
 fn independent_source_columns_do_not_split_fusion() {
     let left = binary(
@@ -511,7 +591,7 @@ fn independent_source_columns_do_not_split_fusion() {
     );
     let expr = binary(FunctionKind::Multiply, left, right, DataType::Int64);
     let program =
-        ProgramContext::from_expressions(std::slice::from_ref(&expr), ExecutionMode::Native)
+        ProgramContext::from_expressions(std::slice::from_ref(&expr), ExecutionMode::Compiled)
             .unwrap();
     let input: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(vec![Some(3), None])),

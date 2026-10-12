@@ -142,9 +142,9 @@ fn runs_pipeline_tasks_and_waits_for_dependencies_to_finalize() {
                     prior_finishes: finishes.clone(),
                     required_finishes,
                 }),
-                roc::suboperator::SuboperatorBuilder::new(),
+                roc::suboperator::SuboperatorScopeBuilder::new(),
                 Box::new(CountingSink(finishes.clone())),
-                roc::suboperator::ExecutionMode::Native,
+                roc::suboperator::ExecutionMode::Compiled,
             )
             .unwrap()
         })
@@ -169,9 +169,9 @@ fn caller_can_cancel_execution_without_a_tokio_runtime() {
         vec![
             Pipeline::new(
                 Box::new(WaitForCancelSource(started)),
-                roc::suboperator::SuboperatorBuilder::new(),
+                roc::suboperator::SuboperatorScopeBuilder::new(),
                 Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
-                roc::suboperator::ExecutionMode::Native,
+                roc::suboperator::ExecutionMode::Compiled,
             )
             .unwrap(),
         ],
@@ -196,9 +196,9 @@ fn source_failure_does_not_combine_or_request_shutdown() {
     let finishes = Arc::new(AtomicUsize::new(0));
     let pipeline = Pipeline::new(
         Box::new(FailingSource),
-        roc::suboperator::SuboperatorBuilder::new(),
+        roc::suboperator::SuboperatorScopeBuilder::new(),
         Box::new(CountingSink(finishes.clone())),
-        roc::suboperator::ExecutionMode::Native,
+        roc::suboperator::ExecutionMode::Compiled,
     )
     .unwrap();
     let (shutdown, guard) = asyncband::shutdown::new();
@@ -219,16 +219,16 @@ fn graph_failure_leaves_other_pipelines_for_caller_to_cancel() {
     let pipelines = vec![
         Pipeline::new(
             Box::new(FailingSource),
-            roc::suboperator::SuboperatorBuilder::new(),
+            roc::suboperator::SuboperatorScopeBuilder::new(),
             Box::new(CountingSink(finishes.clone())),
-            roc::suboperator::ExecutionMode::Native,
+            roc::suboperator::ExecutionMode::Compiled,
         )
         .unwrap(),
         Pipeline::new(
             Box::new(WaitForCancelSource(started)),
-            roc::suboperator::SuboperatorBuilder::new(),
+            roc::suboperator::SuboperatorScopeBuilder::new(),
             Box::new(CountingSink(finishes.clone())),
-            roc::suboperator::ExecutionMode::Native,
+            roc::suboperator::ExecutionMode::Compiled,
         )
         .unwrap(),
     ];
@@ -256,9 +256,9 @@ fn dropping_graph_execution_does_not_request_shutdown() {
         vec![
             Pipeline::new(
                 Box::new(WaitForCancelSource(started)),
-                roc::suboperator::SuboperatorBuilder::new(),
+                roc::suboperator::SuboperatorScopeBuilder::new(),
                 Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
-                roc::suboperator::ExecutionMode::Native,
+                roc::suboperator::ExecutionMode::Compiled,
             )
             .unwrap(),
         ],
