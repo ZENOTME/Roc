@@ -19,6 +19,9 @@ pub mod operator;
 pub mod pipeline;
 pub mod suboperator;
 
+// Type-checked design draft for editor navigation; not part of the public API.
+mod new_design;
+
 pub use asyncband::shutdown::Shutdown;
 
 // Arrow is the interchange format only. Execution uses Roc's generated code.
