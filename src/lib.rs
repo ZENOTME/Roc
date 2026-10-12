@@ -17,5 +17,6 @@ pub mod exec;
 pub mod expr;
 pub mod operator;
 pub mod pipeline;
+pub mod suboperator;
 
 pub use asyncband::shutdown::Shutdown;

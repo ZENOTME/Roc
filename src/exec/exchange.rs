@@ -12,85 +12,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
+use super::{SinkExec, SourceExec};
 use crate::{
     error::{Error, Result},
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
     operator::{ExchangeId, ExchangeSinkOperator, ExchangeSourceOperator},
 };
-use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::{FutureExt, future::BoxFuture};
 use std::sync::Arc;
 
 pub struct ExchangeSinkExec {
-    exchanges: Vec<ExchangeId>,
-    service: Arc<dyn ExchangeService>,
-    schema: SchemaRef,
+    state: crate::suboperator::StateId,
 }
-
 pub struct ExchangeSourceExec {
     exchange: ExchangeId,
     service: Arc<dyn ExchangeService>,
+    handle: Option<Arc<dyn ExchangeHandle>>,
+    consumer: Option<Box<dyn ExchangeConsumer>>,
 }
 
 impl ExchangeSourceExec {
     pub fn new(operator: ExchangeSourceOperator) -> Self {
         let (exchange, service) = operator.into_parts();
-        Self { exchange, service }
+        Self {
+            exchange,
+            service,
+            handle: None,
+            consumer: None,
+        }
     }
 }
 
 impl SourceExec for ExchangeSourceExec {
-    fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        let handle = self.service.start_input(self.exchange, shutdown_guard)?;
-        Ok(Arc::new(ExchangeSourceGlobalContext { handle }))
+    fn start(&mut self, guard: &ShutdownGuard) -> Result<()> {
+        if self.handle.is_some() {
+            return Err(Error::Execution("exchange source already started".into()));
+        }
+        let handle = self.service.start_input(self.exchange, guard)?;
+        self.consumer = Some(handle.consumer());
+        self.handle = Some(handle);
+        Ok(())
     }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        let global = global
-            .downcast::<ExchangeSourceGlobalContext>()
-            .map_err(|_| {
-                Error::Execution("exchange source received an invalid global context".into())
-            })?;
-        Ok(Box::new(ExchangeSourceExecutor {
-            consumer: global.handle.consumer(),
-            _global: global,
-        }))
-    }
-
-    fn finalize<'a>(
-        &'a self,
-        global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
+    fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let global = global
-                .downcast::<ExchangeSourceGlobalContext>()
-                .map_err(|_| {
-                    Error::Execution("exchange source received an invalid global context".into())
-                })?;
-            global.handle.finish().await
+            self.consumer.take();
+            if let Some(handle) = self.handle.take() {
+                handle.finish().await?;
+            }
+            Ok(())
         })
     }
-}
-
-struct ExchangeSourceGlobalContext {
-    handle: Arc<dyn ExchangeHandle>,
-}
-
-struct ExchangeSourceExecutor {
-    consumer: Box<dyn ExchangeConsumer>,
-    _global: Arc<ExchangeSourceGlobalContext>,
-}
-
-impl SourceExecutor for ExchangeSourceExecutor {
     fn next_batch<'a>(
         &'a mut self,
         shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             let cancelled = shutdown_guard.shutdown_requested().fuse();
-            let next = self.consumer.next().fuse();
+            let next = self
+                .consumer
+                .as_mut()
+                .ok_or_else(|| Error::Execution("exchange source is not started".into()))?
+                .next()
+                .fuse();
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
                 _ = cancelled => {
@@ -103,65 +88,58 @@ impl SourceExecutor for ExchangeSourceExecutor {
 }
 
 impl ExchangeSinkExec {
-    pub fn new(operator: ExchangeSinkOperator) -> Self {
-        let (exchanges, schema, service) = operator.into_parts();
-        Self {
-            exchanges,
-            schema,
-            service,
-        }
+    pub fn new(state: crate::suboperator::StateId) -> Self {
+        Self { state }
     }
 }
-
-impl SinkExec for ExchangeSinkExec {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        global.downcast::<()>().map_err(|_| {
-            Error::Execution("exchange sink received an invalid global context".into())
+impl ExchangeSinkOperator {
+    pub fn build_suboperator(
+        &self,
+        builder: &mut crate::suboperator::SuboperatorBuilder,
+    ) -> Result<crate::suboperator::StateId> {
+        let (exchanges, schema, service) = self.clone().into_parts();
+        let state = builder.state(crate::suboperator::StateBuilder::new(move || {
+            let outputs = exchanges
+                .iter()
+                .map(|id| service.create_sink(*id, &schema))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(ExchangeLocalState {
+                outputs,
+                pending: vec![],
+            })
+        }));
+        builder.batch_update(state, |state, batch| {
+            state
+                .get_mut::<ExchangeLocalState>()?
+                .pending
+                .push(batch.clone());
+            Ok(crate::suboperator::ProgramControl::Continue)
         })?;
-        let outputs = self
-            .exchanges
-            .iter()
-            .map(|exchange| self.service.create_sink(*exchange, &self.schema))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Box::new(ExchangeSinkExecutor { outputs }))
+        Ok(state)
     }
-
-    fn finalize<'a>(
-        &'a self,
-        global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
+}
+impl SinkExec for ExchangeSinkExec {
+    fn flush<'a>(
+        &'a mut self,
+        local: &'a mut crate::suboperator::ProgramExecutionContext,
+        guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            global.downcast::<()>().map_err(|_| {
-                Error::Execution("exchange sink received an invalid global context".into())
-            })?;
+            let state = local
+                .state_mut(self.state)?
+                .get_mut::<ExchangeLocalState>()?;
+            for batch in state.pending.drain(..) {
+                for output in &mut state.outputs {
+                    output.send(&batch, guard).await?;
+                }
+            }
             Ok(())
         })
     }
 }
 
-struct ExchangeSinkExecutor {
+/// Data only: one queue and transport set per exclusive Program instance.
+struct ExchangeLocalState {
+    pending: Vec<RecordBatch>,
     outputs: Vec<Box<dyn ExchangeSink>>,
-}
-
-impl SinkExecutor for ExchangeSinkExecutor {
-    fn sink<'a>(
-        &'a mut self,
-        shutdown_guard: &'a ShutdownGuard,
-        input: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
-        Box::pin(async move {
-            for output in &mut self.outputs {
-                output.send(input, shutdown_guard).await?;
-            }
-            Ok(SinkResult::NeedMoreInput)
-        })
-    }
-
-    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
 }

@@ -17,7 +17,8 @@ use super::FunctionKind;
 use crate::error::{Error, Result};
 use arrow::{
     array::{
-        Array, ArrayRef, ArrowNativeTypeOp, BooleanArray, Datum, PrimitiveArray, new_empty_array,
+        Array, ArrayRef, ArrowNativeTypeOp, BooleanArray, Datum, PrimitiveArray, Scalar,
+        new_empty_array,
     },
     buffer::{BooleanBuffer, NullBuffer},
     compute::{binary, is_not_null, is_null, kernels::cmp, try_binary},
@@ -29,10 +30,10 @@ use arrow::{
 };
 use std::sync::Arc;
 
-pub(super) type UnaryEvalFn = fn(&ArrayRef) -> Result<ArrayRef>;
-pub(super) type BinaryEvalFn = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>;
+pub(crate) type UnaryEvalFn = fn(&ArrayRef) -> Result<ArrayRef>;
+pub(crate) type BinaryEvalFn = fn(&ArrayRef, &ArrayRef) -> Result<ArrayRef>;
 
-pub(super) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<UnaryEvalFn> {
+pub(crate) fn bind_unary(function: FunctionKind, data_type: &DataType) -> Result<UnaryEvalFn> {
     use FunctionKind::*;
     Ok(match function {
         IsNull => |value| Ok(Arc::new(is_null(value.as_ref())?)),
@@ -64,7 +65,7 @@ fn negate<T: ArrowPrimitiveType, const FLOAT: bool>(value: &ArrayRef) -> Result<
     Ok(Arc::new(output))
 }
 
-pub(super) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Result<BinaryEvalFn> {
+pub(crate) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Result<BinaryEvalFn> {
     use FunctionKind::*;
     match function {
         Add => bind_arithmetic::<AddOp>(data_type),
@@ -80,6 +81,41 @@ pub(super) fn bind_binary(function: FunctionKind, data_type: &DataType) -> Resul
         GreaterThanOrEqual => bind_comparison::<GreaterEqualOp>(data_type),
         IsDistinctFrom => bind_comparison::<DistinctOp>(data_type),
         IsNotDistinctFrom => bind_comparison::<NotDistinctOp>(data_type),
+        _ => Err(Error::InvalidPlan(format!("{function:?} is not binary"))),
+    }
+}
+
+pub(crate) fn bind_binary_scalar(
+    function: FunctionKind,
+    data_type: &DataType,
+    left_scalar: bool,
+) -> Result<BinaryEvalFn> {
+    if left_scalar {
+        bind_scalar::<true>(function, data_type)
+    } else {
+        bind_scalar::<false>(function, data_type)
+    }
+}
+
+fn bind_scalar<const LEFT: bool>(
+    function: FunctionKind,
+    data_type: &DataType,
+) -> Result<BinaryEvalFn> {
+    use FunctionKind::*;
+    match function {
+        Add => bind_scalar_arithmetic::<AddOp, LEFT>(data_type),
+        Subtract => bind_scalar_arithmetic::<SubtractOp, LEFT>(data_type),
+        Multiply => bind_scalar_arithmetic::<MultiplyOp, LEFT>(data_type),
+        Divide => bind_scalar_arithmetic::<DivideOp, LEFT>(data_type),
+        Remainder => bind_scalar_arithmetic::<RemainderOp, LEFT>(data_type),
+        Equal => bind_scalar_comparison::<EqualOp, LEFT>(data_type),
+        NotEqual => bind_scalar_comparison::<NotEqualOp, LEFT>(data_type),
+        LessThan => bind_scalar_comparison::<LessOp, LEFT>(data_type),
+        LessThanOrEqual => bind_scalar_comparison::<LessEqualOp, LEFT>(data_type),
+        GreaterThan => bind_scalar_comparison::<GreaterOp, LEFT>(data_type),
+        GreaterThanOrEqual => bind_scalar_comparison::<GreaterEqualOp, LEFT>(data_type),
+        IsDistinctFrom => bind_scalar_comparison::<DistinctOp, LEFT>(data_type),
+        IsNotDistinctFrom => bind_scalar_comparison::<NotDistinctOp, LEFT>(data_type),
         _ => Err(Error::InvalidPlan(format!("{function:?} is not binary"))),
     }
 }
@@ -152,6 +188,66 @@ fn arithmetic<T: ArrowPrimitiveType, O: ArithmeticOperation, const FLOAT: bool>(
         binary(left, right, O::float)?
     } else {
         try_binary(left, right, O::checked)?
+    };
+    Ok(Arc::new(output))
+}
+
+fn bind_scalar_arithmetic<O: ArithmeticOperation, const LEFT: bool>(
+    data_type: &DataType,
+) -> Result<BinaryEvalFn> {
+    Ok(match data_type {
+        DataType::Int8 => scalar_arithmetic::<Int8Type, O, false, LEFT>,
+        DataType::Int16 => scalar_arithmetic::<Int16Type, O, false, LEFT>,
+        DataType::Int32 => scalar_arithmetic::<Int32Type, O, false, LEFT>,
+        DataType::Int64 => scalar_arithmetic::<Int64Type, O, false, LEFT>,
+        DataType::UInt8 => scalar_arithmetic::<UInt8Type, O, false, LEFT>,
+        DataType::UInt16 => scalar_arithmetic::<UInt16Type, O, false, LEFT>,
+        DataType::UInt32 => scalar_arithmetic::<UInt32Type, O, false, LEFT>,
+        DataType::UInt64 => scalar_arithmetic::<UInt64Type, O, false, LEFT>,
+        DataType::Float32 => scalar_arithmetic::<Float32Type, O, true, LEFT>,
+        DataType::Float64 => scalar_arithmetic::<Float64Type, O, true, LEFT>,
+        _ => {
+            return Err(Error::InvalidPlan(format!(
+                "unsupported numeric type: {data_type}"
+            )));
+        }
+    })
+}
+
+fn scalar_arithmetic<
+    T: ArrowPrimitiveType,
+    O: ArithmeticOperation,
+    const FLOAT: bool,
+    const LEFT: bool,
+>(
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<ArrayRef> {
+    let (scalar, array) = if LEFT { (left, right) } else { (right, left) };
+    let scalar = primitive::<T>(scalar)?;
+    let array = primitive::<T>(array)?;
+    if scalar.is_null(0) {
+        return Ok(Arc::new(PrimitiveArray::<T>::new_null(array.len())));
+    }
+    let scalar = scalar.value(0);
+    let output: PrimitiveArray<T> = if FLOAT {
+        array.unary(|value| {
+            if LEFT {
+                O::float(scalar, value)
+            } else {
+                O::float(value, scalar)
+            }
+        })
+    } else {
+        // Only valid input values may fail. In particular, division by a zero
+        // literal must not raise an error for an entirely NULL input array.
+        array.try_unary(|value| {
+            if LEFT {
+                O::checked(scalar, value)
+            } else {
+                O::checked(value, scalar)
+            }
+        })?
     };
     Ok(Arc::new(output))
 }
@@ -274,4 +370,48 @@ fn comparison<T: ArrowPrimitiveType, O: ComparisonOperation>(
 
 fn arrow_comparison<O: ComparisonOperation>(left: &ArrayRef, right: &ArrayRef) -> Result<ArrayRef> {
     Ok(Arc::new(O::arrow(left, right)?))
+}
+
+fn bind_scalar_comparison<O: ComparisonOperation, const LEFT: bool>(
+    data_type: &DataType,
+) -> Result<BinaryEvalFn> {
+    Ok(match data_type {
+        DataType::Int8 => scalar_comparison::<Int8Type, O, LEFT>,
+        DataType::Int16 => scalar_comparison::<Int16Type, O, LEFT>,
+        DataType::Int32 => scalar_comparison::<Int32Type, O, LEFT>,
+        DataType::Int64 => scalar_comparison::<Int64Type, O, LEFT>,
+        DataType::UInt8 => scalar_comparison::<UInt8Type, O, LEFT>,
+        DataType::UInt16 => scalar_comparison::<UInt16Type, O, LEFT>,
+        DataType::UInt32 => scalar_comparison::<UInt32Type, O, LEFT>,
+        DataType::UInt64 => scalar_comparison::<UInt64Type, O, LEFT>,
+        DataType::Float32 => scalar_comparison::<Float32Type, O, LEFT>,
+        DataType::Float64 => scalar_comparison::<Float64Type, O, LEFT>,
+        _ => {
+            let empty = new_empty_array(data_type);
+            O::arrow(&empty, &empty).map_err(|e| Error::InvalidPlan(e.to_string()))?;
+            arrow_scalar_comparison::<O, LEFT>
+        }
+    })
+}
+
+fn scalar_comparison<T: ArrowPrimitiveType, O: ComparisonOperation, const LEFT: bool>(
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<ArrayRef> {
+    // Retain the bound primitive type contract before delegating bitmap
+    // production and scalar NULL handling to Arrow's comparison kernel.
+    primitive::<T>(left)?;
+    primitive::<T>(right)?;
+    arrow_scalar_comparison::<O, LEFT>(left, right)
+}
+
+fn arrow_scalar_comparison<O: ComparisonOperation, const LEFT: bool>(
+    left: &ArrayRef,
+    right: &ArrayRef,
+) -> Result<ArrayRef> {
+    Ok(Arc::new(if LEFT {
+        O::arrow(&Scalar::new(left), right)?
+    } else {
+        O::arrow(left, &Scalar::new(right))?
+    }))
 }

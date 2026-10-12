@@ -23,10 +23,7 @@ use arrow::{
 use futures::future::BoxFuture;
 use roc::{
     error::Result,
-    exec::{
-        FilterExec, GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult, ProjectExec,
-        ScanExec, SinkExec, SinkExecutor, SinkResult, SourceExec,
-    },
+    exec::{ScanExec, SinkExec, SourceExec},
     expr::scalar::ScalarExprRef,
     operator::{
         AggregateOperator, FilterOperator, Operator, OperatorTree, OperatorTreeNode,
@@ -69,28 +66,34 @@ fn binary(left: ScalarExprRef, op: ExprOp, right: i64) -> ScalarExprRef {
     };
     FunctionExpression::binary(op, left, right, data_type, nullable).into_ref()
 }
-fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
-    let exec = FilterExec::new(predicate);
-    exec.new_executor(
-        exec.init_global_context(&asyncband::shutdown::new().1)
-            .unwrap(),
-    )
-    .unwrap()
+struct BatchProgram {
+    program: roc::suboperator::ProgramContext,
+    local: roc::suboperator::ProgramExecutionContext,
 }
-
-fn project_executor(projector: Projection) -> Box<dyn ProcessExecutor> {
-    let exec = ProjectExec::new(projector);
-    let global = exec
-        .init_global_context(&asyncband::shutdown::new().1)
-        .unwrap();
-    exec.new_executor(global).unwrap()
-}
-
-fn completed_batch(result: ProcessResult) -> RecordBatch {
-    match result {
-        ProcessResult::NeedMoreInput(batch) => batch,
-        other => panic!("expected a completed input, got {other:?}"),
+impl BatchProgram {
+    fn execute(&mut self, input: &RecordBatch) -> Result<RecordBatch> {
+        self.program.execute_record_batch(input, &mut self.local)
     }
+}
+fn filter_program(predicate: ScalarExprRef) -> Result<BatchProgram> {
+    let mut b = roc::suboperator::SuboperatorBuilder::new();
+    roc::operator::FilterOperator::new(predicate).build_suboperator(&mut b)?;
+    let program = b
+        .finish(vec![])?
+        .compile(roc::suboperator::ExecutionMode::Native)?;
+    let local = program.new_execution_context();
+    Ok(BatchProgram { program, local })
+}
+fn project_program(projection: Projection) -> BatchProgram {
+    let mut b = roc::suboperator::SuboperatorBuilder::new();
+    projection.build_suboperator(&mut b).unwrap();
+    let program = b
+        .finish(vec![])
+        .unwrap()
+        .compile(roc::suboperator::ExecutionMode::Native)
+        .unwrap();
+    let local = program.new_execution_context();
+    BatchProgram { program, local }
 }
 
 struct MemoryStorage(RecordBatch);
@@ -124,50 +127,52 @@ impl ScanConsumer for MemoryScan {
 
 #[derive(Clone, Debug, Default)]
 struct Collector(Arc<Mutex<Vec<RecordBatch>>>);
+struct CollectorExec {
+    output: Arc<Mutex<Vec<RecordBatch>>>,
+    state: roc::suboperator::StateId,
+}
 impl Operator for Collector {
     fn name(&self) -> &'static str {
         "collector"
     }
     fn build_pipeline(
         &self,
-        current_node: &OperatorTreeNode,
+        node: &OperatorTreeNode,
         current: PipelineId,
         graph: &mut PipelineGraphBuilder,
     ) -> Result<()> {
-        graph
-            .pipeline_mut(current)?
-            .set_sink(Box::new(self.clone()))?;
-        build_pipeline_on_node(&current_node.children()[0], current, graph)
+        build_pipeline_on_node(&node.children()[0], current, graph)?;
+        let pipeline = graph.pipeline_mut(current)?;
+        let state = pipeline
+            .suboperators
+            .state(roc::suboperator::StateBuilder::new(|| {
+                Ok(Vec::<RecordBatch>::new())
+            }));
+        pipeline.suboperators.batch_update(state, |state, batch| {
+            state.get_mut::<Vec<RecordBatch>>()?.push(batch.clone());
+            Ok(roc::suboperator::ProgramControl::Continue)
+        })?;
+        pipeline.set_sink(Box::new(CollectorExec {
+            output: self.0.clone(),
+            state,
+        }))
     }
 }
-impl SinkExec for Collector {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-    fn new_executor(&self, _: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        Ok(Box::new(self.clone()))
-    }
-    fn finalize<'a>(
-        &'a self,
-        _: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-impl SinkExecutor for Collector {
-    fn sink<'a>(
+impl SinkExec for CollectorExec {
+    fn combine<'a>(
         &'a mut self,
-        _shutdown_guard: &'a ShutdownGuard,
-        batch: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
+        mut local: roc::suboperator::ProgramExecutionContext,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(batch.clone());
-            Ok(SinkResult::NeedMoreInput)
+            self.output.lock().unwrap().extend(
+                local
+                    .take_state(self.state)
+                    .unwrap()
+                    .into_inner::<Vec<RecordBatch>>()?,
+            );
+            Ok(())
         })
-    }
-    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
     }
 }
 struct TestExecutor;
@@ -188,6 +193,13 @@ impl Executor for TestExecutor {
 
 #[tokio::test]
 async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions() {
+    run_bound_tree(roc::suboperator::ExecutionMode::Native).await;
+    #[cfg(feature = "jit")]
+    run_bound_tree(roc::suboperator::ExecutionMode::Compiled).await;
+    #[cfg(feature = "jit")]
+    run_bound_tree(roc::suboperator::ExecutionMode::Staged).await;
+}
+async fn run_bound_tree(mode: roc::suboperator::ExecutionMode) {
     let storage_schema = Arc::new(
         Schema::new(vec![
             Field::new("group", DataType::Utf8, false),
@@ -288,7 +300,7 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
     );
     let collector = Collector::default();
     let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![aggregate]));
-    let graph = build_pipeline_graph(tree).unwrap();
+    let graph = build_pipeline_graph(tree, mode).unwrap();
     PipelineGraphExecutor::new(graph)
         .with_task_executor(TestExecutor)
         .with_parallelism(2)
@@ -330,10 +342,10 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
     )
     .unwrap();
     for (value, rows) in [(Some(true), 3), (Some(false), 0), (None, 0)] {
-        let result = filter_executor(ConstantExpression::boolean(value).into_ref())
+        let result = filter_program(ConstantExpression::boolean(value).into_ref())
+            .unwrap()
             .execute(&batch)
             .unwrap();
-        let result = completed_batch(result);
         assert_eq!(result.num_rows(), rows);
         assert_eq!(result.schema(), input);
     }
@@ -347,8 +359,8 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         Field::new("constant", DataType::Int64, false),
         Field::new("null", DataType::Int64, true),
     ]));
-    let mut executor = project_executor(projector);
-    let result = completed_batch(executor.execute(&batch).unwrap());
+    let mut executor = project_program(projector);
+    let result = executor.execute(&batch).unwrap();
     assert_eq!(result.schema(), output);
     assert_eq!(result.column(0).null_count(), 1);
     assert_eq!(
@@ -362,12 +374,9 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         &[7, 7, 7]
     );
     assert_eq!(result.column(2).null_count(), 3);
-    assert_eq!(
-        completed_batch(executor.execute(&batch.slice(0, 0)).unwrap()).num_rows(),
-        0
-    );
+    assert_eq!(executor.execute(&batch.slice(0, 0)).unwrap().num_rows(), 0);
     let empty = Projection::new(Vec::<ProjectionExpr>::new());
-    let zero_columns = completed_batch(project_executor(empty).execute(&batch).unwrap());
+    let zero_columns = project_program(empty).execute(&batch).unwrap();
     assert_eq!(
         (zero_columns.num_rows(), zero_columns.num_columns()),
         (3, 0)
@@ -383,21 +392,21 @@ fn preserves_arrow_kernel_errors() {
         binary(column(0), ExprOp::Divide, 0),
         "x",
     )]);
-    let error = project_executor(projector).execute(&batch).unwrap_err();
+    let error = project_program(projector).execute(&batch).unwrap_err();
     assert!(matches!(error, roc::error::Error::Arrow(_)));
 }
 
 #[test]
 fn filter_rejects_non_boolean_results_without_an_input_schema() {
     let input = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
-    let batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+    let _batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
     for predicate in [
         reference(0, DataType::Int64, false),
         ConstantExpression::int64(Some(1)).into_ref(),
     ] {
         assert!(matches!(
-            filter_executor(predicate).execute(&batch),
-            Err(roc::error::Error::Execution(_))
+            filter_program(predicate),
+            Err(roc::error::Error::InvalidPlan(_))
         ));
     }
 }
@@ -422,24 +431,23 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
     )
     .unwrap();
     let expected = batch.project(&[2, 0]).unwrap();
-    let exec = ScanExec::new(ScanOperator::new(
+    let mut exec = ScanExec::new(ScanOperator::new(
         vec![2, 0],
         Arc::new(MemoryStorage(batch)),
     ));
     let (shutdown, shutdown_guard) = asyncband::shutdown::new();
-    let global = exec.init_global_context(&shutdown_guard).unwrap();
-    let mut worker = exec.new_executor(global.clone()).unwrap();
+    exec.start(&shutdown_guard).unwrap();
     assert_eq!(
-        worker.next_batch(&shutdown_guard).await.unwrap().unwrap(),
+        exec.next_batch(&shutdown_guard).await.unwrap().unwrap(),
         expected
     );
-    assert!(worker.next_batch(&shutdown_guard).await.unwrap().is_none());
+    assert!(exec.next_batch(&shutdown_guard).await.unwrap().is_none());
     shutdown.request_shutdown();
     assert!(matches!(
-        worker.next_batch(&shutdown_guard).await,
+        exec.next_batch(&shutdown_guard).await,
         Err(roc::error::Error::Cancelled)
     ));
-    exec.finalize(global, &shutdown_guard).await.unwrap();
+    exec.finish(&shutdown_guard).await.unwrap();
 }
 
 struct MemoryExchange {
@@ -515,7 +523,7 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
     let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
     let batch =
         RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
-    for input in [Some(batch), None] {
+    for (input, parallelism) in [(Some(batch.clone()), 1), (Some(batch), 3), (None, 3)] {
         let service = Arc::new(MemoryExchange {
             input: Ok(input.clone()),
             output: Collector::default(),
@@ -527,8 +535,19 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
             ExchangeSinkOperator::new(vec![8], schema.clone(), service.clone()),
             vec![source],
         );
-        let graph = build_pipeline_graph(OperatorTree::new(sink)).unwrap();
+        let graph = build_pipeline_graph(
+            OperatorTree::new(sink),
+            roc::suboperator::ExecutionMode::Native,
+        )
+        .unwrap();
+        assert_eq!(
+            service
+                .created_sinks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         PipelineGraphExecutor::new(graph)
+            .with_parallelism(parallelism)
             .with_task_executor(TestExecutor)
             .execute()
             .await
@@ -537,7 +556,7 @@ async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
             service
                 .created_sinks
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1
+            parallelism
         );
         assert_eq!(
             *service.output.0.lock().unwrap(),
@@ -564,11 +583,13 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
         vec![],
     );
     let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![source]));
-    let error = PipelineGraphExecutor::new(build_pipeline_graph(tree).unwrap())
-        .with_task_executor(TestExecutor)
-        .execute()
-        .await
-        .unwrap_err();
+    let error = PipelineGraphExecutor::new(
+        build_pipeline_graph(tree, roc::suboperator::ExecutionMode::Native).unwrap(),
+    )
+    .with_task_executor(TestExecutor)
+    .execute()
+    .await
+    .unwrap_err();
     assert!(matches!(error, roc::error::Error::Io(actual) if Arc::ptr_eq(&actual, &read_error)));
     assert!(collector.0.lock().unwrap().is_empty());
 }

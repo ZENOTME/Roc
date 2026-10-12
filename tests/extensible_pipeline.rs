@@ -16,7 +16,7 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
     error::{Error, Result},
-    exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
+    exec::{SinkExec, SourceExec},
     operator::{Operator, OperatorTree, OperatorTreeNode},
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
 };
@@ -25,41 +25,18 @@ use std::sync::Arc;
 struct NoopExec;
 
 impl SourceExec for NoopExec {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-    fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        Err(Error::Execution(
-            "this test only constructs the graph".into(),
-        ))
-    }
-
-    fn finalize<'a>(
-        &'a self,
-        _global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
+    fn next_batch<'a>(
+        &'a mut self,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<Option<arrow::record_batch::RecordBatch>>> {
+        Box::pin(async {
+            Err(Error::Execution(
+                "not executed in graph construction tests".into(),
+            ))
+        })
     }
 }
-impl SinkExec for NoopExec {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-
-    fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        Err(Error::Execution(
-            "this test only constructs the graph".into(),
-        ))
-    }
-    fn finalize<'a>(
-        &'a self,
-        _global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
+impl SinkExec for NoopExec {}
 
 #[derive(Debug)]
 struct CustomSource;
@@ -146,7 +123,11 @@ fn host_operator_builds_a_dependency_without_core_dispatch() {
     let source = OperatorTreeNode::new(CustomSource, vec![]);
     let barrier = OperatorTreeNode::new(CustomBarrier, vec![source]);
     let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
-    let graph = build_pipeline_graph(OperatorTree::new(sink)).unwrap();
+    let graph = build_pipeline_graph(
+        OperatorTree::new(sink),
+        roc::suboperator::ExecutionMode::Native,
+    )
+    .unwrap();
     assert_eq!(graph.len(), 2);
     assert_eq!(graph.dependencies(0), Some([].as_slice()));
     assert_eq!(graph.dependencies(1), Some([0].as_slice()));
@@ -162,7 +143,11 @@ fn two_input_operator_chooses_both_child_pipelines() {
         ],
     );
     let sink = OperatorTreeNode::new(CustomSink, vec![tree]);
-    let graph = build_pipeline_graph(OperatorTree::new(sink)).unwrap();
+    let graph = build_pipeline_graph(
+        OperatorTree::new(sink),
+        roc::suboperator::ExecutionMode::Native,
+    )
+    .unwrap();
     assert_eq!(graph.len(), 3);
     assert_eq!(graph.dependencies(0), Some([].as_slice()));
     assert_eq!(graph.dependencies(1), Some([].as_slice()));
@@ -189,7 +174,11 @@ fn invalid_project_reports_operator_and_reason() {
         let barrier = OperatorTreeNode::new(CustomBarrier, vec![project]);
         let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
 
-        let error = build_pipeline_graph(OperatorTree::new(sink)).unwrap_err();
+        let error = build_pipeline_graph(
+            OperatorTree::new(sink),
+            roc::suboperator::ExecutionMode::Native,
+        )
+        .unwrap_err();
         let Error::InvalidPlan(message) = error else {
             panic!("expected InvalidPlan, got {error:?}");
         };

@@ -23,20 +23,36 @@ pub use graph::{PipelineGraph, PipelineGraphBuilder, PipelineGraphError, Pipelin
 
 use crate::{
     error::{Error, Result},
-    exec::{ProcessExec, SinkExec, SourceExec},
+    exec::{SinkExec, SourceExec},
 };
 
 /// A complete schedulable pipeline. Every role is represented by its execution trait directly.
 pub struct Pipeline {
     pub source: Box<dyn SourceExec>,
-    pub processors: Vec<Box<dyn ProcessExec>>,
+    pub program: crate::suboperator::ProgramContext,
     pub sink: Box<dyn SinkExec>,
 }
 
-/// One pipeline under construction. Operators are visited from sink to source.
+impl Pipeline {
+    pub fn new(
+        source: Box<dyn SourceExec>,
+        builder: crate::suboperator::SuboperatorBuilder,
+        sink: Box<dyn SinkExec>,
+        mode: crate::suboperator::ExecutionMode,
+    ) -> Result<Self> {
+        let program = builder.finish(vec![])?.compile(mode)?;
+        Ok(Self {
+            source,
+            program,
+            sink,
+        })
+    }
+}
+
+/// Operators append suboperators directly, after building their children.
 pub struct PipelineBuilder {
     source: Option<Box<dyn SourceExec>>,
-    processors: Vec<Box<dyn ProcessExec>>,
+    pub suboperators: crate::suboperator::SuboperatorBuilder,
     sink: Option<Box<dyn SinkExec>>,
 }
 
@@ -44,7 +60,7 @@ impl PipelineBuilder {
     pub(super) fn new() -> Self {
         Self {
             source: None,
-            processors: vec![],
+            suboperators: crate::suboperator::SuboperatorBuilder::new(),
             sink: None,
         }
     }
@@ -59,10 +75,6 @@ impl PipelineBuilder {
         Ok(())
     }
 
-    pub fn add_processor(&mut self, processor: Box<dyn ProcessExec>) {
-        self.processors.push(processor);
-    }
-
     pub fn set_sink(&mut self, sink: Box<dyn SinkExec>) -> Result<()> {
         if self.sink.is_some() {
             return Err(Error::InvalidPlan("pipeline has more than one sink".into()));
@@ -71,16 +83,17 @@ impl PipelineBuilder {
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> Result<Pipeline> {
-        self.processors.reverse();
-        Ok(Pipeline {
-            source: self
-                .source
+    pub(super) fn finish(mut self, mode: crate::suboperator::ExecutionMode) -> Result<Pipeline> {
+        let sink = self
+            .sink
+            .take()
+            .ok_or_else(|| Error::InvalidPlan("pipeline has no sink".into()))?;
+        Pipeline::new(
+            self.source
                 .ok_or_else(|| Error::InvalidPlan("pipeline has no source".into()))?,
-            processors: self.processors,
-            sink: self
-                .sink
-                .ok_or_else(|| Error::InvalidPlan("pipeline has no sink".into()))?,
-        })
+            self.suboperators,
+            sink,
+            mode,
+        )
     }
 }

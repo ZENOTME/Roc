@@ -13,9 +13,11 @@
 // limitations under the License.
 
 //! Typed, stateless descriptions of scalar expressions.
-use crate::error::Result;
-use crate::expr::ExpressionResultType;
-pub use executor::ScalarExpressionEvaluation;
+use crate::{
+    error::{Error, Result},
+    expr::ExpressionResultType,
+    suboperator::{SuboperatorBuilder, VariableId},
+};
 use std::sync::Arc;
 
 mod case;
@@ -23,23 +25,18 @@ mod cast;
 mod coalesce;
 mod conjunction;
 mod constant;
-pub mod executor;
 mod function;
-mod kernels;
 mod not;
 mod reference;
 
-pub use case::{CaseExpression, CaseExpressionEvaluation};
-pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};
-pub use coalesce::{CoalesceExpression, CoalesceExpressionEvaluation};
-pub use conjunction::{Conjunction, ConjunctionExpression, ConjunctionExpressionEvaluation};
-pub use constant::{ConstantExpression, ConstantExpressionEvaluation};
-pub use function::{
-    BinaryFunctionExpressionEvaluation, FunctionExpression, FunctionKind,
-    UnaryFunctionExpressionEvaluation,
-};
-pub use not::{NotExpression, NotExpressionEvaluation};
-pub use reference::{ReferenceExpression, ReferenceExpressionEvaluation};
+pub use case::CaseExpression;
+pub use cast::{CastExpression, CastMode};
+pub use coalesce::CoalesceExpression;
+pub use conjunction::{Conjunction, ConjunctionExpression};
+pub use constant::ConstantExpression;
+pub use function::{FunctionExpression, FunctionKind};
+pub use not::NotExpression;
+pub use reference::ReferenceExpression;
 
 pub type ScalarExprRef = Arc<ScalarExpression>;
 
@@ -56,6 +53,33 @@ pub enum ScalarExpression {
 }
 
 impl ScalarExpression {
+    /// Build this expression once per input view. Concrete nodes own the lowering;
+    /// the builder only retains the shared-node binding and suboperator graph.
+    pub fn build_suboperator(
+        self: &Arc<Self>,
+        builder: &mut SuboperatorBuilder,
+    ) -> Result<VariableId> {
+        if let Some(id) = builder.cached(self) {
+            return Ok(id);
+        }
+        let id = match self.as_ref() {
+            Self::Reference(e) => e.build_suboperator(builder),
+            Self::Constant(e) => e.build_suboperator(builder),
+            Self::Function(e) => e.build_suboperator(builder),
+            Self::Cast(e) => e.build_suboperator(builder),
+            Self::Conjunction(e) => e.build_suboperator(builder),
+            Self::Not(e) => e.build_suboperator(builder),
+            Self::Case(e) => e.build_suboperator(builder),
+            Self::Coalesce(e) => e.build_suboperator(builder),
+        }?;
+        if builder.result_type(id)?.data_type() != self.result_type().data_type() {
+            return Err(Error::InvalidPlan(
+                "declared expression type differs from suboperator result".into(),
+            ));
+        }
+        builder.cache(self.clone(), id)?;
+        Ok(id)
+    }
     pub fn result_type(&self) -> &ExpressionResultType {
         match self {
             Self::Reference(e) => e.result_type(),
@@ -66,20 +90,6 @@ impl ScalarExpression {
             Self::Not(e) => e.result_type(),
             Self::Case(e) => e.result_type(),
             Self::Coalesce(e) => e.result_type(),
-        }
-    }
-
-    /// Bind kernels and build an immutable evaluation for this expression.
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        match self {
-            Self::Reference(e) => e.to_evaluation(),
-            Self::Constant(e) => e.to_evaluation(),
-            Self::Function(e) => e.to_evaluation(),
-            Self::Cast(e) => e.to_evaluation(),
-            Self::Conjunction(e) => e.to_evaluation(),
-            Self::Not(e) => e.to_evaluation(),
-            Self::Case(e) => e.to_evaluation(),
-            Self::Coalesce(e) => e.to_evaluation(),
         }
     }
 }
@@ -101,23 +111,4 @@ scalar_node! {
     Function(FunctionExpression), Cast(CastExpression),
     Conjunction(ConjunctionExpression), Not(NotExpression),
     Case(CaseExpression), Coalesce(CoalesceExpression),
-}
-
-macro_rules! scalar_evaluation {
-    ($($variant:ident($evaluation:ty)),* $(,)?) => {$(
-        impl From<$evaluation> for ScalarExpressionEvaluation {
-            fn from(evaluation: $evaluation) -> Self { Self::$variant(evaluation) }
-        }
-    )*};
-}
-scalar_evaluation! {
-    Reference(ReferenceExpressionEvaluation),
-    Constant(ConstantExpressionEvaluation),
-    UnaryFunction(UnaryFunctionExpressionEvaluation),
-    BinaryFunction(BinaryFunctionExpressionEvaluation),
-    Cast(CastExpressionEvaluation),
-    Conjunction(ConjunctionExpressionEvaluation),
-    Not(NotExpressionEvaluation),
-    Case(CaseExpressionEvaluation),
-    Coalesce(CoalesceExpressionEvaluation),
 }

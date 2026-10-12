@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod agg;
-pub mod predicate;
 pub mod scalar;
 
 use arrow::datatypes::DataType;

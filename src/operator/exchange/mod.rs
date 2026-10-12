@@ -125,9 +125,9 @@ impl Operator for ExchangeSinkOperator {
                 current_node.children().len(),
             )));
         };
-        graph
-            .pipeline_mut(current)?
-            .set_sink(Box::new(ExchangeSinkExec::new(self.clone())))?;
-        build_pipeline_on_node(child, current, graph)
+        build_pipeline_on_node(child, current, graph)?;
+        let pipeline = graph.pipeline_mut(current)?;
+        let state = self.build_suboperator(&mut pipeline.suboperators)?;
+        pipeline.set_sink(Box::new(ExchangeSinkExec::new(state)))
     }
 }

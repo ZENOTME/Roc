@@ -139,11 +139,12 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
         let (shutdown, guard) = asyncband::shutdown::new();
         let (_other_shutdown, other_guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        let same_execution = source.init_global_context(&guard).unwrap();
-        let other_execution = source.init_global_context(&other_guard).unwrap();
-        let mut worker = source.new_executor(global.clone()).unwrap();
+        let mut worker = source(exchange, service.clone());
+        let mut same_execution = source(exchange, service.clone());
+        let mut other_execution = source(exchange, service.clone());
+        worker.start(&guard).unwrap();
+        same_execution.start(&guard).unwrap();
+        other_execution.start(&other_guard).unwrap();
         block_on(async {
             let mut next = pin!(worker.next_batch(&guard));
             assert!(poll!(&mut next).is_pending());
@@ -158,7 +159,7 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
             ));
         });
         service.guards.lock().unwrap().clear();
-        drop((worker, global, same_execution, guard));
+        drop((worker, same_execution, guard));
         block_on(shutdown);
         drop(other_execution);
         assert!(!other_guard.is_shutdown_requested());
@@ -170,11 +171,11 @@ fn shutdown_waits_for_the_last_source_owner_to_release_its_guard() {
     for exchange in [false, true] {
         let (shutdown, guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        let first = source.new_executor(global.clone()).unwrap();
-        let second = source.new_executor(global.clone()).unwrap();
-        drop((global, guard));
+        let mut first = source(exchange, service.clone());
+        let mut second = source(exchange, service.clone());
+        first.start(&guard).unwrap();
+        second.start(&guard).unwrap();
+        drop(guard);
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();
         block_on(async {
@@ -194,9 +195,9 @@ fn normal_finalization_and_drop_do_not_request_shutdown() {
     for exchange in [false, true] {
         let (_shutdown, guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        block_on(source.finalize(global, &guard)).unwrap();
+        let mut source = source(exchange, service.clone());
+        source.start(&guard).unwrap();
+        block_on(source.finish(&guard)).unwrap();
         assert!(!guard.is_shutdown_requested());
         assert!(!service.guard(0).is_shutdown_requested());
         assert_eq!(service.finished.load(Ordering::SeqCst), 1);
@@ -211,9 +212,9 @@ fn failed_source_initialization_does_not_request_shutdown_or_leak_guards() {
             fail_start: true,
             ..Default::default()
         });
-        let source = source(exchange, service.clone());
+        let mut source = source(exchange, service.clone());
         assert!(
-            matches!(source.init_global_context(&guard), Err(Error::Execution(message)) if message == "start failed")
+            matches!(source.start(&guard), Err(Error::Execution(message)) if message == "start failed")
         );
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();

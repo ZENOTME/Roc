@@ -12,8 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::expr::ExpressionResultType;
+use super::accumulator::Accumulator;
 use crate::expr::scalar::ScalarExprRef;
+use crate::{
+    error::{Error, Result},
+    expr::{ExpressionResultType, scalar::ConstantExpression},
+    suboperator::{
+        StateBuilder, StateId, SuboperatorBuilder, VariableId, aggregation::AccumulatorState,
+    },
+};
 use arrow::datatypes::DataType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +58,69 @@ pub struct AggregateExpression {
     filter: Option<ScalarExprRef>,
 }
 impl AggregateExpression {
+    /// Build argument/mask computation and a single accumulator update, connected
+    /// to the grouping operator through its state handle and group-ID variable.
+    pub(crate) fn build_suboperator(
+        &self,
+        builder: &mut SuboperatorBuilder,
+        grouping: StateId,
+        group_ids: VariableId,
+        global: bool,
+    ) -> Result<StateId> {
+        if self.distinct && self.function != AggregateFunction::Count {
+            return Err(Error::InvalidPlan(
+                "DISTINCT is supported only for COUNT".into(),
+            ));
+        }
+        let mut arguments = self.arguments.clone();
+        // COUNT(*) FILTER becomes COUNT(nullable_one), preserving groups even
+        // when every row in a group is excluded by this aggregate's mask.
+        if self.filter.is_some() && arguments.is_empty() {
+            arguments.push(ConstantExpression::int64(Some(1)).into_ref());
+        }
+        let types = arguments
+            .iter()
+            .map(|e| e.result_type().data_type().clone())
+            .collect::<Vec<_>>();
+        let function = self.function;
+        let distinct = self.distinct;
+        let ty = self.result_type.data_type().clone();
+        // Validate at build time, including when the eventual input is empty.
+        Accumulator::new(function, distinct, &types, &ty)?;
+        let accumulator = builder.state(StateBuilder::new(move || {
+            let mut accumulator = Accumulator::new(function, distinct, &types, &ty)?;
+            if global {
+                accumulator.resize(1);
+            }
+            Ok(AccumulatorState {
+                accumulator,
+                global,
+                ids: vec![],
+            })
+        }));
+        let mask = self
+            .filter
+            .as_ref()
+            .map(|e| e.build_suboperator(builder))
+            .transpose()?;
+        let mut inputs = vec![group_ids];
+        for argument in arguments {
+            let value = argument.build_suboperator(builder)?;
+            let value = if let Some(mask) = mask {
+                let null = builder.constant(arrow::array::new_null_array(
+                    argument.result_type().data_type(),
+                    1,
+                ))?;
+                builder.case(vec![(mask, value)], null)?
+            } else {
+                value
+            };
+            inputs.push(value);
+        }
+        builder.aggregate_update([grouping, accumulator], inputs)?;
+        Ok(accumulator)
+    }
+
     pub fn new(
         function: AggregateFunction,
         arguments: Vec<ScalarExprRef>,

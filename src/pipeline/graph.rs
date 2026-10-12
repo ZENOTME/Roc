@@ -56,14 +56,14 @@ impl PipelineGraphBuilder {
             .ok_or_else(|| Error::InvalidPlan(format!("unknown pipeline {id}")))
     }
 
-    pub fn finish(self) -> Result<PipelineGraph> {
+    pub fn finish(self, mode: crate::suboperator::ExecutionMode) -> Result<PipelineGraph> {
         // Dependencies are created after their consumer, so reversing IDs
         let count = self.pipelines.len();
         let pipelines = self
             .pipelines
             .into_iter()
             .rev()
-            .map(PipelineBuilder::finish)
+            .map(|builder| builder.finish(mode))
             .collect::<Result<Vec<_>>>()?;
         let dependencies = self
             .dependencies
@@ -116,6 +116,21 @@ pub enum PipelineGraphError {
 }
 
 impl PipelineGraph {
+    pub fn explain(&self) -> String {
+        self.pipelines
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "pipeline {i} depends_on={:?}\n{}",
+                    self.dependencies[i],
+                    p.program.explain()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn new(
         pipelines: Vec<Pipeline>,
         dependencies: Vec<Vec<PipelineId>>,
@@ -214,7 +229,7 @@ mod tests {
 
     use crate::{
         error::{Error, Result},
-        exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
+        exec::{SinkExec, SourceExec},
     };
     use asyncband::shutdown::ShutdownGuard;
     use futures::future::BoxFuture;
@@ -222,50 +237,29 @@ mod tests {
     struct UnusedExec;
 
     impl SourceExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _shutdown_guard: &ShutdownGuard,
-        ) -> Result<GlobalExecContextRef> {
-            Err(Error::Execution("not run by graph tests".into()))
-        }
-        fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-            Err(Error::Execution("not run by graph tests".into()))
-        }
-
-        fn finalize<'a>(
-            &'a self,
-            _global: GlobalExecContextRef,
-            _shutdown_guard: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
+        fn next_batch<'a>(
+            &'a mut self,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<Option<arrow::record_batch::RecordBatch>>> {
+            Box::pin(async {
+                Err(Error::Execution(
+                    "not executed in graph construction tests".into(),
+                ))
+            })
         }
     }
-    impl SinkExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _shutdown_guard: &ShutdownGuard,
-        ) -> Result<GlobalExecContextRef> {
-            Err(Error::Execution("not run by graph tests".into()))
-        }
-
-        fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-            Err(Error::Execution("not run by graph tests".into()))
-        }
-        fn finalize<'a>(
-            &'a self,
-            _global: GlobalExecContextRef,
-            _shutdown_guard: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    impl SinkExec for UnusedExec {}
 
     fn pipelines(count: usize) -> Vec<Pipeline> {
         (0..count)
-            .map(|_| Pipeline {
-                source: Box::new(UnusedExec),
-                processors: vec![],
-                sink: Box::new(UnusedExec),
+            .map(|_| {
+                Pipeline::new(
+                    Box::new(UnusedExec),
+                    crate::suboperator::SuboperatorBuilder::new(),
+                    Box::new(UnusedExec),
+                    crate::suboperator::ExecutionMode::Native,
+                )
+                .unwrap()
             })
             .collect()
     }

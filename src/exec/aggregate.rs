@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ProjectionExecutor;
-use super::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult, SourceExec, SourceExecutor};
-use crate::expr::agg::executor::AggregateExpressionExecutor;
+pub(crate) mod group_index;
+
+use super::{SinkExec, SourceExec};
+use crate::expr::agg::accumulator::Accumulator;
 use crate::{
     error::{Error, Result},
     operator::AggregateOperator,
@@ -23,28 +24,23 @@ use arrow::datatypes::SchemaRef;
 use arrow::{
     array::ArrayRef,
     record_batch::{RecordBatch, RecordBatchOptions},
-    row::{RowConverter, SortField},
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
-use std::collections::HashMap;
-use std::sync::{
-    Arc, Mutex, OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
+use group_index::GroupIndex;
+use std::sync::{Arc, OnceLock};
 
 // Bound merge work between cancellation checks and share output morsels among
 // workers. The pipeline applies its own configured batch size to each morsel.
 const AGGREGATE_MORSEL_ROWS: usize = 2048;
 
-/// Worker-local grouping, expression evaluation, and aggregate states.
-struct AggregateState {
-    converter: RowConverter,
-    index: HashMap<Vec<u8>, usize>,
-    keys: Vec<Vec<u8>>,
-    groups: ProjectionExecutor,
+/// Only the pipeline coordinator merges local partials. No expression evaluator
+/// or executable query plan is needed here: all inputs are accumulator states.
+struct AggregateMergeState {
+    index: GroupIndex,
+    group_ids: Vec<usize>,
     output_schema: SchemaRef,
-    accumulators: Vec<AggregateExpressionExecutor>,
+    accumulators: Vec<Accumulator>,
 }
 
 /// Each aggregate keeps its own state arrays; there is no flattened
@@ -71,129 +67,74 @@ impl PartialAggregate {
     }
 }
 
-impl AggregateState {
+impl AggregateMergeState {
     fn new(operator: &AggregateOperator) -> Result<Self> {
-        let groups = ProjectionExecutor::try_new(operator.groups().clone())?;
-        let converter = RowConverter::new(
-            groups
-                .output_schema()
-                .fields()
-                .iter()
-                .map(|f| SortField::new(f.data_type().clone()))
-                .collect(),
-        )?;
-        let grouped = !groups.output_schema().fields().is_empty();
-        let output_schema = operator.output_schema();
-        let mut accumulators = vec![];
+        let schema = operator.groups().output_schema();
+        let mut accumulators = Vec::new();
         for aggregate in operator.aggregates() {
-            let mut executor = AggregateExpressionExecutor::try_new(aggregate.clone())?;
-            if !grouped {
-                executor.resize(1);
+            let types = aggregate
+                .arguments()
+                .iter()
+                .map(|e| e.result_type().data_type().clone())
+                .collect::<Vec<_>>();
+            let mut accumulator = Accumulator::new(
+                aggregate.function(),
+                aggregate.is_distinct(),
+                &types,
+                aggregate.result_type().data_type(),
+            )?;
+            if schema.fields().is_empty() {
+                accumulator.resize(1);
             }
-            accumulators.push(executor);
+            accumulators.push(accumulator);
         }
         Ok(Self {
-            converter,
-            index: HashMap::new(),
-            keys: vec![],
-            groups,
-            output_schema,
+            index: GroupIndex::new(&schema)?,
+            group_ids: vec![],
+            output_schema: operator.output_schema(),
             accumulators,
         })
     }
-
-    fn group_count(&self) -> usize {
-        if self.groups.output_schema().fields().is_empty() {
-            1
-        } else {
-            self.keys.len()
-        }
-    }
-
-    fn group_ids(&mut self, columns: &[ArrayRef], rows: usize) -> Result<Vec<usize>> {
-        if columns.is_empty() {
-            return Ok(vec![0; rows]);
-        }
-        let rows = self.converter.convert_columns(columns)?;
-        let mut ids = Vec::with_capacity(rows.num_rows());
-        for row in rows.iter() {
-            let id = match self.index.get(row.as_ref()) {
-                Some(id) => *id,
-                None => {
-                    let id = self.keys.len();
-                    let key = row.as_ref().to_vec();
-                    self.index.insert(key.clone(), id);
-                    self.keys.push(key);
-                    id
-                }
-            };
-            ids.push(id);
-        }
-        Ok(ids)
-    }
-
-    fn update(&mut self, batch: &RecordBatch) -> Result<()> {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-        let groups = self.groups.project_batch(batch)?;
-        let ids = self.group_ids(groups.columns(), batch.num_rows())?;
-        let count = self.group_count();
-        for accumulator in &mut self.accumulators {
-            accumulator.update(batch, &ids, count)?;
-        }
-        Ok(())
-    }
-
     fn merge(&mut self, partial: &PartialAggregate) -> Result<()> {
+        // Each accumulator owns its partial-state schema. Check the complete
+        // bundle before mutating any global group or accumulator state.
+        if partial.states.len() != self.accumulators.len()
+            || self
+                .accumulators
+                .iter()
+                .zip(&partial.states)
+                .any(|(a, columns)| {
+                    let types = a.state_types();
+                    types.len() != columns.len()
+                        || types.iter().zip(columns).any(|(ty, column)| {
+                            column.data_type() != ty || column.len() != partial.num_rows()
+                        })
+                })
+        {
+            return Err(Error::Execution("invalid aggregate partial state".into()));
+        }
         if partial.num_rows() == 0 {
             return Ok(());
         }
-        let ids = self.group_ids(partial.groups.columns(), partial.num_rows())?;
-        let count = self.group_count();
+        self.index.intern(
+            partial.groups.columns(),
+            partial.num_rows(),
+            &mut self.group_ids,
+        )?;
         for (accumulator, state) in self.accumulators.iter_mut().zip(&partial.states) {
-            accumulator.merge(state, &ids, count)?;
+            accumulator.resize(self.index.len());
+            accumulator.merge(state, &self.group_ids)?;
         }
         Ok(())
     }
-
-    fn group_columns(&self) -> Result<Vec<ArrayRef>> {
-        if self.groups.output_schema().fields().is_empty() {
-            return Ok(vec![]);
-        }
-        let parser = self.converter.parser();
-        Ok(self
-            .converter
-            .convert_rows(self.keys.iter().map(|key| parser.parse(key)))?)
-    }
-
-    fn finish_partial(self) -> Result<PartialAggregate> {
-        let count = self.group_count();
-        let groups = RecordBatch::try_new_with_options(
-            self.groups.output_schema().clone(),
-            self.group_columns()?,
-            &RecordBatchOptions::new().with_row_count(Some(count)),
-        )?;
-        let states = self
-            .accumulators
-            .iter()
-            .map(|a| a.state())
-            .collect::<Result<Vec<_>>>()?;
-        Ok(PartialAggregate { groups, states })
-    }
-
     fn finish(self) -> Result<RecordBatch> {
-        let count = self.group_count();
-        let schema = self.output_schema.clone();
-        if count == 0 {
-            return Ok(RecordBatch::new_empty(schema));
-        }
-        let mut columns = self.group_columns()?;
-        for accumulator in &self.accumulators {
+        let count = self.index.len();
+        let mut columns = self.index.columns()?;
+        for accumulator in self.accumulators {
             columns.push(accumulator.evaluate()?);
         }
         Ok(RecordBatch::try_new_with_options(
-            schema,
+            self.output_schema,
             columns,
             &RecordBatchOptions::new().with_row_count(Some(count)),
         )?)
@@ -205,175 +146,169 @@ struct AggregateSharedState {
     finalized: OnceLock<RecordBatch>,
 }
 
-#[derive(Clone, Debug)]
+/// Created for one execution. Only the result cell is shared across pipelines.
+pub struct AggregateExecuteState {
+    merge: AggregateMergeState,
+    result: Arc<AggregateSharedState>,
+}
+
 pub struct AggregateSinkExec {
-    operator: Arc<AggregateOperator>,
-    shared: Arc<AggregateSharedState>,
+    states: Vec<crate::suboperator::StateId>,
+    merge: Option<AggregateMergeState>,
+    result: Arc<AggregateSharedState>,
 }
-
-#[derive(Clone, Debug)]
 pub struct AggregateSourceExec {
-    shared: Arc<AggregateSharedState>,
+    result: Arc<AggregateSharedState>,
+    next_row: usize,
 }
-
 impl AggregateOperator {
-    /// Creates sink and source roles sharing the same aggregation result.
-    pub fn into_execs(self) -> (AggregateSinkExec, AggregateSourceExec) {
-        let shared = Arc::new(AggregateSharedState::default());
-        (
-            AggregateSinkExec {
-                operator: Arc::new(self),
-                shared: shared.clone(),
-            },
-            AggregateSourceExec { shared },
-        )
+    pub fn new_execute_state(&self) -> Result<AggregateExecuteState> {
+        Ok(AggregateExecuteState {
+            merge: AggregateMergeState::new(self)?,
+            result: Arc::new(AggregateSharedState::default()),
+        })
     }
-}
-
-struct AggregateSinkGlobalContext {
-    partials: Mutex<Vec<PartialAggregate>>,
-}
-
-struct AggregateExecutor {
-    global: Arc<AggregateSinkGlobalContext>,
-    local: AggregateState,
+    pub fn build_exec(
+        &self,
+        state: AggregateExecuteState,
+        locals: Vec<crate::suboperator::StateId>,
+    ) -> (AggregateSourceExec, AggregateSinkExec) {
+        let source = AggregateSourceExec {
+            result: state.result.clone(),
+            next_row: 0,
+        };
+        let sink = AggregateSinkExec {
+            states: locals,
+            merge: Some(state.merge),
+            result: state.result,
+        };
+        (source, sink)
+    }
 }
 
 impl SinkExec for AggregateSinkExec {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(AggregateSinkGlobalContext {
-            partials: Mutex::new(Vec::new()),
-        }))
-    }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        let global = global
-            .downcast::<AggregateSinkGlobalContext>()
-            .map_err(|_| {
-                Error::Execution("aggregate sink received an invalid global context".into())
-            })?;
-        Ok(Box::new(AggregateExecutor {
-            global,
-            local: AggregateState::new(&self.operator)?,
-        }))
-    }
-
-    fn finalize<'a>(
-        &'a self,
-        global: GlobalExecContextRef,
-        shutdown_guard: &'a ShutdownGuard,
+    fn combine<'a>(
+        &'a mut self,
+        mut local: crate::suboperator::ProgramExecutionContext,
+        guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let global = global
-                .downcast::<AggregateSinkGlobalContext>()
-                .map_err(|_| {
-                    Error::Execution("aggregate sink received an invalid global context".into())
-                })?;
-            let partials = std::mem::take(&mut *global.partials.lock().unwrap());
-            let mut state = AggregateState::new(&self.operator)?;
-            for partial in partials {
-                for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
-                    if shutdown_guard.is_shutdown_requested() {
-                        return Err(Error::Cancelled);
-                    }
-                    state.merge(&partial.slice(
-                        offset,
-                        AGGREGATE_MORSEL_ROWS.min(partial.num_rows() - offset),
-                    ))?;
-                    crate::pipeline::yield_now().await;
+            let (groups, states) =
+                crate::suboperator::aggregation::partial(&mut local, &self.states)?;
+            let partial = PartialAggregate { groups, states };
+            let merge = self
+                .merge
+                .as_mut()
+                .ok_or_else(|| Error::Execution("aggregate already finished".into()))?;
+            for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::Cancelled);
                 }
+                merge.merge(&partial.slice(
+                    offset,
+                    AGGREGATE_MORSEL_ROWS.min(partial.num_rows() - offset),
+                ))?;
+                crate::pipeline::yield_now().await;
             }
-            let batch = state.finish()?;
-            self.shared
-                .finalized
-                .set(batch)
-                .map_err(|_| Error::Execution("aggregate sink finalized more than once".into()))
-        })
-    }
-}
-impl SinkExecutor for AggregateExecutor {
-    fn sink<'a>(
-        &'a mut self,
-        _shutdown_guard: &'a ShutdownGuard,
-        input: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
-        Box::pin(async move {
-            self.local.update(input)?;
-            Ok(SinkResult::NeedMoreInput)
-        })
-    }
-
-    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        let Self { global, local } = *self;
-        Box::pin(async move {
-            let partial = local.finish_partial()?;
-            global.partials.lock().unwrap().push(partial);
             Ok(())
         })
     }
-}
-
-struct AggregateSourceGlobalContext {
-    batch: RecordBatch,
-    next_row: AtomicUsize,
-}
-
-impl SourceExec for AggregateSourceExec {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        let batch = self.shared.finalized.get().cloned().ok_or_else(|| {
-            Error::Execution("aggregate source initialized before sink finalization".into())
-        })?;
-        Ok(Arc::new(AggregateSourceGlobalContext {
-            batch,
-            next_row: AtomicUsize::new(0),
-        }))
-    }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        let global = global
-            .downcast::<AggregateSourceGlobalContext>()
-            .map_err(|_| {
-                Error::Execution("aggregate source received an invalid global context".into())
-            })?;
-        Ok(Box::new(AggregateSourceExecutor { global }))
-    }
-
-    fn finalize<'a>(
-        &'a self,
-        _global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
-struct AggregateSourceExecutor {
-    global: Arc<AggregateSourceGlobalContext>,
-}
-impl SourceExecutor for AggregateSourceExecutor {
-    fn next_batch<'a>(
-        &'a mut self,
-        shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+    fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if shutdown_guard.is_shutdown_requested() {
+            if guard.is_shutdown_requested() {
                 return Err(Error::Cancelled);
             }
-            let offset = self
-                .global
-                .next_row
-                .fetch_add(AGGREGATE_MORSEL_ROWS, Ordering::Relaxed);
-            if offset >= self.global.batch.num_rows() {
+            let batch = self
+                .merge
+                .take()
+                .ok_or_else(|| Error::Execution("aggregate already finished".into()))?
+                .finish()?;
+            self.result
+                .finalized
+                .set(batch)
+                .map_err(|_| Error::Execution("aggregate result already published".into()))
+        })
+    }
+}
+impl SourceExec for AggregateSourceExec {
+    fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
+        if self.result.finalized.get().is_none() {
+            return Err(Error::Execution(
+                "aggregate source started before sink finished".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn next_batch<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+        Box::pin(async move {
+            if guard.is_shutdown_requested() {
+                return Err(Error::Cancelled);
+            }
+            let batch = self
+                .result
+                .finalized
+                .get()
+                .ok_or_else(|| Error::Execution("aggregate result is not ready".into()))?;
+            if self.next_row >= batch.num_rows() {
                 return Ok(None);
             }
-            Ok(Some(self.global.batch.slice(
-                offset,
-                AGGREGATE_MORSEL_ROWS.min(self.global.batch.num_rows() - offset),
-            )))
+            let rows = AGGREGATE_MORSEL_ROWS.min(batch.num_rows() - self.next_row);
+            let output = batch.slice(self.next_row, rows);
+            self.next_row += rows;
+            Ok(Some(output))
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::expr::agg::test_support::AccumulatorTestHarness;
+    struct AggregateState {
+        program: crate::suboperator::ProgramContext,
+        local: crate::suboperator::ProgramExecutionContext,
+        states: Vec<crate::suboperator::StateId>,
+        merged: super::AggregateMergeState,
+    }
+    impl AggregateState {
+        fn new(operator: &crate::operator::AggregateOperator) -> crate::error::Result<Self> {
+            let mut builder = crate::suboperator::SuboperatorBuilder::new();
+            let states = operator.build_suboperator(&mut builder)?;
+            let program = builder
+                .finish(vec![])?
+                .compile(crate::suboperator::ExecutionMode::Native)?;
+            let mut local = program.new_execution_context();
+            program.initialize(&mut local)?;
+            Ok(Self {
+                program,
+                local,
+                states,
+                merged: super::AggregateMergeState::new(operator)?,
+            })
+        }
+        fn update(&mut self, batch: &arrow::record_batch::RecordBatch) -> crate::error::Result<()> {
+            self.program.execute_batch(batch, &mut self.local)?;
+            Ok(())
+        }
+        fn finish_partial(mut self) -> crate::error::Result<super::PartialAggregate> {
+            let (groups, states) =
+                crate::suboperator::aggregation::partial(&mut self.local, &self.states)?;
+            Ok(super::PartialAggregate { groups, states })
+        }
+        fn merge(&mut self, partial: &super::PartialAggregate) -> crate::error::Result<()> {
+            self.merged.merge(partial)
+        }
+        fn finish(mut self) -> crate::error::Result<arrow::record_batch::RecordBatch> {
+            let (groups, states) =
+                crate::suboperator::aggregation::partial(&mut self.local, &self.states)?;
+            self.merged
+                .merge(&super::PartialAggregate { groups, states })?;
+            self.merged.finish()
+        }
+    }
+
     use super::*;
     use crate::{
         expr::ExpressionResultType,
@@ -637,7 +572,7 @@ mod tests {
             assert_eq!(partial.num_rows(), 0);
             assert_eq!(partial.groups.schema(), operator.groups().output_schema());
             for (arrays, aggregate) in partial.states.iter().zip(operator.aggregates()) {
-                let fields = AggregateExpressionExecutor::try_new(aggregate.clone())
+                let fields = AccumulatorTestHarness::try_new(aggregate.clone())
                     .unwrap()
                     .state_types();
                 assert_eq!(arrays.len(), fields.len());
@@ -820,22 +755,31 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_sum_stays_exact_and_signed_sum_checks_overflow() {
+    fn integer_sum_stays_exact_and_wraps_on_update_and_partial_merge() {
         use arrow::array::UInt64Array;
-        for (data_type, array) in [
+        for (array, expected) in [
             (
-                DataType::UInt64,
                 Arc::new(UInt64Array::from(vec![
                     Some(9_007_199_254_740_993),
                     None,
                     Some(2),
                 ])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![9_007_199_254_740_995])) as ArrayRef,
             ),
             (
-                DataType::Int64,
                 Arc::new(Int64Array::from(vec![Some(i64::MAX), None, Some(1)])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![i64::MIN])) as ArrayRef,
+            ),
+            (
+                Arc::new(Int64Array::from(vec![Some(i64::MIN), None, Some(-1)])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![i64::MAX])) as ArrayRef,
+            ),
+            (
+                Arc::new(UInt64Array::from(vec![Some(u64::MAX), None, Some(1)])) as ArrayRef,
+                Arc::new(UInt64Array::from(vec![0])) as ArrayRef,
             ),
         ] {
+            let data_type = array.data_type().clone();
             let input_schema =
                 Arc::new(Schema::new(vec![Field::new("v", data_type.clone(), true)]));
             let operator = Arc::new(
@@ -861,22 +805,21 @@ mod tests {
             );
             let mut state = AggregateState::new(&operator).unwrap();
             let input = RecordBatch::try_new(input_schema, vec![array]).unwrap();
-            if data_type == DataType::Int64 {
-                assert!(state.update(&input).is_err());
-            } else {
-                state.update(&input).unwrap();
-                let mut merged = AggregateState::new(&operator).unwrap();
-                merged.merge(&state.finish_partial().unwrap()).unwrap();
+            state.update(&input).unwrap();
+
+            // Each worker's value fits by itself; overflow occurs only when
+            // partial states combine. Include a NULL-only worker as well.
+            let mut merged = AggregateState::new(&operator).unwrap();
+            for row in 0..input.num_rows() {
+                let mut worker = AggregateState::new(&operator).unwrap();
+                worker.update(&input.slice(row, 1)).unwrap();
+                merged.merge(&worker.finish_partial().unwrap()).unwrap();
+            }
+            for result in [state.finish().unwrap(), merged.finish().unwrap()] {
                 assert_eq!(
-                    merged
-                        .finish()
-                        .unwrap()
-                        .column(0)
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap()
-                        .value(0),
-                    9_007_199_254_740_995
+                    result.column(0).to_data(),
+                    expected.to_data(),
+                    "SUM over {data_type}"
                 );
             }
         }
@@ -1061,12 +1004,10 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut state = AggregateState::new(&operator).unwrap();
-        assert!(
-            state
-                .update(&batch(vec![Some("a")], vec![Some(1.)]))
-                .is_err()
-        );
+        assert!(matches!(
+            AggregateState::new(&operator),
+            Err(Error::InvalidPlan(_))
+        ));
     }
 
     #[test]
@@ -1092,5 +1033,78 @@ mod tests {
             state.update(&batch(vec![Some("a")], vec![Some(1.)])),
             Err(Error::Execution(_))
         ));
+    }
+
+    #[test]
+    fn integer_groups_remap_partial_ids_and_keep_null_and_wrapping_sum() {
+        use std::collections::BTreeMap;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int64, true),
+            Field::new("value", DataType::Int64, true),
+        ]));
+        let value = ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, true))
+            .into_ref();
+        let operator = AggregateOperator::try_new(
+            Projection::from_indices(schema.clone(), &[0]).unwrap(),
+            vec![
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Sum,
+                    vec![value.clone()],
+                    DataType::Int64,
+                    true,
+                )),
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Count,
+                    vec![value],
+                    DataType::Int64,
+                    false,
+                )),
+            ],
+        )
+        .unwrap();
+        let inputs = [
+            (
+                vec![Some(i64::MIN), None, Some(0), Some(i64::MAX)],
+                vec![Some(i64::MAX), None, Some(2), Some(4)],
+            ),
+            (
+                vec![Some(i64::MAX), Some(i64::MIN), None, Some(1)],
+                vec![Some(3), Some(1), None, Some(-1)],
+            ),
+        ];
+        let mut merged = AggregateState::new(&operator).unwrap();
+        for (keys, values) in inputs {
+            let input = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(keys)),
+                    Arc::new(Int64Array::from(values)),
+                ],
+            )
+            .unwrap();
+            let mut partial = AggregateState::new(&operator).unwrap();
+            partial.update(&input).unwrap();
+            merged.merge(&partial.finish_partial().unwrap()).unwrap();
+        }
+        let output = merged.finish().unwrap();
+        let arrays = output
+            .columns()
+            .iter()
+            .map(|a| a.as_any().downcast_ref::<Int64Array>().unwrap())
+            .collect::<Vec<_>>();
+        let actual = arrays[0]
+            .iter()
+            .zip(arrays[1].iter().zip(arrays[2].iter()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            actual,
+            BTreeMap::from([
+                (None, (None, Some(0))),
+                (Some(i64::MIN), (Some(i64::MIN), Some(2))),
+                (Some(0), (Some(2), Some(1))),
+                (Some(1), (Some(-1), Some(1))),
+                (Some(i64::MAX), (Some(7), Some(2))),
+            ])
+        );
     }
 }

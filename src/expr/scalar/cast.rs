@@ -12,29 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
-use super::ScalarExprRef;
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use crate::error::{Error, Result};
-use arrow::{
-    array::{ArrayRef, new_empty_array},
-    compute::{CastOptions, cast_with_options},
-    datatypes::DataType,
-};
+use super::{ExpressionResultType, ScalarExprRef};
+use arrow::datatypes::DataType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CastMode {
     Strict,
     Try,
 }
-
-#[derive(Debug)]
-pub struct CastExpressionEvaluation {
-    argument: Box<ScalarExpressionEvaluation>,
-    target: DataType,
-    options: CastOptions<'static>,
-}
-
-/// An expression that converts its input to the target type.
 #[derive(Clone, Debug)]
 pub struct CastExpression {
     input: ScalarExprRef,
@@ -43,6 +27,14 @@ pub struct CastExpression {
 }
 
 impl CastExpression {
+    pub(crate) fn build_suboperator(
+        &self,
+        builder: &mut crate::suboperator::SuboperatorBuilder,
+    ) -> crate::error::Result<crate::suboperator::VariableId> {
+        let input = self.input().build_suboperator(builder)?;
+        builder.cast(input, self.target().clone(), self.mode())
+    }
+
     pub fn new(input: ScalarExprRef, target: DataType, mode: CastMode, nullable: bool) -> Self {
         Self {
             input,
@@ -64,41 +56,5 @@ impl CastExpression {
     }
     pub fn result_type(&self) -> &ExpressionResultType {
         &self.result_type
-    }
-
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ScalarExpressionEvaluation::Cast(self.bind()?))
-    }
-
-    pub(super) fn bind(&self) -> Result<CastExpressionEvaluation> {
-        Ok(CastExpressionEvaluation {
-            argument: Box::new(self.input.to_evaluation()?),
-            target: self.result_type.data_type.clone(),
-            options: CastOptions {
-                safe: self.mode == CastMode::Try,
-                ..Default::default()
-            },
-        })
-    }
-}
-
-impl CastExpressionEvaluation {
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ArrayRef> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
-        }
-        let argument = self.argument.evaluate(executor)?;
-        self.eval(executor, &[&argument])
-    }
-    fn eval(&self, executor: &ScalarExpressionExecutor, input: &[&ArrayRef]) -> Result<ArrayRef> {
-        Ok(if executor.num_rows()? == 0 {
-            new_empty_array(&self.target)
-        } else {
-            let [argument] = input else {
-                return Err(Error::Execution("cast requires one input result".into()));
-            };
-
-            cast_with_options(argument.as_ref(), &self.target, &self.options)?
-        })
     }
 }

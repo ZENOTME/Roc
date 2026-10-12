@@ -17,7 +17,6 @@ use super::Operator;
 use crate::expr::scalar::ScalarExprRef;
 use crate::{
     error::{Error, Result},
-    exec::FilterExec,
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
@@ -29,6 +28,14 @@ pub struct FilterOperator {
 }
 
 impl FilterOperator {
+    pub fn build_suboperator(
+        &self,
+        builder: &mut crate::suboperator::SuboperatorBuilder,
+    ) -> Result<()> {
+        let predicate = self.predicate.build_suboperator(builder)?;
+        builder.materialize(Some(predicate))
+    }
+
     pub fn new(predicate: ScalarExprRef) -> Self {
         Self { predicate }
     }
@@ -51,9 +58,7 @@ impl Operator for FilterOperator {
                 current_node.children().len(),
             )));
         };
-        graph
-            .pipeline_mut(current)?
-            .add_processor(Box::new(FilterExec::new(self.predicate.clone())));
-        build_pipeline_on_node(child, current, graph)
+        build_pipeline_on_node(child, current, graph)?;
+        self.build_suboperator(&mut graph.pipeline_mut(current)?.suboperators)
     }
 }

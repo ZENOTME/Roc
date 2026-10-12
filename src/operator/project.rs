@@ -18,7 +18,6 @@ use crate::expr::ExpressionResultType;
 use crate::expr::scalar::{ReferenceExpression, ScalarExprRef};
 use crate::{
     error::{Error, Result},
-    exec::ProjectExec,
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
@@ -54,6 +53,18 @@ pub struct Projection {
     metadata: HashMap<String, String>,
 }
 impl Projection {
+    pub fn build_suboperator(
+        &self,
+        builder: &mut crate::suboperator::SuboperatorBuilder,
+    ) -> Result<()> {
+        let columns = self
+            .expressions
+            .iter()
+            .map(|e| e.expression().build_suboperator(builder))
+            .collect::<Result<Vec<_>>>()?;
+        builder.set_columns(columns, self.output_schema())
+    }
+
     pub fn new(expressions: Vec<ProjectionExpression>) -> Self {
         Self {
             expressions,
@@ -135,9 +146,8 @@ impl Operator for ProjectOperator {
                 current_node.children().len(),
             )));
         };
-        graph
-            .pipeline_mut(current)?
-            .add_processor(Box::new(ProjectExec::new(self.projector.clone())));
-        build_pipeline_on_node(child, current, graph)
+        build_pipeline_on_node(child, current, graph)?;
+        self.projector
+            .build_suboperator(&mut graph.pipeline_mut(current)?.suboperators)
     }
 }
