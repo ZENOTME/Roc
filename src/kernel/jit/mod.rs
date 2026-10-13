@@ -14,7 +14,7 @@
 
 //! Compiles a pipeline kernel graph into one fused row loop.
 //!
-//! Every variable is a Cranelift frontend variable, so values defined inside a
+//! LLVM promotes entry-allocated graph variables to SSA, so values defined inside a
 //! Filter region and used after it is reopened are carried by SSA phis. A
 //! Filter domain is a region guarded by its predicate; regions open lazily and
 //! close when an item of a non-descendant domain is emitted.
@@ -23,13 +23,8 @@ use super::runtime::{self, Runtime};
 use super::*;
 use crate::arrow::datatypes::DataType;
 use crate::error::{Error, Result};
-use cranelift_codegen::ir::{
-    AbiParam, Block, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Type, Value,
-    condcodes::IntCC, types,
-};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable as Var};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module};
+mod llvm;
+use llvm::{AbiParam, Block, FunctionBuilder, IntCC, JitModule, MemFlags, Type, Value, Var, types};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -58,7 +53,7 @@ pub(crate) struct Compiled {
     pub entry: Option<Entry>,
     /// A specialized global reduction, used instead of `entry` when present.
     pub reduction: Option<Entry>,
-    module: Mutex<Option<JITModule>>,
+    _module: Mutex<Option<JitModule>>,
     pub ir: String,
     pub sites: Vec<KernelError>,
     _constants: Vec<Arc<[u8]>>,
@@ -72,24 +67,11 @@ impl std::fmt::Debug for Compiled {
     }
 }
 
-impl Drop for Compiled {
-    fn drop(&mut self) {
-        if let Some(m) = self
-            .module
-            .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            unsafe { m.free_memory() };
-        }
-    }
-}
-
 fn error(e: impl std::fmt::Display) -> Error {
-    Error::Execution(format!("Cranelift: {e}"))
+    Error::Execution(format!("LLVM: {e}"))
 }
 
-pub(super) fn clif_type(t: VariableType) -> Type {
+pub(super) fn llvm_type(t: VariableType) -> Type {
     match t {
         VariableType::Boolean | VariableType::Int8 | VariableType::UInt8 => types::I8,
         VariableType::Int16 | VariableType::UInt16 => types::I16,
@@ -110,33 +92,15 @@ impl Compiled {
             return Ok(Self {
                 entry: None,
                 reduction: None,
-                module: Mutex::new(None),
+                _module: Mutex::new(None),
                 ir: String::new(),
                 sites: vec![],
                 _constants: vec![],
             });
         }
-        let mut module = JITModule::new(
-            JITBuilder::with_flags(
-                &[("opt_level", "speed")],
-                cranelift_module::default_libcall_names(),
-            )
-            .map_err(error)?,
-        );
-        let mut ctx = module.make_context();
-        let ptr = module.target_config().pointer_type();
-        if ptr != types::I64 {
-            return Err(Error::InvalidPlan(
-                "generated code requires a 64-bit target".into(),
-            ));
-        }
-        ctx.func.signature.params = vec![AbiParam::new(ptr); 6];
-        ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
-        let id = module
-            .declare_function("roc_pipeline", Linkage::Export, &ctx.func.signature)
-            .map_err(error)?;
-        let mut fb = FunctionBuilderContext::new();
-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+        let mut module = JitModule::new()?;
+        let id = module.function("roc_pipeline", 6);
+        let mut b = module.builder(id);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
@@ -159,7 +123,7 @@ impl Compiled {
         b.switch_to_block(body);
         let mut c = Compiler {
             b,
-            module: &mut module,
+            module: &module,
             graph,
             plan,
             vars: vec![None; graph.variables.len()],
@@ -213,23 +177,21 @@ impl Compiled {
         let sites = std::mem::take(&mut c.sites);
         let constants = std::mem::take(&mut c.constants);
         c.b.finalize();
-        let mut ir = ctx.func.display().to_string();
-        module.define_function(id, &mut ctx).map_err(error)?;
-        let reduction = reduce::compile(&mut module, graph, plan)?.map(|(id, lowered)| {
-            ir.push_str("\n; Specialized global reduction\n");
-            ir.push_str(&lowered);
-            id
-        });
-        module.finalize_definitions().map_err(error)?;
-        let reduction = reduction.map(|id| unsafe {
-            std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
-        });
-        let entry =
-            unsafe { std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id)) };
+        let reduction = reduce::compile(&module, graph, plan)?;
+        module.finalize()?;
+        let ir = module.ir();
+        let reduction = reduction
+            .map(|id| {
+                module
+                    .address(id)
+                    .map(|p| unsafe { std::mem::transmute::<usize, Entry>(p) })
+            })
+            .transpose()?;
+        let entry = unsafe { std::mem::transmute::<usize, Entry>(module.address(id)?) };
         Ok(Self {
             entry: Some(entry),
             reduction,
-            module: Mutex::new(Some(module)),
+            _module: Mutex::new(Some(module)),
             ir,
             sites,
             _constants: constants,
@@ -239,7 +201,7 @@ impl Compiled {
 
 pub(super) struct Compiler<'a, 'f> {
     pub b: FunctionBuilder<'f>,
-    module: &'a mut JITModule,
+    module: &'a JitModule,
     pub graph: &'a KernelGraph,
     plan: &'a Plan,
     vars: Vec<Option<Var>>,
@@ -261,7 +223,7 @@ impl Compiler<'_, '_> {
         if let Some(var) = self.vars[v.0] {
             return var;
         }
-        let var = self.b.declare_var(clif_type(self.graph.variables[v.0].ty));
+        let var = self.b.declare_var(llvm_type(self.graph.variables[v.0].ty));
         self.vars[v.0] = Some(var);
         var
     }
@@ -280,18 +242,10 @@ impl Compiler<'_, '_> {
     /// A loop-invariant load from an entry argument, hoisted to the preheader
     /// without changing the builder's current block.
     pub fn descriptor(&mut self, argument: usize, offset: i32) -> Value {
-        use cranelift_codegen::cursor::{Cursor, FuncCursor};
         if let Some(v) = self.hoisted.get(&(argument, offset)) {
             return *v;
         }
-        if !self.b.func.layout.is_block_inserted(self.setup) {
-            self.b.func.layout.append_block(self.setup);
-        }
-        let arg = self.args[argument];
-        let v = FuncCursor::new(self.b.func)
-            .at_bottom(self.setup)
-            .ins()
-            .load(types::I64, MemFlags::new(), arg, offset);
+        let v = self.b.hoisted_load(self.setup, self.args[argument], offset);
         self.hoisted.insert((argument, offset), v);
         v
     }
@@ -302,7 +256,7 @@ impl Compiler<'_, '_> {
         let mut sig = self.module.make_signature();
         sig.params = args
             .iter()
-            .map(|v| AbiParam::new(self.b.func.dfg.value_type(*v)))
+            .map(|v| AbiParam::new(self.b.value_type(*v)))
             .collect();
         sig.returns = returns.iter().map(|t| AbiParam::new(*t)).collect();
         let sig = self.b.import_signature(sig);
@@ -319,12 +273,7 @@ impl Compiler<'_, '_> {
         self.b.switch_to_block(next);
     }
     pub fn stack(&mut self, bytes: usize) -> Value {
-        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            bytes.max(8) as u32,
-            3,
-        ));
-        self.b.ins().stack_addr(types::I64, slot, 0)
+        self.b.stack(bytes)
     }
 
     fn goto(&mut self, target: DomainId) {
@@ -391,7 +340,7 @@ impl Compiler<'_, '_> {
                         let offset = self.descriptor(1, base + 32);
                         self.bit(data, offset, row)
                     } else {
-                        let t = clif_type(self.ty(value));
+                        let t = llvm_type(self.ty(value));
                         let at = self.b.ins().imul_imm(row, i64::from(t.bytes()));
                         let at = self.b.ins().iadd(data, at);
                         self.b.ins().load(t, MemFlags::new(), at, 0)
@@ -475,7 +424,7 @@ impl Compiler<'_, '_> {
                 _ => {
                     let value = binding.value().unwrap();
                     let data = self.descriptor(2, base);
-                    let t = clif_type(self.ty(value));
+                    let t = llvm_type(self.ty(value));
                     let at = self.b.ins().imul_imm(count, i64::from(t.bytes()));
                     let at = self.b.ins().iadd(data, at);
                     let v = self.get(value);

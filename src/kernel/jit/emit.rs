@@ -112,7 +112,7 @@ impl Compiler<'_, '_> {
                 self.word(bytes.as_ptr() as i64)
             }
             _ => {
-                let t = clif_type(value.ty());
+                let t = llvm_type(value.ty());
                 let bits = value.bits();
                 let bits = if t.bits() < 64 {
                     bits & ((1u64 << t.bits()) - 1)
@@ -132,7 +132,7 @@ impl Compiler<'_, '_> {
             VariableType::Float64 => self.b.ins().bitcast(types::I64, MemFlags::new(), v),
             _ => v,
         };
-        if self.b.func.dfg.value_type(v).bits() == 64 {
+        if self.b.value_type(v).bits() == 64 {
             v
         } else if ty.is_signed() {
             self.b.ins().sextend(types::I64, v)
@@ -143,7 +143,7 @@ impl Compiler<'_, '_> {
 
     /// Reverses `bits`.
     pub(super) fn decode(&mut self, bits: Value, ty: VariableType) -> Value {
-        let t = clif_type(ty);
+        let t = llvm_type(ty);
         match ty {
             VariableType::Float32 => {
                 let v = self.b.ins().ireduce(types::I32, bits);
@@ -179,7 +179,7 @@ impl Compiler<'_, '_> {
                     (Multiply, true) => self.b.ins().smul_overflow(a[0], a[1]),
                     (Multiply, false) => self.b.ins().umul_overflow(a[0], a[1]),
                     _ => {
-                        let zero = self.b.ins().iconst(clif_type(t), 0);
+                        let zero = self.b.ins().iconst(llvm_type(t), 0);
                         self.b.ins().ssub_overflow(zero, a[0])
                     }
                 };
@@ -193,10 +193,10 @@ impl Compiler<'_, '_> {
                 } else {
                     runtime::remainder_f64 as *const () as usize
                 };
-                self.call(helper, a, &[clif_type(t)])
+                self.call(helper, a, &[llvm_type(t)])
             }
             Divide | Remainder => {
-                let ct = clif_type(t);
+                let ct = llvm_type(t);
                 let zero = self.b.ins().icmp_imm(IntCC::Equal, a[1], 0);
                 let one = self.b.ins().iconst(ct, 1);
                 let divisor = self.b.ins().select(zero, one, a[1]);
@@ -290,7 +290,7 @@ impl Compiler<'_, '_> {
 
     /// Maps IEEE floats to integers ordered like `total_cmp`.
     fn float_key(&mut self, v: Value) -> Value {
-        let t = if self.b.func.dfg.value_type(v) == types::F32 {
+        let t = if self.b.value_type(v) == types::F32 {
             types::I32
         } else {
             types::I64

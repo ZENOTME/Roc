@@ -8,11 +8,17 @@ Preparation includes operator construction, graph lowering and JIT compilation.
 Execution includes state initialization, scheduling, all output collection and cleanup.
 Input generation, full correctness checking and output deallocation are excluded.
 """
-import argparse, hashlib, json, os, pathlib, re, shutil, statistics, subprocess, tarfile, time
+import argparse, hashlib, json, os, pathlib, platform, re, shutil, statistics, subprocess, tarfile, time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODES = ['compile', 'zero-generated', 'zero-native']
 def command(args, **kw):
     return subprocess.check_output(args, cwd=ROOT, **kw).decode().strip()
+def machine_info():
+    if platform.system() == 'Darwin':
+        return command(['sysctl','-n','machdep.cpu.brand_string','hw.memsize','hw.physicalcpu'])
+    if platform.system() == 'Linux':
+        return command(['uname','-a']) + '\n' + command(['lscpu']) + '\n' + pathlib.Path('/proc/meminfo').read_text()
+    return platform.platform()
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 def snapshot_hash(path):
@@ -33,7 +39,7 @@ def main():
     if min(a.rows, a.samples, a.replicas) <= 0: p.error('rows, samples, replicas must be positive')
     out = (ROOT / a.output).resolve(); out.mkdir(parents=True, exist_ok=a.resume_build)
     if any(out.glob('*-t*-r*.json')): raise RuntimeError('refusing to overwrite measurements')
-    metadata = {'baseline':command(['git','rev-parse',a.baseline]), 'current_head':command(['git','rev-parse','HEAD']), 'current_status':command(['git','status','--short']), 'rustc':command(['rustc','-Vv']), 'machine':command(['sysctl','-n','machdep.cpu.brand_string','hw.memsize','hw.physicalcpu']), 'args':vars(a), 'builds':{}}
+    metadata = {'baseline':command(['git','rev-parse',a.baseline]), 'current_head':command(['git','rev-parse','HEAD']), 'current_status':command(['git','status','--short']), 'rustc':command(['rustc','-Vv']), 'machine':machine_info(), 'args':vars(a), 'builds':{}}
     (out/'current.patch').write_bytes(subprocess.check_output(['git','diff','--binary','HEAD'],cwd=ROOT))
     binaries = {}
     for label in ['main','current']:

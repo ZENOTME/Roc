@@ -16,7 +16,7 @@
 //! generated per Call signature with the instruction selection of fused
 //! programs, and kept in a process-wide cache for the life of the process.
 use super::*;
-use cranelift_module::FuncId;
+
 use std::sync::LazyLock;
 
 /// `(runtime, inputs, outputs, rows, n) -> status`.
@@ -135,39 +135,28 @@ fn generate(signatures: &[Signature]) -> Result<Vec<usize>> {
     if signatures.is_empty() {
         return Ok(vec![]);
     }
-    let mut module = JITModule::new(
-        JITBuilder::with_flags(
-            &[("opt_level", "speed")],
-            cranelift_module::default_libcall_names(),
-        )
-        .map_err(error)?,
-    );
-    if module.target_config().pointer_type() != types::I64 {
-        return Err(Error::InvalidPlan(
-            "generated code requires a 64-bit target".into(),
-        ));
-    }
+    let mut module = JitModule::new()?;
     let ids = signatures
         .iter()
         .enumerate()
-        .map(|(i, (function, inputs))| define(&mut module, i, *function, inputs))
+        .map(|(i, (function, inputs))| define(&module, i, *function, inputs))
         .collect::<Result<Vec<_>>>()?;
-    module.finalize_definitions().map_err(error)?;
+    module.finalize()?;
     let addresses = ids
         .iter()
-        .map(|id| module.get_finalized_function(*id) as usize)
-        .collect();
+        .map(|id| module.address(*id))
+        .collect::<Result<Vec<_>>>()?;
     // Cached functions are never freed.
     std::mem::forget(module);
     Ok(addresses)
 }
 
 fn define(
-    module: &mut JITModule,
+    module: &JitModule,
     index: usize,
     function: ScalarFunction,
     inputs: &[VariableType],
-) -> Result<FuncId> {
+) -> Result<llvm::FuncId> {
     let outputs = function.output_types(inputs)?;
     let (n_in, n_out) = (inputs.len(), outputs.len());
     let graph = KernelGraph {
@@ -196,18 +185,8 @@ fn define(
         output: None,
     };
     let plan = Plan::new(&graph);
-    let mut ctx = module.make_context();
-    ctx.func.signature.params = vec![AbiParam::new(types::I64); 5];
-    ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
-    let id = module
-        .declare_function(
-            &format!("roc_kernel_{index}"),
-            Linkage::Local,
-            &ctx.func.signature,
-        )
-        .map_err(error)?;
-    let mut fb = FunctionBuilderContext::new();
-    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+    let id = module.function(&format!("roc_kernel_{index}"), 5);
+    let mut b = module.builder(id);
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
@@ -229,76 +208,113 @@ fn define(
         })
         .collect::<Vec<_>>();
     let zero = b.ins().iconst(types::I64, 0);
-    let count = b.declare_var(types::I64);
-    b.def_var(count, zero);
-    let dense = b.create_block();
-    let dense_body = b.create_block();
-    let selected = b.create_block();
-    let selected_body = b.create_block();
     let done = b.create_block();
-    b.append_block_param(dense, types::I64);
-    b.append_block_param(selected, types::I64);
-    let is_dense = b.ins().icmp_imm(IntCC::Equal, args[3], 0);
-    b.ins()
-        .brif(is_dense, dense, &[zero.into()], selected, &[zero.into()]);
-    let mut c = Compiler {
-        b,
-        module: &mut *module,
-        graph: &graph,
-        plan: &plan,
-        vars: vec![None; graph.variables.len()],
-        args,
-        row: zero,
-        setup: entry,
-        fail,
-        hoisted: HashMap::new(),
-        regions: vec![],
-        count,
-        sites: vec![],
-        constants: vec![],
-        aliases: &[],
-    };
-    for (head, body) in [(dense, dense_body), (selected, selected_body)] {
-        c.b.switch_to_block(head);
-        let i = c.b.block_params(head)[0];
-        let more = c.b.ins().icmp(IntCC::UnsignedLessThan, i, c.args[4]);
-        c.b.ins().brif(more, body, &[], done, &[]);
-        c.b.switch_to_block(body);
-        let row = if head == dense {
-            i
-        } else {
-            let at = c.b.ins().ishl_imm(i, 2);
-            let at = c.b.ins().iadd(c.args[3], at);
-            c.b.ins().uload32(MemFlags::new(), at, 0)
-        };
-        for (k, &(pointer, mask)) in sources.iter().enumerate() {
-            let r = c.b.ins().band(row, mask);
-            let offset = c.b.ins().ishl_imm(r, 3);
-            let at = c.b.ins().iadd(pointer, offset);
-            let word = c.b.ins().load(types::I64, MemFlags::new(), at, 0);
-            let v = c.decode(word, inputs[k]);
-            c.set(VariableId(k), v);
-        }
-        c.kernel(0)?;
-        let offset = c.b.ins().ishl_imm(row, 3);
-        for (j, &sink) in sinks.iter().enumerate() {
-            let v = c.get(VariableId(n_in + j));
-            let word = c.bits(v, outputs[j]);
-            let at = c.b.ins().iadd(sink, offset);
-            c.b.ins().store(MemFlags::new(), word, at, 0);
-        }
-        let next = c.b.ins().iadd_imm(i, 1);
-        c.b.ins().jump(head, &[next.into()]);
+    // Scalar broadcasting is an input shape, not a per-row address mask.
+    // Lift the same scalar kernel for every shape in the finite signature.
+    // Dispatch once per invocation; scalar loads dominate the row loops.
+    let mut shape = zero;
+    for (k, &(_, mask)) in sources.iter().enumerate() {
+        let scalar = b.ins().icmp_imm(IntCC::Equal, mask, 0);
+        let scalar = b.ins().uextend(types::I64, scalar);
+        let bit = b.ins().ishl_imm(scalar, k as i64);
+        shape = b.ins().bor(shape, bit);
     }
-    c.b.switch_to_block(done);
-    let ok = c.b.ins().iconst(types::I32, 0);
-    c.b.ins().return_(&[ok]);
-    c.b.switch_to_block(fail);
-    let status = c.b.block_params(fail)[0];
-    c.b.ins().return_(&[status]);
-    c.b.seal_all_blocks();
-    c.b.finalize();
-    module.define_function(id, &mut ctx).map_err(error)?;
+    let shape_entries = (0..1usize << n_in)
+        .map(|_| b.create_block())
+        .collect::<Vec<_>>();
+    for (s, &target) in shape_entries.iter().enumerate() {
+        if s + 1 == shape_entries.len() {
+            b.ins().jump(target, &[]);
+        } else {
+            let next = b.create_block();
+            let matches = b.ins().icmp_imm(IntCC::Equal, shape, s as i64);
+            b.ins().brif(matches, target, &[], next, &[]);
+            b.switch_to_block(next);
+        }
+    }
+    for (shape, &shape_entry) in shape_entries.iter().enumerate() {
+        b.switch_to_block(shape_entry);
+        let scalar_values = sources
+            .iter()
+            .enumerate()
+            .map(|(k, &(pointer, _))| {
+                (shape & (1 << k) != 0)
+                    .then(|| b.ins().load(types::I64, MemFlags::new(), pointer, 0))
+            })
+            .collect::<Vec<_>>();
+        let count = b.declare_var(types::I64);
+        b.def_var(count, zero);
+        let dense = b.create_block();
+        let dense_body = b.create_block();
+        let selected = b.create_block();
+        let selected_body = b.create_block();
+        b.append_block_param(dense, types::I64);
+        b.append_block_param(selected, types::I64);
+        let is_dense = b.ins().icmp_imm(IntCC::Equal, args[3], 0);
+        b.ins()
+            .brif(is_dense, dense, &[zero.into()], selected, &[zero.into()]);
+        let mut c = Compiler {
+            b,
+            module,
+            graph: &graph,
+            plan: &plan,
+            vars: vec![None; graph.variables.len()],
+            args: args.clone(),
+            row: zero,
+            setup: shape_entry,
+            fail,
+            hoisted: HashMap::new(),
+            regions: vec![],
+            count,
+            sites: vec![],
+            constants: vec![],
+            aliases: &[],
+        };
+        for (head, body) in [(dense, dense_body), (selected, selected_body)] {
+            c.b.switch_to_block(head);
+            let i = c.b.block_params(head)[0];
+            let more = c.b.ins().icmp(IntCC::UnsignedLessThan, i, c.args[4]);
+            c.b.ins().brif(more, body, &[], done, &[]);
+            c.b.switch_to_block(body);
+            let row = if head == dense {
+                i
+            } else {
+                let at = c.b.ins().ishl_imm(i, 2);
+                let at = c.b.ins().address(c.args[3], at);
+                c.b.ins().uload32(MemFlags::new(), at, 0)
+            };
+            for (k, &(pointer, _)) in sources.iter().enumerate() {
+                let word = if let Some(value) = scalar_values[k] {
+                    value
+                } else {
+                    let offset = c.b.ins().ishl_imm(row, 3);
+                    let at = c.b.ins().address(pointer, offset);
+                    c.b.ins().load(types::I64, MemFlags::new(), at, 0)
+                };
+                let v = c.decode(word, inputs[k]);
+                c.set(VariableId(k), v);
+            }
+            c.kernel(0)?;
+            let offset = c.b.ins().ishl_imm(row, 3);
+            for (j, &sink) in sinks.iter().enumerate() {
+                let v = c.get(VariableId(n_in + j));
+                let word = c.bits(v, outputs[j]);
+                let at = c.b.ins().address(sink, offset);
+                c.b.ins().store(MemFlags::new(), word, at, 0);
+            }
+            let next = c.b.ins().iadd_imm(i, 1);
+            c.b.ins().jump(head, &[next.into()]);
+        }
+        b = c.b;
+    }
+    b.switch_to_block(done);
+    let ok = b.ins().iconst(types::I32, 0);
+    b.ins().return_(&[ok]);
+    b.switch_to_block(fail);
+    let status = b.block_params(fail)[0];
+    b.ins().return_(&[status]);
+    b.seal_all_blocks();
+    b.finalize();
     Ok(id)
 }
 
@@ -318,24 +334,53 @@ mod tests {
     }
 
     #[test]
-    fn generated_kernels_compute_dense_selected_and_constant_rows() {
+    fn generated_kernels_preserve_broadcast_selection_aliases_and_overflow() {
         let entry = generated(ScalarFunction::Add, &[VariableType::Int32; 2]).unwrap();
-        let left = [1u64, 2, 3, (-4i64) as u64];
-        let right = [10u64];
-        let sources = [[left.as_ptr() as u64, u64::MAX], [right.as_ptr() as u64, 0]];
-        let run = |rows: Option<&[u32]>| {
-            let mut sum = [0u64; 4];
-            let mut overflow = [0u64; 4];
-            let sinks = [sum.as_mut_ptr(), overflow.as_mut_ptr()];
-            let (selection, n) = rows.map_or((std::ptr::null(), 4), |r| (r.as_ptr(), r.len()));
-            let mut runtime = Runtime::default();
-            // SAFETY: every listed row has a word in each input and output.
-            let status =
-                unsafe { entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), selection, n) };
-            assert_eq!(status, 0);
-            sum
-        };
-        assert_eq!(run(None), [11, 12, 13, 6]);
-        assert_eq!(run(Some(&[1, 3])), [0, 12, 0, 6]);
+        let n = 4099;
+        let left = (0..n)
+            .map(|i| [i32::MAX, i32::MIN, 17, -29][i % 4] as i64 as u64)
+            .collect::<Vec<_>>();
+        let right = (0..n)
+            .map(|i| [1i32, -1, -100, 200][i % 4] as i64 as u64)
+            .collect::<Vec<_>>();
+        let picked = [4098u32, 0, 31, 2, 4097, 100];
+        for alias in [false, true] {
+            let right = if alias { &left } else { &right };
+            for shape in 0..4 {
+                let scalar = [shape & 1 != 0, shape & 2 != 0];
+                let sources = [
+                    [left.as_ptr() as u64, if scalar[0] { 0 } else { u64::MAX }],
+                    [right.as_ptr() as u64, if scalar[1] { 0 } else { u64::MAX }],
+                ];
+                for selection in [None, Some(picked.as_slice()), Some(&[][..])] {
+                    let mut sum = vec![0xdead; n];
+                    let mut overflow = vec![0xbeef; n];
+                    let sinks = [sum.as_mut_ptr(), overflow.as_mut_ptr()];
+                    let (rows, count) =
+                        selection.map_or((std::ptr::null(), n), |s| (s.as_ptr(), s.len()));
+                    let mut runtime = Runtime::default();
+                    // SAFETY: all inputs cover the selected indices, output
+                    // buffers are disjoint, and broadcast words live here.
+                    assert_eq!(
+                        unsafe {
+                            entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), rows, count)
+                        },
+                        0
+                    );
+                    for r in 0..n {
+                        if selection.is_none_or(|s| s.contains(&(r as u32))) {
+                            let a = left[if scalar[0] { 0 } else { r }] as i32;
+                            let b = right[if scalar[1] { 0 } else { r }] as i32;
+                            let (value, flag) = a.overflowing_add(b);
+                            assert_eq!(sum[r], value as i64 as u64);
+                            assert_eq!(overflow[r], flag as u64);
+                        } else {
+                            assert_eq!(sum[r], 0xdead);
+                            assert_eq!(overflow[r], 0xbeef);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

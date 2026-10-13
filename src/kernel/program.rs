@@ -107,6 +107,7 @@ pub struct LocalState {
     states: Vec<Option<State>>,
     /// Columns reused by zero-compile execution across chunks.
     pub(crate) scratch: Vec<Vec<u64>>,
+    pub(crate) calls: super::vector::CallBuffers,
 }
 
 impl LocalState {
@@ -169,7 +170,7 @@ impl Program {
         &self.explain
     }
 
-    /// Cranelift IR of the generated functions; empty when nothing is generated.
+    /// Optimized LLVM IR of the generated functions; empty when nothing is generated.
     pub fn generated_ir(&self) -> &str {
         match &self.code {
             Code::Compiled(code) => &code.ir,
@@ -187,6 +188,7 @@ impl Program {
         Ok(LocalState {
             states,
             scratch: vec![],
+            calls: Default::default(),
         })
     }
 

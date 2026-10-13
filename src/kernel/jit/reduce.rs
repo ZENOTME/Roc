@@ -2,13 +2,12 @@
 //! The eligibility check is structural: only root-domain Count/Sum updates of
 //! one global group over one Int64/UInt64 input, with no output.
 use super::*;
-use cranelift_module::FuncId;
 
 pub(super) fn compile(
-    module: &mut JITModule,
+    module: &JitModule,
     graph: &KernelGraph,
     plan: &Plan,
-) -> Result<Option<(FuncId, String)>> {
+) -> Result<Option<llvm::FuncId>> {
     use AggregateUpdateKind as K;
     if graph.output.is_some() {
         return Ok(None);
@@ -62,14 +61,8 @@ pub(super) fn compile(
     };
     let base = slot * INPUT_WORDS * 8;
     let ptr = types::I64;
-    let mut ctx = module.make_context();
-    ctx.func.signature.params = vec![AbiParam::new(ptr); 6];
-    ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
-    let id = module
-        .declare_function("roc_global_reduce", Linkage::Local, &ctx.func.signature)
-        .map_err(error)?;
-    let mut fb = FunctionBuilderContext::new();
-    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+    let id = module.function("roc_global_reduce", 6);
+    let mut b = module.builder(id);
     let entry = b.create_block();
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
@@ -172,8 +165,7 @@ pub(super) fn compile(
         let mut bytes = [0u8; 16];
         bytes[..8].copy_from_slice(&(1u64 << (i * 2)).to_le_bytes());
         bytes[8..].copy_from_slice(&(2u64 << (i * 2)).to_le_bytes());
-        let constant = b.func.dfg.constants.insert(bytes.to_vec().into());
-        let mask = b.ins().vconst(vt, constant);
+        let mask = b.ins().vconst(bytes);
         let flag = b.ins().band(bits_vec, mask);
         let valid = b.ins().icmp(IntCC::NotEqual, flag, vz);
         let value = b.ins().load(vt, MemFlags::new(), at, (i * 16) as i32);
@@ -321,9 +313,7 @@ pub(super) fn compile(
     b.ins().return_(&[status]);
     b.seal_all_blocks();
     b.finalize();
-    let ir = ctx.func.display().to_string();
-    module.define_function(id, &mut ctx).map_err(error)?;
-    Ok(Some((id, ir)))
+    Ok(Some(id))
 }
 fn validity(
     b: &mut FunctionBuilder<'_>,

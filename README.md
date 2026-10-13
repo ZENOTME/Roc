@@ -56,13 +56,13 @@ Each pipeline becomes one `Program`, in one of two execution modes chosen when
 the pipeline graph is built:
 
 - `ExecutionMode::Compile` (the default) fuses the whole graph into one generated
-  Cranelift row loop: Filter opens a nested `if`, CASE/COALESCE emit balanced
+  LLVM row loop: Filter opens a nested `if`, CASE/COALESCE emit balanced
   branches, Count/Sum updates are inlined and global integer reductions lower to
   SIMD. Compilation happens during graph construction.
 - `ExecutionMode::ZeroCompile(library)` generates no code for the pipeline. Each
   kernel binds a precompiled function and runs over windows of 1024 rows in plan
   order; a Filter domain is a selection vector of root rows. With
-  `KernelLibrary::Generated`, a Call runs Cranelift code generated once per
+  `KernelLibrary::Generated`, a Call runs LLVM code generated once per
   signature with the instruction selection of fused programs and cached for the
   life of the process; `prewarm_kernels()` generates every signature up front, and
   a miss generates its signature when the program is prepared. With
@@ -94,7 +94,7 @@ cargo test --all-targets
 ```
 
 `PipelineGraph::explain()` prints each pipeline's kernel graph and
-`Program::generated_ir()` the Cranelift IR of a compiled program. String parsing
+`Program::generated_ir()` the optimized LLVM IR of a compiled program. String parsing
 and formatting and hash-table or aggregate state operations use scalar runtime
 functions with bound signatures. Unsupported signatures fail when the program
 is built; there is no interpreter fallback. Execution polls cancellation and
@@ -118,6 +118,21 @@ Run the fixed-condition CPU benchmark (preparation and execution reported separa
 ```sh
 cargo run --release --features jit --example vector_program_bench
 ```
+
+This experimental branch uses Inkwell 0.7.1 with LLVM 19.1 for all generated
+code, including cached kernels and specialized reductions. Install the LLVM 19
+development tools and shared library, then set `LLVM_SYS_191_PREFIX` to the
+installation prefix if `llvm-config` is not on PATH. For example:
+
+```sh
+LLVM_SYS_191_PREFIX=/path/to/llvm19 cargo test --locked -p roc
+```
+
+Generated modules are verified, optimized with LLVM's `default<O3>` pipeline
+for the host CPU/features, verified again, and finalized with MCJIT at aggressive
+optimization. No fast-math or unchecked-overflow flags are enabled. The generated
+kernel library pays this cost once at prewarm/cache-miss time; fused programs pay
+it during each graph construction. Native Rust kernels are unchanged.
 
 The benchmark separates compilation from execution and checks results before timing.
 It measures compute loops, not storage, scheduling, or a DuckDB comparison.

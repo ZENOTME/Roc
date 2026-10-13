@@ -14,8 +14,8 @@
 
 //! Numeric and Boolean conversions. Returns `(value, invalid)`; invalid marks
 //! out-of-range and NaN inputs, and the value is then unspecified but total.
+use super::llvm::FloatCC;
 use super::*;
-use cranelift_codegen::ir::condcodes::FloatCC;
 
 pub(super) fn emit(
     c: &mut Compiler<'_, '_>,
@@ -27,7 +27,7 @@ pub(super) fn emit(
     if from == to {
         return (v, ok);
     }
-    let target = clif_type(to);
+    let target = llvm_type(to);
     if to == VariableType::Boolean {
         let bit = if from.is_float() {
             let zero = if from == VariableType::Float32 {

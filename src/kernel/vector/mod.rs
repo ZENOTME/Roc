@@ -52,6 +52,8 @@ enum Register {
     Empty,
     Constant(u64),
     Column(Vec<u64>),
+    /// An Arrow value buffer whose physical representation already is words.
+    Borrowed(Buffer),
 }
 
 /// The rows of a domain as root row indices.
@@ -172,6 +174,7 @@ enum Step {
 /// The prepared steps of one program, each with the domain it runs in.
 pub(crate) struct Steps {
     steps: Vec<(Step, DomainId)>,
+    release_after: Vec<Vec<VariableId>>,
     variables: usize,
     domains: usize,
     _constants: Vec<Arc<[u8]>>,
@@ -209,6 +212,7 @@ impl Steps {
         }
         let mut constants = vec![];
         let mut steps = Vec::with_capacity(plan.items.len());
+        let mut last_use = vec![None; graph.variables.len()];
         for &(item, domain) in &plan.items {
             let step = match item {
                 Item::Input(input) => {
@@ -324,10 +328,35 @@ impl Steps {
                     },
                 },
             };
+            if let Item::Kernel(k) = item {
+                let (inputs, outputs) = match &graph.kernels[k].1 {
+                    Kernel::Scalar(kernel) => (kernel.inputs(), kernel.outputs()),
+                    Kernel::Domain(kernel) => (kernel.inputs(), kernel.outputs()),
+                };
+                // Even an unused auxiliary result occupies a buffer until its
+                // producing call returns; every later read extends its life.
+                for v in inputs.into_iter().chain(outputs) {
+                    last_use[v.0] = Some(steps.len());
+                }
+            }
             steps.push((step, domain));
+        }
+        // Results are materialized after all windows, so their buffers must
+        // retain earlier windows even after the final kernel read.
+        if let Some(output) = &graph.output {
+            for v in output.bindings.iter().flat_map(|b| b.variables()) {
+                last_use[v.0] = None;
+            }
+        }
+        let mut release_after = vec![vec![]; steps.len()];
+        for (v, last) in last_use.into_iter().enumerate() {
+            if let Some(i) = last {
+                release_after[i].push(VariableId(v));
+            }
         }
         Ok(Self {
             steps,
+            release_after,
             variables: graph.variables.len(),
             domains: graph.domains.len(),
             _constants: constants,
@@ -354,6 +383,7 @@ impl Steps {
             registers: (0..self.variables).map(|_| Register::Empty).collect(),
             selections: vec![None; self.domains],
             pool: std::mem::take(&mut local.scratch),
+            calls: std::mem::take(&mut local.calls),
             strings: vec![],
             limit: rows,
             raised: None,
@@ -368,7 +398,7 @@ impl Steps {
                 break;
             }
             frame.selections.iter_mut().for_each(|s| *s = None);
-            for (step, domain) in &self.steps {
+            for (index, (step, domain)) in self.steps.iter().enumerate() {
                 if guard.is_shutdown_requested() {
                     result = Err(Error::Cancelled);
                     break 'windows;
@@ -382,6 +412,16 @@ impl Steps {
                 if let Err(e) = done {
                     result = Err(e);
                     break 'windows;
+                }
+                for v in &self.release_after[index] {
+                    // Borrowed inputs keep their chunk binding across windows;
+                    // only owned scratch columns consume reusable storage.
+                    if matches!(frame.registers[v.0], Register::Column(_)) {
+                        if let Register::Column(column) = std::mem::take(&mut frame.registers[v.0])
+                        {
+                            frame.pool.push(column);
+                        }
+                    }
                 }
             }
             if rows == 0 {
@@ -408,6 +448,7 @@ impl Steps {
             }
         }
         local.scratch = frame.pool;
+        local.calls = frame.calls;
         result
     }
 }
@@ -422,6 +463,7 @@ struct Frame {
     selections: Vec<Option<Vec<u32>>>,
     /// Columns reused across chunks; each has `rows` words once taken.
     pool: Vec<Vec<u64>>,
+    calls: CallBuffers,
     /// Owns strings produced by FormatText until the output is copied.
     strings: Vec<Box<[u8]>>,
     /// Steps see only root rows below this. Fused code stops at the first
@@ -438,6 +480,7 @@ fn operand(registers: &[Register], v: VariableId) -> Result<Operand<'_>> {
     match &registers[v.0] {
         Register::Constant(c) => Ok(Operand::Constant(*c)),
         Register::Column(c) => Ok(Operand::Column(c)),
+        Register::Borrowed(buffer) => Ok(Operand::Column(buffer.typed_data::<u64>())),
         Register::Empty => Err(Error::Execution(format!("variable {} has no value", v.0))),
     }
 }
@@ -519,47 +562,70 @@ fn fill(rows: Rows<'_>, out: &mut [u64], f: impl Fn(usize) -> u64) {
     }
 }
 
-fn invoke(
+/// Invocation metadata is owned by an execution instance, never a kernel.
+/// Its storage survives windows and chunks; only the bound addresses change.
+#[derive(Debug, Default)]
+pub(crate) struct CallBuffers {
+    constants: Vec<u64>,
+    sources: Vec<[u64; 2]>,
+    // Addresses are stored as words so an idle LocalState remains Send. These
+    // addresses are rebound before every call and never dereferenced later.
+    sinks: Vec<usize>,
+    columns: Vec<Vec<u64>>,
+}
+
+fn invoke<'a>(
     function: Callable,
-    operands: &[Operand<'_>],
+    operands: impl ExactSizeIterator<Item = Result<Operand<'a>>>,
     rows: Rows<'_>,
     outputs: &mut [Vec<u64>],
+    buffers: &mut CallBuffers,
 ) -> Result<()> {
     let entry = match function {
         Callable::Native(f) => {
-            f(operands, rows, outputs);
+            let operands = operands.collect::<Result<Vec<_>>>()?;
+            f(&operands, rows, outputs);
             return Ok(());
         }
         Callable::Generated(entry) => entry,
     };
-    let constants = operands
-        .iter()
-        .map(|o| match o {
-            Operand::Constant(c) => *c,
-            Operand::Column(_) => 0,
-        })
-        .collect::<Vec<_>>();
-    // A range runs as rows `0..n` of columns offset to its start.
+    // Resize before binding pointers: growing this vector afterward would
+    // invalidate the addresses of broadcast scalar values.
+    buffers.constants.resize(operands.len(), 0);
+    buffers.sources.clear();
+    buffers.sinks.clear();
     let (offset, selection, n) = match rows {
         Rows::Range(start, end) => (start, std::ptr::null(), end - start),
         Rows::Selected(s) => (0, s.as_ptr(), s.len()),
     };
-    let sources = operands
-        .iter()
-        .zip(&constants)
-        .map(|(o, c)| match o {
-            Operand::Constant(_) => [c as *const u64 as u64, 0],
+    for (i, operand) in operands.enumerate() {
+        let source = match operand? {
+            Operand::Constant(c) => {
+                buffers.constants[i] = c;
+                [&buffers.constants[i] as *const u64 as u64, 0]
+            }
             Operand::Column(v) => [v[offset..].as_ptr() as u64, u64::MAX],
-        })
-        .collect::<Vec<_>>();
-    let sinks = outputs
-        .iter_mut()
-        .map(|o| o[offset..].as_mut_ptr())
-        .collect::<Vec<_>>();
+        };
+        buffers.sources.push(source);
+    }
+    buffers.sinks.extend(
+        outputs
+            .iter_mut()
+            .map(|o| o[offset..].as_mut_ptr() as usize),
+    );
     let mut runtime = Runtime::default();
-    // SAFETY: input columns and outputs have a word for every root row listed
-    // by `rows`; constants outlive the call.
-    let status = unsafe { entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), selection, n) };
+    // SAFETY: input columns and outputs cover the selected root rows. Scalar
+    // pointers refer to stable storage until this synchronous call returns.
+    // usize and the output pointers have the same representation.
+    let status = unsafe {
+        entry(
+            &mut runtime,
+            buffers.sources.as_ptr(),
+            buffers.sinks.as_ptr().cast(),
+            selection,
+            n,
+        )
+    };
     if status == 0 {
         Ok(())
     } else {
@@ -720,6 +786,17 @@ impl Frame {
                         Register::Column(c)
                     }
                 }
+            } else if VariableType::of(array.data_type()).is_some_and(|t| t.bits() == 64) {
+                // No conversion is needed for 64-bit primitive payloads. Keep
+                // Arrow's sliced owner rather than copying into scratch words.
+                // Narrow values still need canonical sign/zero extension.
+                if matches!(self.registers[v.0], Register::Borrowed(_)) {
+                    continue;
+                }
+                let data = array.to_data();
+                Register::Borrowed(
+                    data.buffers()[0].slice_with_length(data.offset() * 8, data.len() * 8),
+                )
             } else {
                 let mut c = self.target(v);
                 match *binding {
@@ -742,31 +819,36 @@ impl Frame {
         outputs: &[VariableId],
         rows: Rows<'_>,
     ) -> Result<()> {
-        if inputs
+        let scalar = inputs
             .iter()
-            .all(|v| matches!(self.registers[v.0], Register::Constant(_)))
-        {
-            let operands = inputs
-                .iter()
-                .map(|v| operand(&self.registers, *v))
-                .collect::<Result<Vec<_>>>()?;
-            let mut values = vec![vec![0]; outputs.len()];
-            invoke(function, &operands, Rows::Range(0, 1), &mut values)?;
-            for (v, value) in outputs.iter().zip(values) {
-                self.registers[v.0] = Register::Constant(value[0]);
+            .all(|v| matches!(self.registers[v.0], Register::Constant(_)));
+        let mut columns = std::mem::take(&mut self.calls.columns);
+        debug_assert!(columns.is_empty());
+        for &v in outputs {
+            let mut column = self.target(v);
+            if scalar && column.is_empty() {
+                column.resize(1, 0);
             }
-            return Ok(());
+            columns.push(column);
         }
-        let mut columns = outputs.iter().map(|&v| self.target(v)).collect::<Vec<_>>();
-        let operands = inputs
-            .iter()
-            .map(|v| operand(&self.registers, *v))
-            .collect::<Result<Vec<_>>>()?;
-        invoke(function, &operands, rows, &mut columns)?;
-        for (v, c) in outputs.iter().zip(columns) {
-            self.registers[v.0] = Register::Column(c);
+        let operands = inputs.iter().map(|v| operand(&self.registers, *v));
+        let result = invoke(
+            function,
+            operands,
+            if scalar { Rows::Range(0, 1) } else { rows },
+            &mut columns,
+            &mut self.calls,
+        );
+        for (v, column) in outputs.iter().zip(columns.drain(..)) {
+            if scalar {
+                self.registers[v.0] = Register::Constant(column[0]);
+                self.pool.push(column);
+            } else {
+                self.registers[v.0] = Register::Column(column);
+            }
         }
-        Ok(())
+        self.calls.columns = columns;
+        result
     }
 
     fn format(
