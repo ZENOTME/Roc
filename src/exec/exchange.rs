@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{SinkExec, SourceExec};
-use crate::arrow::record_batch::RecordBatch;
+use super::{SinkExec, SinkStatus, SourceExec};
+use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::{
     error::{Error, Result},
+    operator::ExchangeId,
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
-    operator::{ExchangeId, ExchangeSinkOperator, ExchangeSourceOperator},
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::{FutureExt, future::BoxFuture};
 use std::sync::Arc;
 
 pub struct ExchangeSinkExec {
-    state: crate::suboperator::StateId,
+    exchanges: Vec<ExchangeId>,
+    schema: SchemaRef,
+    service: Arc<dyn ExchangeService>,
+    outputs: Vec<Box<dyn ExchangeSink>>,
 }
 pub struct ExchangeSourceExec {
     exchange: ExchangeId,
@@ -34,8 +37,7 @@ pub struct ExchangeSourceExec {
 }
 
 impl ExchangeSourceExec {
-    pub fn new(operator: ExchangeSourceOperator) -> Self {
-        let (exchange, service) = operator.into_parts();
+    pub fn new(exchange: ExchangeId, service: Arc<dyn ExchangeService>) -> Self {
         Self {
             exchange,
             service,
@@ -88,58 +90,42 @@ impl SourceExec for ExchangeSourceExec {
 }
 
 impl ExchangeSinkExec {
-    pub fn new(state: crate::suboperator::StateId) -> Self {
-        Self { state }
-    }
-}
-impl ExchangeSinkOperator {
-    pub fn build_suboperator(
-        &self,
-        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
-    ) -> Result<crate::suboperator::StateId> {
-        let (exchanges, schema, service) = self.clone().into_parts();
-        let state = builder.state(crate::suboperator::StateBuilder::new(move || {
-            let outputs = exchanges
-                .iter()
-                .map(|id| service.create_sink(*id, &schema))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(ExchangeLocalState {
-                outputs,
-                pending: vec![],
-            })
-        }));
-        builder.batch_update(state, |state, batch| {
-            state
-                .get_mut::<ExchangeLocalState>()?
-                .pending
-                .push(batch.clone());
-            Ok(crate::suboperator::ProgramControl::Continue)
-        })?;
-        Ok(state)
-    }
-}
-impl SinkExec for ExchangeSinkExec {
-    fn flush<'a>(
-        &'a mut self,
-        local: &'a mut crate::suboperator::ProgramExecutionContext,
-        guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let state = local
-                .state_mut(self.state)?
-                .get_mut::<ExchangeLocalState>()?;
-            for batch in state.pending.drain(..) {
-                for output in &mut state.outputs {
-                    output.send(&batch, guard).await?;
-                }
-            }
-            Ok(())
-        })
+    pub fn new(
+        exchanges: Vec<ExchangeId>,
+        schema: SchemaRef,
+        service: Arc<dyn ExchangeService>,
+    ) -> Self {
+        Self {
+            exchanges,
+            schema,
+            service,
+            outputs: vec![],
+        }
     }
 }
 
-/// Data only: one queue and transport set per exclusive Program instance.
-struct ExchangeLocalState {
-    pending: Vec<RecordBatch>,
-    outputs: Vec<Box<dyn ExchangeSink>>,
+impl SinkExec for ExchangeSinkExec {
+    fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
+        if !self.outputs.is_empty() {
+            return Err(Error::Execution("exchange sink already started".into()));
+        }
+        self.outputs = self
+            .exchanges
+            .iter()
+            .map(|id| self.service.create_sink(*id, &self.schema))
+            .collect::<Result<_>>()?;
+        Ok(())
+    }
+    fn consume<'a>(
+        &'a mut self,
+        chunk: RecordBatch,
+        guard: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<SinkStatus>> {
+        Box::pin(async move {
+            for output in &mut self.outputs {
+                output.send(&chunk, guard).await?;
+            }
+            Ok(SinkStatus::Continue)
+        })
+    }
 }

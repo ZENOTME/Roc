@@ -18,6 +18,7 @@ use futures::{channel::oneshot, future::BoxFuture};
 use roc::{
     error::{Error, Result},
     exec::{SinkExec, SourceExec},
+    kernel::Program,
     pipeline::{Executor, Pipeline, PipelineExecutionConfig, PipelineGraph, PipelineGraphExecutor},
 };
 use std::sync::{
@@ -142,11 +143,9 @@ fn runs_pipeline_tasks_and_waits_for_dependencies_to_finalize() {
                     prior_finishes: finishes.clone(),
                     required_finishes,
                 }),
-                roc::suboperator::SuboperatorScopeBuilder::new(),
+                Program::empty(),
                 Box::new(CountingSink(finishes.clone())),
-                roc::suboperator::ExecutionMode::Compiled,
             )
-            .unwrap()
         })
         .collect();
     let graph = PipelineGraph::new(pipelines, vec![vec![], vec![], vec![0, 1]]).unwrap();
@@ -166,15 +165,11 @@ fn runs_pipeline_tasks_and_waits_for_dependencies_to_finalize() {
 fn caller_can_cancel_execution_without_a_tokio_runtime() {
     let (started, observed_start) = mpsc::channel();
     let graph = PipelineGraph::new(
-        vec![
-            Pipeline::new(
-                Box::new(WaitForCancelSource(started)),
-                roc::suboperator::SuboperatorScopeBuilder::new(),
-                Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
-                roc::suboperator::ExecutionMode::Compiled,
-            )
-            .unwrap(),
-        ],
+        vec![Pipeline::new(
+            Box::new(WaitForCancelSource(started)),
+            Program::empty(),
+            Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
+        )],
         vec![vec![]],
     )
     .unwrap();
@@ -196,11 +191,9 @@ fn source_failure_does_not_combine_or_request_shutdown() {
     let finishes = Arc::new(AtomicUsize::new(0));
     let pipeline = Pipeline::new(
         Box::new(FailingSource),
-        roc::suboperator::SuboperatorScopeBuilder::new(),
+        Program::empty(),
         Box::new(CountingSink(finishes.clone())),
-        roc::suboperator::ExecutionMode::Compiled,
-    )
-    .unwrap();
+    );
     let (shutdown, guard) = asyncband::shutdown::new();
     let observer = guard.clone();
     let result =
@@ -219,18 +212,14 @@ fn graph_failure_leaves_other_pipelines_for_caller_to_cancel() {
     let pipelines = vec![
         Pipeline::new(
             Box::new(FailingSource),
-            roc::suboperator::SuboperatorScopeBuilder::new(),
+            Program::empty(),
             Box::new(CountingSink(finishes.clone())),
-            roc::suboperator::ExecutionMode::Compiled,
-        )
-        .unwrap(),
+        ),
         Pipeline::new(
             Box::new(WaitForCancelSource(started)),
-            roc::suboperator::SuboperatorScopeBuilder::new(),
+            Program::empty(),
             Box::new(CountingSink(finishes.clone())),
-            roc::suboperator::ExecutionMode::Compiled,
-        )
-        .unwrap(),
+        ),
     ];
     let executor =
         PipelineGraphExecutor::new(PipelineGraph::new(pipelines, vec![vec![], vec![]]).unwrap())
@@ -253,15 +242,11 @@ fn graph_failure_leaves_other_pipelines_for_caller_to_cancel() {
 fn dropping_graph_execution_does_not_request_shutdown() {
     let (started, observed_start) = mpsc::channel();
     let graph = PipelineGraph::new(
-        vec![
-            Pipeline::new(
-                Box::new(WaitForCancelSource(started)),
-                roc::suboperator::SuboperatorScopeBuilder::new(),
-                Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
-                roc::suboperator::ExecutionMode::Compiled,
-            )
-            .unwrap(),
-        ],
+        vec![Pipeline::new(
+            Box::new(WaitForCancelSource(started)),
+            Program::empty(),
+            Box::new(CountingSink(Arc::new(AtomicUsize::new(0)))),
+        )],
         vec![vec![]],
     )
     .unwrap();

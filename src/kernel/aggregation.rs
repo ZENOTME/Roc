@@ -1,6 +1,20 @@
-//! Ordinary state objects passed to scalar helpers by generated code.
-//! Only partial-state export constructs Arrow arrays.
-use super::StateId;
+// Copyright 2026 The Roc Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! State objects updated by GroupLookup and AggregateUpdate. Only partial
+//! state export constructs Arrow arrays.
+use super::{LocalState, StateId};
 use crate::arrow::{
     array::ArrayRef,
     datatypes::SchemaRef,
@@ -17,13 +31,15 @@ pub(crate) struct GroupState {
     pub index: GroupIndex,
     pub schema: SchemaRef,
 }
+
 #[repr(C)]
 pub(crate) struct AccumulatorState {
     pub accumulator: Accumulator,
 }
 
+/// Moves the grouping state (first) and accumulator states out of `local`.
 pub(crate) fn partial(
-    local: &mut super::ProgramExecutionContext,
+    local: &mut LocalState,
     states: &[StateId],
 ) -> Result<(RecordBatch, Vec<Vec<ArrayRef>>)> {
     let grouping = local

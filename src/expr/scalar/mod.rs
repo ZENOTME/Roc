@@ -13,11 +13,14 @@
 // limitations under the License.
 
 //! Typed, stateless descriptions of scalar expressions.
-use crate::{
-    error::{Error, Result},
-    expr::ExpressionResultType,
-    suboperator::{SuboperatorScopeBuilder, VariableId},
-};
+//!
+//! Every value-producing node declares the column that receives its result;
+//! the column's type in the ColumnContext is the result type. A node lowers
+//! itself into kernels and binds its output column. Building a node whose
+//! output is already bound reuses that binding.
+use crate::column::ColumnId;
+use crate::error::Result;
+use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
 use std::sync::Arc;
 
 mod case;
@@ -28,6 +31,8 @@ mod constant;
 mod function;
 mod not;
 mod reference;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use case::CaseExpression;
 pub use cast::{CastExpression, CastMode};
@@ -53,45 +58,68 @@ pub enum ScalarExpression {
 }
 
 impl ScalarExpression {
-    /// Build this expression once per input view. Concrete nodes own the lowering;
-    /// the builder only retains the shared-node binding and suboperator graph.
-    pub fn build_suboperator(
-        self: &Arc<Self>,
-        builder: &mut SuboperatorScopeBuilder,
-    ) -> Result<VariableId> {
-        if let Some(id) = builder.cached(self) {
-            return Ok(id);
-        }
-        let id = match self.as_ref() {
-            Self::Reference(e) => e.build_suboperator(builder),
-            Self::Constant(e) => e.build_suboperator(builder),
-            Self::Function(e) => e.build_suboperator(builder),
-            Self::Cast(e) => e.build_suboperator(builder),
-            Self::Conjunction(e) => e.build_suboperator(builder),
-            Self::Not(e) => e.build_suboperator(builder),
-            Self::Case(e) => e.build_suboperator(builder),
-            Self::Coalesce(e) => e.build_suboperator(builder),
-        }?;
-        if builder.result_type(id)?.data_type() != self.result_type().data_type() {
-            return Err(Error::InvalidPlan(
-                "declared expression type differs from suboperator result".into(),
-            ));
-        }
-        builder.cache(self.clone(), id)?;
-        Ok(id)
-    }
-    pub fn result_type(&self) -> &ExpressionResultType {
+    /// The column holding the result; a Reference returns the referenced one.
+    pub fn output(&self) -> ColumnId {
         match self {
-            Self::Reference(e) => e.result_type(),
-            Self::Constant(e) => e.result_type(),
-            Self::Function(e) => e.result_type(),
-            Self::Cast(e) => e.result_type(),
-            Self::Conjunction(e) => e.result_type(),
-            Self::Not(e) => e.result_type(),
-            Self::Case(e) => e.result_type(),
-            Self::Coalesce(e) => e.result_type(),
+            Self::Reference(e) => e.column(),
+            Self::Constant(e) => e.output(),
+            Self::Function(e) => e.output(),
+            Self::Cast(e) => e.output(),
+            Self::Conjunction(e) => e.output(),
+            Self::Not(e) => e.output(),
+            Self::Case(e) => e.output(),
+            Self::Coalesce(e) => e.output(),
         }
     }
+
+    /// Direct operands, in evaluation order.
+    pub fn children(&self) -> Vec<&ScalarExprRef> {
+        match self {
+            Self::Reference(_) | Self::Constant(_) => vec![],
+            Self::Function(e) => e.arguments().iter().collect(),
+            Self::Cast(e) => vec![e.input()],
+            Self::Conjunction(e) => e.arguments().iter().collect(),
+            Self::Not(e) => vec![e.input()],
+            Self::Case(e) => e
+                .branches()
+                .iter()
+                .flat_map(|(when, then)| [when, then])
+                .chain([e.else_expr()])
+                .collect(),
+            Self::Coalesce(e) => e.arguments().iter().collect(),
+        }
+    }
+
+    /// Lowers the expression in the current domain and binds its output.
+    /// Returns the errors that have not been raised; the consumer of the root
+    /// expression raises them (`KernelBuilder::raise`).
+    pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<PendingErrors> {
+        let output = self.output();
+        if builder.is_bound(output) || matches!(self, Self::Reference(_)) {
+            return builder.column_errors(output);
+        }
+        let (binding, errors) = match self {
+            Self::Reference(_) => unreachable!(),
+            Self::Constant(e) => e.lower(builder)?,
+            Self::Function(e) => e.lower(builder)?,
+            Self::Cast(e) => e.lower(builder)?,
+            Self::Conjunction(e) => e.lower(builder)?,
+            Self::Not(e) => e.lower(builder)?,
+            Self::Case(e) => e.lower(builder)?,
+            Self::Coalesce(e) => e.lower(builder)?,
+        };
+        builder.bind_column(output, binding, errors.clone())?;
+        Ok(errors)
+    }
+}
+
+/// A built child: its binding and unraised errors.
+pub(crate) fn build_input(
+    builder: &mut KernelBuilder<'_>,
+    expr: &ScalarExpression,
+) -> Result<(ColumnVariableBinding, PendingErrors)> {
+    let errors = expr.build_kernels(builder)?;
+    Ok((builder.column_binding(expr.output())?, errors))
 }
 
 macro_rules! scalar_node {

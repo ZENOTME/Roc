@@ -21,22 +21,19 @@ use crate::arrow::{
     record_batch::RecordBatch,
 };
 use crate::expr::{
-    ExpressionResultType,
     agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
-    scalar::ReferenceExpression,
+    scalar::{ReferenceExpression, test_support::TestPlan},
 };
 
 fn avg_executor() -> AccumulatorTestHarness {
-    AccumulatorTestHarness::try_new(Arc::new(AggregateExpression::new(
+    let mut plan = TestPlan::new(&[(DataType::Float64, true)]);
+    let output = plan.column(DataType::Float64, true);
+    let expression = AggregateExpression::new(
         AggregateFunction::Avg,
-        vec![
-            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Float64, true))
-                .into_ref(),
-        ],
-        DataType::Float64,
-        true,
-    )))
-    .unwrap()
+        vec![ReferenceExpression::new(plan.input(0)).into_ref()],
+        output,
+    );
+    AccumulatorTestHarness::try_new(&plan, Arc::new(expression)).unwrap()
 }
 
 fn input(values: Vec<Option<f64>>) -> RecordBatch {

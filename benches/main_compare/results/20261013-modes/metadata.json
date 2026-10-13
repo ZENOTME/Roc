@@ -1,0 +1,47 @@
+{
+  "baseline": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "current_head": "3fd19707f0a1109810519c2da3c2439523c554f8",
+  "current_status": "M benches/main_compare/bench.rs\n M benches/main_compare/run.py\n M design/execution_architecture.rs\n M examples/vector_program_bench.rs\n M src/exec/aggregate.rs\n M src/exec/aggregate/group_index.rs\n M src/exec/exchange.rs\n M src/exec/mod.rs\n M src/exec/scan.rs\n M src/expr/agg/accumulator.rs\n M src/expr/agg/aggregate.rs\n M src/expr/agg/test_support.rs\n M src/expr/agg/tests/agg_optimized.rs\n M src/expr/agg/tests/aggregate_compatibility.rs\n M src/expr/agg/tests/aggregate_hotloop.rs\n M src/expr/mod.rs\n M src/expr/scalar/case.rs\n M src/expr/scalar/cast.rs\n M src/expr/scalar/coalesce.rs\n M src/expr/scalar/conjunction.rs\n M src/expr/scalar/constant.rs\n M src/expr/scalar/function.rs\n M src/expr/scalar/mod.rs\n M src/expr/scalar/not.rs\n M src/expr/scalar/reference.rs\n M src/lib.rs\n D src/new_design.rs\n M src/operator/aggregate.rs\n M src/operator/exchange/mod.rs\n M src/operator/filter.rs\n M src/operator/mod.rs\n M src/operator/project.rs\n M src/operator/scan/mod.rs\n M src/pipeline/build.rs\n M src/pipeline/execution.rs\n M src/pipeline/graph.rs\n M src/pipeline/mod.rs\nD  src/suboperator/aggregation.rs\nD  src/suboperator/column.rs\nD  src/suboperator/context.rs\nD  src/suboperator/jit.rs\nD  src/suboperator/jit/cast.rs\nD  src/suboperator/jit/emit.rs\nD  src/suboperator/jit/reduce.rs\nD  src/suboperator/mod.rs\nD  src/suboperator/program.rs\nD  src/suboperator/program_tests.rs\nD  src/suboperator/runtime.rs\nD  src/suboperator/scalar.rs\nD  src/suboperator/signatures.rs\nD  src/suboperator/test_support.rs\n M tests/extensible_pipeline.rs\n M tests/generated_casts.rs\n M tests/physical_expressions.rs\n M tests/pipeline_execution.rs\n M tests/scalar_expressions.rs\n M tests/source_cancellation.rs\nD  tests/suboperator_programs.rs\nD  tests/suboperator_scopes.rs\n?? src/column.rs\n?? src/expr/scalar/test_support.rs\n?? src/kernel/\n?? tests/support/",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nLLVM version: 22.1.2",
+  "machine": "Apple M4 Pro\n51539607552\n14",
+  "args": {
+    "output": "target/main-compare-final",
+    "rows": 4000000,
+    "samples": 10,
+    "replicas": 3,
+    "resume_build": false,
+    "baseline": "origin/main"
+  },
+  "builds": {
+    "main": {
+      "source_sha256": "7b4f8deb2b7c554bfb64b85c93860c68c19c49d58e4b96e93f8323f8dc42e002",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "47a3f9a22e060a5453367317fd7927fdd2480b3198f14289f2d218f5873cc14f",
+      "lock_sha256": "d5775cca00c6034462e8aeb3431f24ac414c9b964187a904d8cbd45f1fc4db3b",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/Users/dongzejiong/Project/Roc/target/main-compare-final/main/harness/Cargo.toml",
+        "--features",
+        "main-engine"
+      ],
+      "rustflags": null
+    },
+    "current": {
+      "source_sha256": "6ebee88f9019698595002ac744e810d6f0b58a1c1189f45ba87ffcd7bb9d0e73",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "aceaac63d35020ea37a430316b4c27f97fef8a39d0ef37942c99f186df739578",
+      "lock_sha256": "287b1071a113e065c0f76d9e558ee4f7a40bc76bfe660b2973aa25c8c98e94c6",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/Users/dongzejiong/Project/Roc/target/main-compare-final/current/harness/Cargo.toml"
+      ],
+      "rustflags": null
+    }
+  }
+}

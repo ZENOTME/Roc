@@ -15,24 +15,29 @@
 use super::{PipelineGraph, PipelineGraphBuilder, PipelineId};
 use crate::{
     error::Result,
+    kernel::ExecutionMode,
     operator::{OperatorTree, OperatorTreeNode},
 };
 
-/// Builds pipeline graph based on operator tree.
-pub fn build_pipeline_graph(
-    tree: OperatorTree,
-    mode: crate::suboperator::ExecutionMode,
-) -> Result<PipelineGraph> {
-    let mut graph = PipelineGraphBuilder::new();
-    build_pipeline_on_node(tree.root(), 0, &mut graph)?;
-    graph.finish(mode)
+/// Builds the pipelines of a tree with fused compiled programs.
+pub fn build_pipeline_graph(tree: &OperatorTree) -> Result<PipelineGraph> {
+    build_pipeline_graph_with_mode(tree, ExecutionMode::Compile)
 }
 
-/// Builds pipelines for the current operator tree node.
+pub fn build_pipeline_graph_with_mode(
+    tree: &OperatorTree,
+    mode: ExecutionMode,
+) -> Result<PipelineGraph> {
+    let mut graph = PipelineGraphBuilder::new(tree.columns());
+    graph.set_execution_mode(mode);
+    build_pipeline_on_node(tree.root(), 0, &mut graph)?;
+    graph.finish()
+}
+
 pub fn build_pipeline_on_node(
     current_node: &OperatorTreeNode,
     current: PipelineId,
-    graph: &mut PipelineGraphBuilder,
+    graph: &mut PipelineGraphBuilder<'_>,
 ) -> Result<()> {
     current_node
         .operator()

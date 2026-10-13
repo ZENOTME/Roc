@@ -14,29 +14,38 @@
 
 //! Immutable pipeline DAG, its validation, and graph construction.
 use super::{Pipeline, PipelineBuilder};
+use crate::column::ColumnContext;
 use crate::error::{Error, Result};
+use crate::kernel::ExecutionMode;
 use std::collections::{HashSet, VecDeque};
 
 pub type PipelineId = usize;
 
-/// Owns pipeline IDs and completion dependencies. Pipeline contents are
-/// changed through the corresponding `PipelineBuilder`.
-pub struct PipelineGraphBuilder {
-    pipelines: Vec<PipelineBuilder>,
+pub struct PipelineGraphBuilder<'plan> {
+    columns: &'plan ColumnContext,
+    pipelines: Vec<PipelineBuilder<'plan>>,
     dependencies: Vec<Vec<PipelineId>>,
+    mode: ExecutionMode,
 }
-impl Default for PipelineGraphBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl PipelineGraphBuilder {
+
+impl<'plan> PipelineGraphBuilder<'plan> {
     /// Starts with result pipeline 0, to be filled from its sink upward.
-    pub fn new() -> Self {
+    pub fn new(columns: &'plan ColumnContext) -> Self {
         Self {
-            pipelines: vec![PipelineBuilder::new()],
+            columns,
+            pipelines: vec![PipelineBuilder::new(columns)],
             dependencies: vec![vec![]],
+            mode: ExecutionMode::default(),
         }
+    }
+
+    /// The mode of every pipeline program built by `finish`.
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.mode = mode;
+    }
+
+    pub fn columns(&self) -> &'plan ColumnContext {
+        self.columns
     }
 
     pub fn new_dependency(&mut self, dependent: PipelineId) -> Result<PipelineId> {
@@ -44,26 +53,28 @@ impl PipelineGraphBuilder {
             return Err(Error::InvalidPlan(format!("unknown pipeline {dependent}")));
         }
         let id = self.pipelines.len();
-        self.pipelines.push(PipelineBuilder::new());
+        self.pipelines.push(PipelineBuilder::new(self.columns));
         self.dependencies.push(vec![]);
         self.dependencies[dependent].push(id);
         Ok(id)
     }
 
-    pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder> {
+    pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder<'plan>> {
         self.pipelines
             .get_mut(id)
             .ok_or_else(|| Error::InvalidPlan(format!("unknown pipeline {id}")))
     }
 
-    pub fn finish(self, mode: crate::suboperator::ExecutionMode) -> Result<PipelineGraph> {
+    pub fn finish(self) -> Result<PipelineGraph> {
         // Dependencies are created after their consumer, so reversing IDs
+        // yields a topological order.
         let count = self.pipelines.len();
+        let mode = self.mode;
         let pipelines = self
             .pipelines
             .into_iter()
             .rev()
-            .map(|builder| builder.finish(mode))
+            .map(|p| p.finish(mode))
             .collect::<Result<Vec<_>>>()?;
         let dependencies = self
             .dependencies
@@ -76,7 +87,6 @@ impl PipelineGraphBuilder {
     }
 }
 
-/// An immutable DAG of executable pipelines.
 pub struct PipelineGraph {
     pub(super) pipelines: Vec<Pipeline>,
     pub(super) dependencies: Vec<Vec<PipelineId>>,
@@ -255,11 +265,9 @@ mod tests {
             .map(|_| {
                 Pipeline::new(
                     Box::new(UnusedExec),
-                    crate::suboperator::SuboperatorScopeBuilder::new(),
+                    crate::kernel::Program::empty(),
                     Box::new(UnusedExec),
-                    crate::suboperator::ExecutionMode::Compiled,
                 )
-                .unwrap()
             })
             .collect()
     }

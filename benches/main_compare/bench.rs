@@ -9,22 +9,8 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
     error::Result,
-    expr::{
-        ExpressionResultType,
-        agg::{AggregateExpression, AggregateFunction},
-        scalar::{
-            ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression,
-            ScalarExprRef,
-        },
-    },
-    operator::{
-        AggregateOperator, FilterOperator, OperatorTreeNode, ProjectOperator, Projection,
-        ProjectionExpression, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
-    },
-    pipeline::{
-        Executor, PipelineExecutionConfig, PipelineGraphBuilder, PipelineGraphExecutor,
-        build_pipeline_on_node,
-    },
+    operator::{OperatorTreeNode, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage},
+    pipeline::{Executor, PipelineExecutionConfig, PipelineGraphExecutor},
 };
 use serde_json::json;
 use std::{
@@ -102,7 +88,19 @@ type Output = Arc<Mutex<Vec<RecordBatch>>>;
 mod adapter {
     use super::*;
     use roc::exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult};
-    pub fn aggregate_input(expr: ScalarExprRef) -> Option<ScalarExprRef> {
+    use roc::{
+        expr::{
+            ExpressionResultType,
+            agg::{AggregateExpression, AggregateFunction},
+            scalar::{
+                ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression,
+                ScalarExprRef,
+            },
+        },
+        operator::{AggregateOperator, FilterOperator, ProjectOperator, Projection, ProjectionExpression},
+        pipeline::{PipelineGraphBuilder, build_pipeline_on_node},
+    };
+    fn aggregate_input(expr: ScalarExprRef) -> Option<ScalarExprRef> {
         Some(expr)
     }
     struct Sink(Output);
@@ -146,61 +144,264 @@ mod adapter {
             })
         }
     }
-    pub fn finish(
-        mut graph: PipelineGraphBuilder,
+    pub const MODES: [&str; 1] = ["main"];
+    pub fn prewarm(_: &str) -> Option<f64> {
+        None
+    }
+    pub fn build(
+        case: &str,
+        _mode: &str,
+        batches: Arc<Vec<RecordBatch>>,
         output: Output,
-    ) -> Result<roc::pipeline::PipelineGraph> {
+    ) -> Result<(roc::pipeline::PipelineGraph, SchemaRef)> {
+        let (tree, schema) = plan(case, batches);
+        let mut graph = PipelineGraphBuilder::new();
+        build_pipeline_on_node(&tree, 0, &mut graph)?;
         graph.pipeline_mut(0)?.set_sink(Box::new(Sink(output)))?;
-        graph.finish()
+        Ok((graph.finish()?, schema))
+    }
+    fn col(i: usize) -> ScalarExprRef {
+        let s = schema();
+        let f = s.field(i);
+        ReferenceExpression::new(
+            i,
+            ExpressionResultType::new(f.data_type().clone(), f.is_nullable()),
+        )
+        .into_ref()
+    }
+    fn binary(
+        kind: FunctionKind,
+        a: ScalarExprRef,
+        b: i64,
+        typ: DataType,
+        nullable: bool,
+    ) -> ScalarExprRef {
+        FunctionExpression::binary(
+            kind,
+            a,
+            ConstantExpression::int64(Some(b)).into_ref(),
+            typ,
+            nullable,
+        )
+        .into_ref()
+    }
+    fn plan(case: &str, batches: Arc<Vec<RecordBatch>>) -> (OperatorTreeNode, SchemaRef) {
+        let mut source =
+            OperatorTreeNode::new(ScanOperator::new((), Arc::new(Storage(batches))), vec![]);
+        if case == "scan" {
+            return (source, schema());
+        }
+        if case.ends_with("aggregate") {
+            let groups = if case == "grouped_aggregate" {
+                vec![ProjectionExpression::new(col(1), "group_key")]
+            } else {
+                vec![]
+            };
+            let aggs = vec![
+                Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Sum,
+                        aggregate_input(col(2)),
+                        DataType::Int64,
+                        true,
+                    )
+                    .with_alias("total"),
+                ),
+                Arc::new(
+                    AggregateExpression::new(
+                        AggregateFunction::Count,
+                        aggregate_input(col(2)),
+                        DataType::Int64,
+                        false,
+                    )
+                    .with_alias("count"),
+                ),
+            ];
+            let op = AggregateOperator::try_new(Projection::new(groups), aggs).unwrap();
+            let output = op.output_schema();
+            return (OperatorTreeNode::new(op, vec![source]), output);
+        }
+        let mut expr = col(2);
+        if case == "filter_project" {
+            source = OperatorTreeNode::new(
+                FilterOperator::new(binary(
+                    FunctionKind::GreaterThan,
+                    col(3),
+                    50,
+                    DataType::Boolean,
+                    false,
+                )),
+                vec![source],
+            );
+            expr = binary(FunctionKind::Add, expr, 1, DataType::Int64, true);
+        } else {
+            for i in 1..=16 {
+                expr = binary(FunctionKind::Add, expr, i, DataType::Int64, true);
+                if case == "integer_division" && i == 8 {
+                    expr = binary(FunctionKind::Divide, expr, 3, DataType::Int64, true);
+                }
+            }
+        }
+        let projection = Projection::new(vec![
+            ProjectionExpression::new(col(0), "id"),
+            ProjectionExpression::new(expr, "result"),
+        ]);
+        let output = projection.output_schema();
+        (
+            OperatorTreeNode::new(ProjectOperator::new(projection), vec![source]),
+            output,
+        )
     }
 }
+
 #[cfg(not(feature = "main-engine"))]
 mod adapter {
     use super::*;
     use roc::{
-        exec::SinkExec,
-        suboperator::{
-            ExecutionMode, ProgramControl, ProgramExecutionContext, StateBuilder, StateId,
+        column::{ColumnContext, ColumnId, ColumnType},
+        exec::{SinkExec, SinkStatus},
+        expr::{
+            agg::{AggregateExpression, AggregateFunction},
+            scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression, ScalarExprRef},
         },
+        kernel::{ExecutionMode, KernelLibrary, prewarm_kernels},
+        operator::{AggregateOperator, FilterOperator, Operator, OperatorTree, ProjectOperator},
+        pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph_with_mode, build_pipeline_on_node},
     };
-    pub fn aggregate_input(expr: ScalarExprRef) -> Vec<ScalarExprRef> {
-        vec![expr]
+    pub const MODES: [&str; 3] = ["compile", "zero-generated", "zero-native"];
+    fn mode(name: &str) -> ExecutionMode {
+        match name {
+            "compile" => ExecutionMode::Compile,
+            "zero-generated" => ExecutionMode::ZeroCompile(KernelLibrary::Generated),
+            "zero-native" => ExecutionMode::ZeroCompile(KernelLibrary::Native),
+            _ => panic!("unknown mode {name}"),
+        }
     }
-    struct Sink {
-        output: Output,
-        state: StateId,
+    /// Generates every kernel signature before measuring the generated library.
+    pub fn prewarm(name: &str) -> Option<f64> {
+        (name == "zero-generated").then(|| {
+            let start = Instant::now();
+            let kernels = prewarm_kernels().unwrap();
+            let ms = start.elapsed().as_secs_f64() * 1000.;
+            eprintln!("prewarmed {kernels} kernels in {ms:.3}ms");
+            ms
+        })
+    }
+    /// Root operator passing its child's output chunks to `Sink`.
+    #[derive(Debug)]
+    struct Collect(Output);
+    struct Sink(Output);
+    impl Operator for Collect {
+        fn name(&self) -> &'static str {
+            "collect"
+        }
+        fn output_columns(&self) -> Vec<ColumnId> {
+            vec![]
+        }
+        fn build_pipeline(
+            &self,
+            node: &OperatorTreeNode,
+            current: PipelineId,
+            graph: &mut PipelineGraphBuilder<'_>,
+        ) -> Result<()> {
+            let child = &node.children()[0];
+            build_pipeline_on_node(child, current, graph)?;
+            graph.pipeline_mut(current)?.set_sink(
+                Box::new(Sink(self.0.clone())),
+                Some(child.operator().output_columns()),
+            )
+        }
     }
     impl SinkExec for Sink {
-        fn combine<'a>(
+        fn consume<'a>(
             &'a mut self,
-            mut local: ProgramExecutionContext,
+            chunk: RecordBatch,
             _: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
             Box::pin(async move {
-                self.output.lock().unwrap().extend(
-                    local
-                        .take_state(self.state)
-                        .unwrap()
-                        .into_inner::<Vec<RecordBatch>>()?,
-                );
-                Ok(())
+                self.0.lock().unwrap().push(chunk);
+                Ok(SinkStatus::Continue)
             })
         }
     }
-    pub fn finish(
-        mut graph: PipelineGraphBuilder,
+    struct Plan {
+        columns: ColumnContext,
+        inputs: Vec<ColumnId>,
+    }
+    impl Plan {
+        fn column(&mut self, name: &str, data_type: DataType, nullable: bool) -> ColumnId {
+            self.columns.allocate_named(ColumnType::new(data_type, nullable), name)
+        }
+        fn col(&self, i: usize) -> ScalarExprRef {
+            ReferenceExpression::new(self.inputs[i]).into_ref()
+        }
+        fn binary(&mut self, kind: FunctionKind, a: ScalarExprRef, b: i64, typ: DataType, nullable: bool, name: Option<&str>) -> ScalarExprRef {
+            let constant = self.columns.allocate(ColumnType::new(DataType::Int64, false));
+            let typ = ColumnType::new(typ, nullable);
+            let output = match name {
+                Some(name) => self.columns.allocate_named(typ, name),
+                None => self.columns.allocate(typ),
+            };
+            FunctionExpression::binary(kind, a, ConstantExpression::int64(Some(b), constant).into_ref(), output).into_ref()
+        }
+    }
+    fn plan(case: &str, batches: Arc<Vec<RecordBatch>>) -> (Plan, OperatorTreeNode, Vec<ColumnId>) {
+        let mut p = Plan { columns: ColumnContext::new(), inputs: vec![] };
+        let schema = schema();
+        p.inputs = schema
+            .fields()
+            .iter()
+            .map(|f| p.column(f.name(), f.data_type().clone(), f.is_nullable()))
+            .collect();
+        let inputs = p.inputs.clone();
+        let mut source = OperatorTreeNode::new(
+            ScanOperator::new((), Arc::new(Storage(batches)), inputs.clone()),
+            vec![],
+        );
+        if case == "scan" {
+            return (p, source, inputs);
+        }
+        if case.ends_with("aggregate") {
+            let groups = if case == "grouped_aggregate" { vec![p.col(1)] } else { vec![] };
+            let total = p.column("total", DataType::Int64, true);
+            let count = p.column("count", DataType::Int64, false);
+            let aggs = vec![
+                Arc::new(AggregateExpression::new(AggregateFunction::Sum, vec![p.col(2)], total)),
+                Arc::new(AggregateExpression::new(AggregateFunction::Count, vec![p.col(2)], count)),
+            ];
+            let op = AggregateOperator::try_new(groups, aggs).unwrap();
+            let outputs = op.output_columns();
+            return (p, OperatorTreeNode::new(op, vec![source]), outputs);
+        }
+        let mut expr = p.col(2);
+        if case == "filter_project" {
+            let col = p.col(3);
+            let predicate = p.binary(FunctionKind::GreaterThan, col, 50, DataType::Boolean, false, None);
+            source = OperatorTreeNode::new(FilterOperator::new(predicate, inputs.clone()), vec![source]);
+            expr = p.binary(FunctionKind::Add, expr, 1, DataType::Int64, true, Some("result"));
+        } else {
+            for i in 1..=16 {
+                let name = (i == 16).then_some("result");
+                expr = p.binary(FunctionKind::Add, expr, i, DataType::Int64, true, name);
+                if case == "integer_division" && i == 8 {
+                    expr = p.binary(FunctionKind::Divide, expr, 3, DataType::Int64, true, None);
+                }
+            }
+        }
+        let project = ProjectOperator::new(vec![p.col(0), expr]);
+        let outputs = project.output_columns();
+        (p, OperatorTreeNode::new(project, vec![source]), outputs)
+    }
+    pub fn build(
+        case: &str,
+        name: &str,
+        batches: Arc<Vec<RecordBatch>>,
         output: Output,
-    ) -> Result<roc::pipeline::PipelineGraph> {
-        let pipeline = graph.pipeline_mut(0)?;
-        let state = pipeline
-            .suboperators
-            .state(StateBuilder::new(|| Ok(Vec::<RecordBatch>::new())));
-        pipeline.suboperators.batch_update(state, |state, batch| {
-            state.get_mut::<Vec<RecordBatch>>()?.push(batch.clone());
-            Ok(ProgramControl::Continue)
-        })?;
-        pipeline.set_sink(Box::new(Sink { output, state }))?;
-        graph.finish(ExecutionMode::Compiled)
+    ) -> Result<(roc::pipeline::PipelineGraph, SchemaRef)> {
+        let (p, tree, outputs) = plan(case, batches);
+        let schema = p.columns.schema(&outputs)?;
+        let tree = OperatorTree::new(p.columns, OperatorTreeNode::new(Collect(output), vec![tree]));
+        Ok((build_pipeline_graph_with_mode(&tree, mode(name))?, schema))
     }
 }
 fn value(id: usize) -> Option<i64> {
@@ -240,109 +441,15 @@ fn input(rows: usize) -> Arc<Vec<RecordBatch>> {
             .collect(),
     )
 }
-fn col(i: usize) -> ScalarExprRef {
-    let s = schema();
-    let f = s.field(i);
-    ReferenceExpression::new(
-        i,
-        ExpressionResultType::new(f.data_type().clone(), f.is_nullable()),
-    )
-    .into_ref()
-}
-fn binary(
-    kind: FunctionKind,
-    a: ScalarExprRef,
-    b: i64,
-    typ: DataType,
-    nullable: bool,
-) -> ScalarExprRef {
-    FunctionExpression::binary(
-        kind,
-        a,
-        ConstantExpression::int64(Some(b)).into_ref(),
-        typ,
-        nullable,
-    )
-    .into_ref()
-}
-fn plan(case: &str, batches: Arc<Vec<RecordBatch>>) -> (OperatorTreeNode, SchemaRef) {
-    let mut source =
-        OperatorTreeNode::new(ScanOperator::new((), Arc::new(Storage(batches))), vec![]);
-    if case == "scan" {
-        return (source, schema());
-    }
-    if case.ends_with("aggregate") {
-        let groups = if case == "grouped_aggregate" {
-            vec![ProjectionExpression::new(col(1), "group_key")]
-        } else {
-            vec![]
-        };
-        let aggs = vec![
-            Arc::new(
-                AggregateExpression::new(
-                    AggregateFunction::Sum,
-                    adapter::aggregate_input(col(2)),
-                    DataType::Int64,
-                    true,
-                )
-                .with_alias("total"),
-            ),
-            Arc::new(
-                AggregateExpression::new(
-                    AggregateFunction::Count,
-                    adapter::aggregate_input(col(2)),
-                    DataType::Int64,
-                    false,
-                )
-                .with_alias("count"),
-            ),
-        ];
-        let op = AggregateOperator::try_new(Projection::new(groups), aggs).unwrap();
-        let output = op.output_schema();
-        return (OperatorTreeNode::new(op, vec![source]), output);
-    }
-    let mut expr = col(2);
-    if case == "filter_project" {
-        source = OperatorTreeNode::new(
-            FilterOperator::new(binary(
-                FunctionKind::GreaterThan,
-                col(3),
-                50,
-                DataType::Boolean,
-                false,
-            )),
-            vec![source],
-        );
-        expr = binary(FunctionKind::Add, expr, 1, DataType::Int64, true);
-    } else {
-        for i in 1..=16 {
-            expr = binary(FunctionKind::Add, expr, i, DataType::Int64, true);
-            if case == "integer_division" && i == 8 {
-                expr = binary(FunctionKind::Divide, expr, 3, DataType::Int64, true);
-            }
-        }
-    }
-    let projection = Projection::new(vec![
-        ProjectionExpression::new(col(0), "id"),
-        ProjectionExpression::new(expr, "result"),
-    ]);
-    let output = projection.output_schema();
-    (
-        OperatorTreeNode::new(ProjectOperator::new(projection), vec![source]),
-        output,
-    )
-}
 async fn run(
     case: &str,
+    mode: &str,
     batches: Arc<Vec<RecordBatch>>,
     threads: usize,
 ) -> (f64, f64, Vec<RecordBatch>, SchemaRef) {
     let start = Instant::now();
     let output: Output = Arc::new(Mutex::new(vec![]));
-    let (tree, schema) = plan(case, batches);
-    let mut graph = PipelineGraphBuilder::new();
-    build_pipeline_on_node(&tree, 0, &mut graph).unwrap();
-    let graph = adapter::finish(graph, output.clone()).unwrap();
+    let (graph, schema) = adapter::build(case, mode, batches, output.clone()).unwrap();
     let executor = PipelineGraphExecutor::new(graph)
         .with_task_executor(Tasks(tokio::runtime::Handle::current()))
         .with_parallelism(threads)
@@ -452,6 +559,9 @@ fn main() {
     let rows: usize = args[1].parse().unwrap();
     let samples: usize = args[2].parse().unwrap();
     let threads: usize = args[3].parse().unwrap();
+    let mode = args.get(4).map_or(adapter::MODES[0], String::as_str);
+    assert!(adapter::MODES.contains(&mode), "mode must be one of {:?}", adapter::MODES);
+    let prewarm_ms = adapter::prewarm(mode);
     let batches = input(rows);
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
@@ -460,13 +570,18 @@ fn main() {
         .unwrap();
     let mut results = vec![];
     runtime.block_on(async {
-        for case in CASES {
-            let (_, _, output, schema) = run(case, batches.clone(), threads).await;
+        // ROC_BENCH_CASES limits a run to some cases, e.g. for profiling.
+        let only = std::env::var("ROC_BENCH_CASES").ok();
+        for case in CASES
+            .into_iter()
+            .filter(|c| only.as_ref().is_none_or(|o| o.split(',').any(|x| x == *c)))
+        {
+            let (_, _, output, schema) = run(case, mode, batches.clone(), threads).await;
             let expected_rows = validate(case, rows, &output, &schema); drop(output);
-            for _ in 0..2 { let (_, _, out, _) = run(case, batches.clone(), threads).await; std::hint::black_box(out); }
+            for _ in 0..2 { let (_, _, out, _) = run(case, mode, batches.clone(), threads).await; std::hint::black_box(out); }
             let mut prep = vec![]; let mut execution = vec![];
             for _ in 0..samples {
-                let (p, e, out, _) = run(case, batches.clone(), threads).await;
+                let (p, e, out, _) = run(case, mode, batches.clone(), threads).await;
                 assert_eq!(out.iter().map(RecordBatch::num_rows).sum::<usize>(), expected_rows);
                 std::hint::black_box(&out); prep.push(p); execution.push(e);
             }
@@ -476,6 +591,6 @@ fn main() {
     });
     println!(
         "{}",
-        json!({"engine":if cfg!(feature="main-engine") {"main"} else {"current"},"rows":rows,"batch_rows":BATCH,"threads":threads,"samples":samples,"warmups":2,"correctness":"every output row checked against independent Rust calculation, including nulls and duplicate/missing IDs; timed runs row count checked","cases":results})
+        json!({"engine":if cfg!(feature="main-engine") {"main"} else {"current"},"mode":mode,"prewarm_ms":prewarm_ms,"rows":rows,"batch_rows":BATCH,"threads":threads,"samples":samples,"warmups":2,"correctness":"every output row checked against independent Rust calculation, including nulls and duplicate/missing IDs; timed runs row count checked","cases":results})
     );
 }

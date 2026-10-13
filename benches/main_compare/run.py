@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Freeze two source trees, build isolated release binaries, alternate measurements.
 Usage: python3 benches/main_compare/run.py [--output PATH] [--rows N] [--samples N] [--replicas N]
+The current engine is measured in every execution mode: compile (one fused
+program per pipeline), zero-generated (cached per-kernel generated code, all
+signatures prewarmed at startup) and zero-native (precompiled Rust kernels).
 Preparation includes operator construction, graph lowering and JIT compilation.
 Execution includes state initialization, scheduling, all output collection and cleanup.
 Input generation, full correctness checking and output deallocation are excluded.
 """
 import argparse, hashlib, json, os, pathlib, re, shutil, statistics, subprocess, tarfile, time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+MODES = ['compile', 'zero-generated', 'zero-native']
 def command(args, **kw):
     return subprocess.check_output(args, cwd=ROOT, **kw).decode().strip()
 def digest(path):
@@ -91,17 +95,22 @@ serde_json = "1"
         'common_package_count': len(shared),
         'common_package_version_differences': differences,
     }, indent=2))
+    # Each variant is (label, binary, mode argument); the current engine runs once per mode.
+    variants = [('main', binaries['main'], [])] + [(m, binaries['current'], [m]) for m in MODES]
+    labels = [v[0] for v in variants]
     for replica in range(a.replicas):
         for threads in [1,4]:
-            for label in (['main','current'] if replica%2 == 0 else ['current','main']):
+            # Rotate the order so no variant always runs first or last.
+            shift = replica % len(variants)
+            for label, binary, mode in variants[shift:] + variants[:shift]:
                 name = f'{label}-t{threads}-r{replica+1}'
                 print('Measuring',name,flush=True)
                 env = os.environ.copy(); env['RAYON_NUM_THREADS'] = str(threads)
                 with (out/f'{name}.json').open('w') as stdout, (out/f'{name}.log').open('w') as stderr:
-                    subprocess.run([str(binaries[label]),str(a.rows),str(a.samples),str(threads)],env=env,stdout=stdout,stderr=stderr,check=True)
+                    subprocess.run([str(binary),str(a.rows),str(a.samples),str(threads)]+mode,env=env,stdout=stdout,stderr=stderr,check=True)
     summaries=[]
     for threads in [1,4]:
-        reports={label:[json.loads((out/f'{label}-t{threads}-r{r+1}.json').read_text()) for r in range(a.replicas)] for label in ['main','current']}
+        reports={label:[json.loads((out/f'{label}-t{threads}-r{r+1}.json').read_text()) for r in range(a.replicas)] for label in labels}
         for i,case in enumerate(reports['main'][0]['cases']):
             row={'case':case['case'],'threads':threads}
             for label,rs in reports.items():
@@ -109,8 +118,13 @@ serde_json = "1"
                     values=[r['cases'][i][f'{field}_median_ms'] for r in rs]
                     row[f'{label}_{field}_ms']=statistics.median(values)
                     row[f'{label}_{field}_range_ms']=[min(values),max(values)]
-            row['current_over_main']=row['current_execute_ms']/row['main_execute_ms']
+            for label in MODES:
+                row[f'{label}_over_main']=row[f'{label}_execute_ms']/row['main_execute_ms']
             summaries.append(row)
-    (out/'summary.json').write_text(json.dumps(summaries,indent=2))
-    print(json.dumps(summaries,indent=2)); print('Results:',out)
+    prewarm={f't{t}':[json.loads((out/f'zero-generated-t{t}-r{r+1}.json').read_text())['prewarm_ms'] for r in range(a.replicas)] for t in [1,4]}
+    (out/'summary.json').write_text(json.dumps({'prewarm_ms':prewarm,'cases':summaries},indent=2))
+    print(f"{'case':<18}{'thr':>4}" + ''.join(f'{l+" prep":>22}{l+" exec":>22}' for l in labels))
+    for row in summaries:
+        print(f"{row['case']:<18}{row['threads']:>4}" + ''.join(f"{row[l+'_prepare_ms']:>22.3f}{row[l+'_execute_ms']:>22.3f}" for l in labels))
+    print('prewarm_ms', prewarm); print('Results:',out)
 if __name__ == '__main__': main()

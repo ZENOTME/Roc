@@ -12,29 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
+use crate::column::ColumnId;
+
+/// Reads a column that is visible in the current input; it produces nothing.
 #[derive(Clone, Debug)]
 pub struct ReferenceExpression {
-    index: usize,
-    result_type: ExpressionResultType,
+    column: ColumnId,
 }
+
 impl ReferenceExpression {
-    pub(crate) fn build_suboperator(
-        &self,
-        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
-    ) -> crate::error::Result<crate::suboperator::VariableId> {
-        builder.column(self.index(), self.result_type().clone())
+    pub fn new(column: ColumnId) -> Self {
+        Self { column }
     }
 
-    pub fn new(index: usize, result_type: ExpressionResultType) -> Self {
-        Self { index, result_type }
-    }
-
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn column(&self) -> ColumnId {
+        self.column
     }
 }

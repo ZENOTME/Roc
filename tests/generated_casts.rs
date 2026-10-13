@@ -3,11 +3,11 @@ use arrow::{
     compute::{CastOptions, cast_with_options},
     datatypes::*,
 };
-use roc::{
-    expr::{ExpressionResultType, scalar::*},
-    suboperator::{ExecutionMode, ProgramContext},
-};
+use roc::expr::scalar::*;
 use std::sync::Arc;
+
+mod support;
+use support::*;
 
 #[test]
 fn generated_numeric_casts_match_arrow_across_widths_nulls_and_boundaries() {
@@ -90,22 +90,15 @@ fn generated_numeric_casts_match_arrow_across_widths_nulls_and_boundaries() {
         for target in inputs.iter().map(|a| a.data_type()) {
             for mode in [CastMode::Strict, CastMode::Try] {
                 let expr = CastExpression::new(
-                    ReferenceExpression::new(
-                        0,
-                        ExpressionResultType::new(input.data_type().clone(), true),
-                    )
-                    .into_ref(),
-                    target.clone(),
+                    ReferenceExpression::new(input_column(0, input.data_type().clone(), true))
+                        .into_ref(),
                     mode,
-                    true,
+                    output_column(target.clone(), true),
                 )
                 .into_ref();
-                let p = ProgramContext::from_expressions(&[expr], ExecutionMode::Compiled).unwrap();
-                let actual = p.execute(
-                    std::slice::from_ref(input),
-                    input.len(),
-                    &mut p.new_execution_context(),
-                );
+                let p = TestProgram::try_new(expr).unwrap();
+                let actual =
+                    p.evaluate_all(&TestInput::new(std::slice::from_ref(input), input.len()));
                 let expected = cast_with_options(
                     input.as_ref(),
                     target,
@@ -141,49 +134,60 @@ fn strings_are_typed_scalar_calls_and_survive_the_invocation_arena() {
         Some("-128"),
     ]));
     let parsed = CastExpression::new(
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Utf8, true)).into_ref(),
-        DataType::Int8,
+        ReferenceExpression::new(input_column(0, DataType::Utf8, true)).into_ref(),
         CastMode::Try,
-        true,
+        output_column(DataType::Int8, true),
     )
     .into_ref();
-    let text = CastExpression::new(parsed, DataType::Utf8, CastMode::Strict, true).into_ref();
-    let p = ProgramContext::from_expressions(&[text], ExecutionMode::Compiled).unwrap();
-    let mut local = p.new_execution_context();
-    let out = p.execute(&[input], 5, &mut local).unwrap();
-    p.execute(&[Arc::new(StringArray::from(vec!["0"]))], 1, &mut local)
-        .unwrap();
+    let text = CastExpression::new(
+        parsed,
+        CastMode::Strict,
+        output_column(DataType::Utf8, true),
+    )
+    .into_ref();
+    let p = TestProgram::try_new(text).unwrap();
+    let out = p.evaluate_all(&TestInput::new(&[input], 5)).unwrap();
+    p.evaluate_all(&TestInput::new(
+        &[Arc::new(StringArray::from(vec!["0"]))],
+        1,
+    ))
+    .unwrap();
     assert_eq!(
         out[0].as_ref(),
         &StringArray::from(vec![Some("127"), None, None, None, Some("-128")])
     );
-    assert_eq!(p.compiled_program_count(), 1);
 }
 
 #[test]
 fn typed_float_branches_merge_and_generated_integer_cast_is_visible_in_ir() {
-    let yes = ConstantExpression::boolean(Some(true)).into_ref();
-    let value = ConstantExpression::try_new(Arc::new(Float32Array::from(vec![1.25])))
+    let yes =
+        ConstantExpression::boolean(Some(true), output_column(DataType::Boolean, false)).into_ref();
+    let value = constant(Arc::new(Float32Array::from(vec![1.25])))
         .unwrap()
         .into_ref();
-    let no = ConstantExpression::null(&DataType::Float32).into_ref();
-    let case = CaseExpression::new(vec![(yes, value)], no, DataType::Float32, true).into_ref();
-    let p = ProgramContext::from_expressions(&[case], ExecutionMode::Compiled).unwrap();
-    let out = p.execute(&[], 3, &mut p.new_execution_context()).unwrap();
+    let no = ConstantExpression::null(&DataType::Float32, output_column(DataType::Float32, true))
+        .into_ref();
+    let case = CaseExpression::new(
+        vec![(yes, value)],
+        no,
+        output_column(DataType::Float32, true),
+    )
+    .into_ref();
+    let p = TestProgram::try_new(case).unwrap();
+    let out = p.evaluate_all(&TestInput::new(&[], 3)).unwrap();
     assert_eq!(out[0].as_ref(), &Float32Array::from(vec![1.25; 3]));
 
     let cast = CastExpression::new(
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int32, true)).into_ref(),
-        DataType::Int64,
+        ReferenceExpression::new(input_column(0, DataType::Int32, true)).into_ref(),
         CastMode::Strict,
-        true,
+        output_column(DataType::Int64, true),
     )
     .into_ref();
-    let p = ProgramContext::from_expressions(&[cast], ExecutionMode::Compiled).unwrap();
+    let p = TestProgram::try_new(cast).unwrap();
     assert!(
-        p.generated_ir().contains("sextend.i64"),
+        p.program().generated_ir().contains("sextend.i64"),
         "{}",
-        p.generated_ir()
+        p.program().generated_ir()
     );
 }
 
@@ -198,19 +202,14 @@ fn boolean_text_casts_bind_the_boolean_parser() {
         None,
     ]));
     let cast = CastExpression::new(
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Utf8, true)).into_ref(),
-        DataType::Boolean,
+        ReferenceExpression::new(input_column(0, DataType::Utf8, true)).into_ref(),
         CastMode::Try,
-        true,
+        output_column(DataType::Boolean, true),
     )
     .into_ref();
-    let p = ProgramContext::from_expressions(&[cast], ExecutionMode::Compiled).unwrap();
+    let p = TestProgram::try_new(cast).unwrap();
     let out = p
-        .execute(
-            std::slice::from_ref(&input),
-            input.len(),
-            &mut p.new_execution_context(),
-        )
+        .evaluate_all(&TestInput::new(std::slice::from_ref(&input), input.len()))
         .unwrap();
     let expected =
         cast_with_options(input.as_ref(), &DataType::Boolean, &CastOptions::default()).unwrap();
@@ -226,19 +225,13 @@ fn binary_to_text_validates_utf8_inside_the_generated_cast() {
     ]));
     for mode in [CastMode::Strict, CastMode::Try] {
         let cast = CastExpression::new(
-            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Binary, true))
-                .into_ref(),
-            DataType::Utf8,
+            ReferenceExpression::new(input_column(0, DataType::Binary, true)).into_ref(),
             mode,
-            true,
+            output_column(DataType::Utf8, true),
         )
         .into_ref();
-        let p = ProgramContext::from_expressions(&[cast], ExecutionMode::Compiled).unwrap();
-        let out = p.execute(
-            std::slice::from_ref(&input),
-            3,
-            &mut p.new_execution_context(),
-        );
+        let p = TestProgram::try_new(cast).unwrap();
+        let out = p.evaluate_all(&TestInput::new(std::slice::from_ref(&input), 3));
         if mode == CastMode::Strict {
             assert!(out.is_err());
         } else {

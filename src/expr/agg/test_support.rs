@@ -14,86 +14,75 @@
 
 use super::accumulator::Accumulator;
 use crate::arrow::{
-    array::{Array, ArrayRef, BooleanArray},
+    array::{Array, ArrayRef, AsArray, BooleanArray},
     compute::filter_record_batch,
     datatypes::DataType,
     record_batch::RecordBatch,
 };
-use crate::expr::scalar::ScalarExpression;
-use crate::suboperator::test_support::select_true;
-use crate::suboperator::{ProgramContext, ProgramExecutionContext};
+use crate::column::{ColumnId, ColumnType};
+use crate::expr::scalar::{CastMode, test_support::TestPlan};
+use crate::kernel::{KernelBuilder, LocalState, Program};
 use crate::{
     error::{Error, Result},
-    expr::agg::{AggregateExpression, AggregateFunction},
+    expr::agg::AggregateExpression,
 };
-use std::{borrow::Cow, sync::Arc};
+use asyncband::shutdown::{Shutdown, ShutdownGuard};
+use std::sync::Arc;
 
-enum AggregateArgument {
-    Reference(usize),
-    Program(Box<(ProgramContext, ProgramExecutionContext)>),
-}
-
-/// Test fixture for direct accumulator update/merge parity. Production aggregation
-/// lowers through suboperator::aggregation; this helper is never in the library.
+/// Drives one accumulator with caller-provided group IDs. FILTER and the
+/// coerced arguments are evaluated by programs over the plan's input columns;
+/// arguments only see rows kept by FILTER.
 pub struct AccumulatorTestHarness {
     expression: Arc<AggregateExpression>,
-    arguments: Vec<AggregateArgument>,
-    filter: Option<(ProgramContext, ProgramExecutionContext)>,
+    filter: Option<(Program, LocalState)>,
+    arguments: (Program, LocalState),
     accumulator: Accumulator,
+    _shutdown: Shutdown,
+    guard: ShutdownGuard,
 }
 
 impl AccumulatorTestHarness {
-    pub fn try_new(expression: Arc<AggregateExpression>) -> Result<Self> {
-        let arguments = expression
-            .arguments()
-            .iter()
-            .map(|argument| match argument.as_ref() {
-                ScalarExpression::Reference(reference) => {
-                    Ok(AggregateArgument::Reference(reference.index()))
-                }
-                _ => Ok(AggregateArgument::Program(Box::new((
-                    ProgramContext::from_expressions(
-                        std::slice::from_ref(argument),
-                        crate::suboperator::ExecutionMode::Compiled,
-                    )?,
-                    ProgramExecutionContext::default(),
-                )))),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let types = expression
-            .arguments()
-            .iter()
-            .map(|e| e.result_type().data_type.clone())
-            .collect::<Vec<_>>();
-        // No accumulator implements it, so accepting it would silently drop DISTINCT.
-        if expression.is_distinct() && expression.function() != AggregateFunction::Count {
-            return Err(Error::InvalidPlan(
-                "initial aggregate implementation supports DISTINCT only for COUNT(expr)".into(),
-            ));
-        }
+    pub fn try_new(plan: &TestPlan, expression: Arc<AggregateExpression>) -> Result<Self> {
+        let mut columns = plan.columns.clone();
+        let accumulator = expression.accumulator(&columns)?;
+        let coerced = expression
+            .input_types(&columns)?
+            .into_iter()
+            .map(|t| columns.allocate(ColumnType::new(t, true)))
+            .collect::<Vec<ColumnId>>();
         let filter = expression
             .filter()
-            .map(|e| {
-                Ok::<_, Error>((
-                    ProgramContext::from_expressions(
-                        std::slice::from_ref(e),
-                        crate::suboperator::ExecutionMode::Compiled,
-                    )?,
-                    ProgramExecutionContext::default(),
-                ))
+            .map(|filter| {
+                let mut builder = KernelBuilder::new(&columns);
+                builder.bind_inputs(&plan.inputs)?;
+                let errors = filter.build_kernels(&mut builder)?;
+                builder.raise(errors)?;
+                let program = Program::compile(builder.finish(Some(&[filter.output()]))?)?;
+                let local = program.new_local()?;
+                Ok::<_, Error>((program, local))
             })
             .transpose()?;
-        let accumulator = Accumulator::new(
-            expression.function(),
-            expression.is_distinct(),
-            &types,
-            expression.result_type().data_type(),
-        )?;
+        let mut builder = KernelBuilder::new(&columns);
+        builder.bind_inputs(&plan.inputs)?;
+        for (argument, &column) in expression.arguments().iter().zip(&coerced) {
+            let errors = argument.build_kernels(&mut builder)?;
+            builder.raise(errors)?;
+            let binding = builder.column_binding(argument.output())?;
+            let from = columns.column_type(argument.output())?.data_type.clone();
+            let to = columns.column_type(column)?.data_type.clone();
+            let (binding, errors) = builder.cast_binding(&binding, &from, &to, CastMode::Try)?;
+            builder.bind_column(column, binding, errors)?;
+        }
+        let program = Program::compile(builder.finish(Some(&coerced))?)?;
+        let local = program.new_local()?;
+        let (shutdown, guard) = asyncband::shutdown::new();
         Ok(Self {
             expression,
-            arguments,
             filter,
+            arguments: (program, local),
             accumulator,
+            _shutdown: shutdown,
+            guard,
         })
     }
     pub fn state_types(&self) -> Vec<DataType> {
@@ -108,116 +97,52 @@ impl AccumulatorTestHarness {
                 "aggregate group IDs do not match input".into(),
             ));
         }
-        self.update_validated(input, ids, groups)
-    }
-    /// Internal path for IDs produced and validated by the grouping operator.
-    pub(crate) fn update_validated(
-        &mut self,
-        input: &RecordBatch,
-        ids: &[usize],
-        groups: usize,
-    ) -> Result<()> {
-        debug_assert_eq!(ids.len(), input.num_rows());
-        debug_assert!(ids.iter().all(|&id| id < groups));
         self.resize(groups);
-        let selected = self
-            .filter
-            .as_mut()
-            .map(|(program, local)| {
-                select_true(
-                    program
-                        .execute(input.columns(), input.num_rows(), local)?
-                        .remove(0),
-                )
-            })
-            .transpose()?;
-        let selected_ids = selected
-            .as_ref()
-            .map(|rows| rows.iter().map(|&i| ids[i]).collect::<Vec<_>>());
-        let ids = selected_ids.as_deref().unwrap_or(ids);
+        let (input, selected) = self.select(input)?;
+        let ids = match selected {
+            Some(rows) => rows.into_iter().map(|i| ids[i]).collect(),
+            None => ids.to_vec(),
+        };
         if ids.is_empty() {
             return Ok(());
         }
-        let selected_input = selected
-            .as_ref()
-            .map(|rows| {
-                let mut mask = vec![false; input.num_rows()];
-                for &row in rows {
-                    mask[row] = true;
-                }
-                filter_record_batch(input, &BooleanArray::from(mask))
-            })
-            .transpose()?;
-        let input = selected_input.as_ref().unwrap_or(input);
-        let values = self.evaluate_arguments(input)?;
-        self.accumulator.update(&values, ids)
+        let values = self.evaluate_arguments(&input)?;
+        self.accumulator.update(&values, &ids)
     }
-    /// Update an ungrouped aggregate, retaining one state even for empty input.
+    /// Updates an ungrouped aggregate, retaining one state even for empty input.
     pub fn update_single(&mut self, input: &RecordBatch) -> Result<()> {
         self.resize(1);
-        let selected = self
-            .filter
-            .as_mut()
-            .map(|(program, local)| {
-                select_true(
-                    program
-                        .execute(input.columns(), input.num_rows(), local)?
-                        .remove(0),
-                )
-            })
-            .transpose()?;
-        let rows = selected.as_ref().map_or(input.num_rows(), Vec::len);
-        if rows == 0 {
+        let (input, _) = self.select(input)?;
+        if input.num_rows() == 0 {
             return Ok(());
         }
-        let selected_input = selected
-            .as_ref()
-            .map(|rows| {
-                let mut mask = vec![false; input.num_rows()];
-                for &row in rows {
-                    mask[row] = true;
-                }
-                filter_record_batch(input, &BooleanArray::from(mask))
-            })
-            .transpose()?;
-        // FILTER must run before argument evaluation, including fallible arguments.
-        let input = selected_input.as_ref().unwrap_or(input);
-        let values = self.evaluate_arguments(input)?;
-        self.accumulator.update_single(&values, rows)
+        let values = self.evaluate_arguments(&input)?;
+        self.accumulator.update_single(&values, input.num_rows())
     }
-    /// Borrow empty and single-reference arguments from the selected input.
-    /// Build the shared scalar executor lazily for arguments that evaluate a tree.
-    fn evaluate_arguments<'a>(&mut self, input: &'a RecordBatch) -> Result<Cow<'a, [ArrayRef]>> {
-        match self.arguments.as_slice() {
-            [] => return Ok(Cow::Borrowed(&[])),
-            [AggregateArgument::Reference(index)] => {
-                return input
-                    .columns()
-                    .get(*index..=*index)
-                    .map(Cow::Borrowed)
-                    .ok_or_else(|| {
-                        Error::Execution(format!("column index {index} out of bounds"))
-                    });
-            }
-            _ => {}
+    /// Applies FILTER, returning the kept rows and their original positions.
+    fn select(&mut self, input: &RecordBatch) -> Result<(RecordBatch, Option<Vec<usize>>)> {
+        let Some((program, local)) = &mut self.filter else {
+            return Ok((input.clone(), None));
+        };
+        let output = program.run(input, local, &self.guard)?.unwrap();
+        let mask = output.column(0).as_boolean();
+        let rows = (0..mask.len())
+            .filter(|&i| mask.is_valid(i) && mask.value(i))
+            .collect::<Vec<_>>();
+        let mut keep = vec![false; input.num_rows()];
+        for &row in &rows {
+            keep[row] = true;
         }
-        self.arguments
-            .iter_mut()
-            .map(|argument| match argument {
-                AggregateArgument::Reference(index) => {
-                    input.columns().get(*index).cloned().ok_or_else(|| {
-                        Error::Execution(format!("column index {index} out of bounds"))
-                    })
-                }
-                AggregateArgument::Program(bound) => {
-                    let (program, local) = bound.as_mut();
-                    Ok(program
-                        .execute(input.columns(), input.num_rows(), local)?
-                        .remove(0))
-                }
-            })
-            .collect::<Result<Vec<_>>>()
-            .map(Cow::Owned)
+        let input = filter_record_batch(input, &BooleanArray::from(keep))?;
+        Ok((input, Some(rows)))
+    }
+    fn evaluate_arguments(&mut self, input: &RecordBatch) -> Result<Vec<ArrayRef>> {
+        let (program, local) = &mut self.arguments;
+        Ok(program
+            .run(input, local, &self.guard)?
+            .unwrap()
+            .columns()
+            .to_vec())
     }
 
     pub fn merge(&mut self, state: &[ArrayRef], ids: &[usize], groups: usize) -> Result<()> {
@@ -248,77 +173,67 @@ impl AccumulatorTestHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::{
-        array::Int64Array,
-        datatypes::{Field, Schema},
+    use crate::arrow::array::{Float64Array, Int64Array};
+    use crate::expr::agg::AggregateFunction;
+    use crate::expr::scalar::{
+        ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression,
     };
-    use crate::expr::ExpressionResultType;
-    use crate::expr::scalar::{ConstantExpression, ReferenceExpression};
+
+    fn input(plan: &TestPlan, columns: Vec<ArrayRef>) -> RecordBatch {
+        RecordBatch::try_new(plan.columns.schema(&plan.inputs).unwrap(), columns).unwrap()
+    }
 
     #[test]
     fn filtered_arguments_and_constants_follow_original_group_ids() {
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(Int64Array::from(vec![
-                Some(40),
-                Some(10),
-                Some(40),
-                None,
-                Some(20),
-            ])),
-            Arc::new(BooleanArray::from(vec![true, true, true, true, false])),
-        ];
-        let input = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("value", DataType::Int64, true),
-                Field::new("keep", DataType::Boolean, false),
-            ])),
-            columns,
-        )
-        .unwrap();
+        let mut plan = TestPlan::new(&[(DataType::Int64, true), (DataType::Boolean, false)]);
+        let input = input(
+            &plan,
+            vec![
+                Arc::new(Int64Array::from(vec![
+                    Some(40),
+                    Some(10),
+                    Some(40),
+                    None,
+                    Some(20),
+                ])),
+                Arc::new(BooleanArray::from(vec![true, true, true, true, false])),
+            ],
+        );
         let ids = [1, 0, 1, 0, 1];
-        for (arguments, expected) in [
+        let three = plan.column(DataType::Int64, false);
+        for (argument, expected) in [
             (
-                vec![
-                    ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
-                        .into_ref(),
-                ],
+                ReferenceExpression::new(plan.input(0)).into_ref(),
                 vec![Some(10), Some(80)],
             ),
             (
-                vec![ConstantExpression::int64(Some(3)).into_ref()],
+                ConstantExpression::int64(Some(3), three).into_ref(),
                 vec![Some(6), Some(6)],
             ),
         ] {
+            let output = plan.column(DataType::Int64, true);
             let expression = Arc::new(
-                AggregateExpression::new(AggregateFunction::Sum, arguments, DataType::Int64, true)
-                    .with_filter(
-                        ReferenceExpression::new(
-                            1,
-                            ExpressionResultType::new(DataType::Boolean, false),
-                        )
-                        .into_ref(),
-                    ),
+                AggregateExpression::new(AggregateFunction::Sum, vec![argument], output)
+                    .with_filter(ReferenceExpression::new(plan.input(1)).into_ref()),
             );
-            let mut executor = AccumulatorTestHarness::try_new(expression).unwrap();
+            let mut executor = AccumulatorTestHarness::try_new(&plan, expression).unwrap();
             executor.update(&input, &ids, 2).unwrap();
             let result = executor.evaluate().unwrap();
             assert_eq!(
                 result
-                    .as_any()
-                    .downcast_ref::<Int64Array>()
-                    .unwrap()
+                    .as_primitive::<crate::arrow::datatypes::Int64Type>()
                     .iter()
                     .collect::<Vec<_>>(),
                 expected
             );
         }
+        let output = plan.column(DataType::Int64, false);
         let expression = Arc::new(AggregateExpression::new(
             AggregateFunction::Count,
             vec![],
-            DataType::Int64,
-            false,
+            output,
         ));
-        let mut executor = AccumulatorTestHarness::try_new(expression).unwrap();
+        let mut executor = AccumulatorTestHarness::try_new(&plan, expression).unwrap();
         executor.update(&input, &ids, 2).unwrap();
         assert_eq!(
             executor
@@ -339,94 +254,68 @@ mod tests {
     }
 
     #[test]
-    fn bound_references_check_indices_after_filtering() {
-        let input = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new(
-                "value",
-                DataType::Int64,
-                false,
-            )])),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .unwrap();
-        // The inclusive single-column range must also reject usize::MAX
-        // without overflowing its end or panicking.
-        for index in [1, usize::MAX] {
-            let expression = AggregateExpression::new(
-                AggregateFunction::Sum,
-                vec![
-                    ReferenceExpression::new(
-                        index,
-                        ExpressionResultType::new(DataType::Int64, false),
-                    )
-                    .into_ref(),
-                ],
-                DataType::Int64,
-                true,
-            );
-            let mut grouped =
-                AccumulatorTestHarness::try_new(Arc::new(expression.clone())).unwrap();
-            let mut single = AccumulatorTestHarness::try_new(Arc::new(expression.clone())).unwrap();
-            for result in [
-                grouped.update(&input, &[0, 0], 1),
-                single.update_single(&input),
-            ] {
-                assert!(
-                    matches!(result, Err(Error::Execution(message)) if message == format!("column index {index} out of bounds"))
-                );
-            }
-            // When FILTER rejects every row, argument evaluation is skipped entirely,
-            // including its bounds checks, as on the generic expression path.
-            let expression =
-                expression.with_filter(ConstantExpression::boolean(Some(false)).into_ref());
-            let mut filtered = AccumulatorTestHarness::try_new(Arc::new(expression)).unwrap();
-            filtered.update(&input, &[0, 0], 1).unwrap();
-            filtered.update_single(&input).unwrap();
-            assert!(filtered.evaluate().unwrap().is_null(0));
-        }
+    fn rejected_rows_skip_fallible_arguments() {
+        let mut plan = TestPlan::new(&[(DataType::Int64, false)]);
+        let input = input(&plan, vec![Arc::new(Int64Array::from(vec![0, 0]))]);
+        let eight = plan.column(DataType::Int64, false);
+        let quotient = plan.column(DataType::Int64, false);
+        let never = plan.column(DataType::Boolean, false);
+        let output = plan.column(DataType::Int64, true);
+        let expression = AggregateExpression::new(
+            AggregateFunction::Sum,
+            vec![
+                FunctionExpression::binary(
+                    FunctionKind::Divide,
+                    ConstantExpression::int64(Some(8), eight).into_ref(),
+                    ReferenceExpression::new(plan.input(0)).into_ref(),
+                    quotient,
+                )
+                .into_ref(),
+            ],
+            output,
+        );
+        let mut unfiltered =
+            AccumulatorTestHarness::try_new(&plan, Arc::new(expression.clone())).unwrap();
+        assert!(unfiltered.update_single(&input).is_err());
+        let expression =
+            expression.with_filter(ConstantExpression::boolean(Some(false), never).into_ref());
+        let mut filtered = AccumulatorTestHarness::try_new(&plan, Arc::new(expression)).unwrap();
+        filtered.update(&input, &[0, 0], 1).unwrap();
+        filtered.update_single(&input).unwrap();
+        assert!(filtered.evaluate().unwrap().is_null(0));
     }
 
     #[test]
     fn mixed_bound_and_computed_arguments_use_filtered_input() {
-        use crate::arrow::array::Float64Array;
-        use crate::expr::scalar::{FunctionExpression, FunctionKind};
-
-        let input = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("value", DataType::Int64, false),
-                Field::new("keep", DataType::Boolean, false),
-            ])),
+        let mut plan = TestPlan::new(&[(DataType::Int64, false), (DataType::Boolean, false)]);
+        let input = input(
+            &plan,
             vec![
                 Arc::new(Int64Array::from(vec![0, 2, 4])),
                 Arc::new(BooleanArray::from(vec![false, true, true])),
             ],
-        )
-        .unwrap();
-        let reference =
-            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false))
-                .into_ref();
+        );
+        let reference = ReferenceExpression::new(plan.input(0)).into_ref();
+        let eight = plan.column(DataType::Int64, false);
+        let quotient = plan.column(DataType::Int64, false);
+        let output = plan.column(DataType::Float64, true);
         let divided = FunctionExpression::binary(
             FunctionKind::Divide,
-            ConstantExpression::int64(Some(8)).into_ref(),
+            ConstantExpression::int64(Some(8), eight).into_ref(),
             reference.clone(),
-            DataType::Int64,
-            false,
+            quotient,
         )
         .into_ref();
         let expression = Arc::new(
             AggregateExpression::new(
                 AggregateFunction::CovarPop,
                 vec![reference, divided],
-                DataType::Float64,
-                true,
+                output,
             )
-            .with_filter(
-                ReferenceExpression::new(1, ExpressionResultType::new(DataType::Boolean, false))
-                    .into_ref(),
-            ),
+            .with_filter(ReferenceExpression::new(plan.input(1)).into_ref()),
         );
-        let mut grouped = AccumulatorTestHarness::try_new(expression.clone()).unwrap();
-        let mut single = AccumulatorTestHarness::try_new(expression).unwrap();
+        let mut grouped = AccumulatorTestHarness::try_new(&plan, expression.clone()).unwrap();
+        let mut single = AccumulatorTestHarness::try_new(&plan, expression).unwrap();
         grouped.update(&input, &[0, 0, 0], 1).unwrap();
         single.update_single(&input).unwrap();
         for executor in [grouped, single] {

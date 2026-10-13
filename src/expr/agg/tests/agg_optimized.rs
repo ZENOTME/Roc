@@ -9,9 +9,11 @@ use crate::arrow::{
     record_batch::RecordBatch,
 };
 use crate::expr::{
-    ExpressionResultType,
     agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
-    scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression},
+    scalar::{
+        ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression,
+        test_support::TestPlan,
+    },
 };
 
 fn batch(array: ArrayRef) -> RecordBatch {
@@ -26,21 +28,24 @@ fn batch(array: ArrayRef) -> RecordBatch {
     .unwrap()
 }
 
+/// `function(value)` over one nullable input column.
 fn expression(
     function: AggregateFunction,
     input: DataType,
     output: DataType,
-) -> AggregateExpression {
-    AggregateExpression::new(
+) -> (TestPlan, AggregateExpression) {
+    let mut plan = TestPlan::new(&[(input, true)]);
+    let output = plan.column(output, true);
+    let expression = AggregateExpression::new(
         function,
-        vec![ReferenceExpression::new(0, ExpressionResultType::new(input, true)).into_ref()],
+        vec![ReferenceExpression::new(plan.input(0)).into_ref()],
         output,
-        true,
-    )
+    );
+    (plan, expression)
 }
 
-fn executor(expression: AggregateExpression) -> AccumulatorTestHarness {
-    AccumulatorTestHarness::try_new(Arc::new(expression)).unwrap()
+fn executor((plan, expression): (TestPlan, AggregateExpression)) -> AccumulatorTestHarness {
+    AccumulatorTestHarness::try_new(&plan, Arc::new(expression)).unwrap()
 }
 
 #[test]
@@ -80,9 +85,8 @@ fn global_reduction_matches_grouped_path_across_batches_and_nulls() {
             }
         }
     }
-    let mut distinct = executor(
-        expression(AggregateFunction::Count, DataType::Int64, DataType::Int64).with_distinct(),
-    );
+    let (plan, count) = expression(AggregateFunction::Count, DataType::Int64, DataType::Int64);
+    let mut distinct = executor((plan, count.with_distinct()));
     for batch in &batches {
         distinct.update_single(batch).unwrap();
     }
@@ -163,11 +167,11 @@ fn global_empty_states_and_checked_counts_are_preserved() {
             .update_single(&batch(Arc::new(Int64Array::from(vec![1]))))
             .is_err()
     );
-    let mut count_star = executor(AggregateExpression::new(
-        AggregateFunction::Count,
-        vec![],
-        DataType::Int64,
-        false,
+    let mut plan = TestPlan::new(&[(DataType::Int64, true)]);
+    let output = plan.column(DataType::Int64, false);
+    let mut count_star = executor((
+        plan,
+        AggregateExpression::new(AggregateFunction::Count, vec![], output),
     ));
     count_star.update_single(&nulls).unwrap();
     assert_eq!(
@@ -221,26 +225,23 @@ fn global_filter_excludes_errors_before_arguments_are_evaluated() {
         ],
     )
     .unwrap();
+    let mut plan = TestPlan::new(&[(DataType::Int64, false), (DataType::Boolean, true)]);
+    let eight = plan.column(DataType::Int64, false);
+    let quotient = plan.column(DataType::Int64, false);
+    let output = plan.column(DataType::Int64, true);
     let argument = FunctionExpression::binary(
         FunctionKind::Divide,
-        ConstantExpression::int64(Some(8)).into_ref(),
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false)).into_ref(),
-        DataType::Int64,
-        false,
+        ConstantExpression::int64(Some(8), eight).into_ref(),
+        ReferenceExpression::new(plan.input(0)).into_ref(),
+        quotient,
     )
     .into_ref();
-    let mut sum = executor(
-        AggregateExpression::new(
-            AggregateFunction::Sum,
-            vec![argument],
-            DataType::Int64,
-            true,
-        )
-        .with_filter(
-            ReferenceExpression::new(1, ExpressionResultType::new(DataType::Boolean, true))
-                .into_ref(),
-        ),
-    );
+    let filter = ReferenceExpression::new(plan.input(1)).into_ref();
+    let mut sum = executor((
+        plan,
+        AggregateExpression::new(AggregateFunction::Sum, vec![argument], output)
+            .with_filter(filter),
+    ));
     sum.update_single(&input).unwrap();
     assert_eq!(
         sum.evaluate()

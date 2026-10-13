@@ -12,8 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ExpressionResultType, ScalarExprRef};
+use super::{ScalarExprRef, build_input};
 use crate::arrow::datatypes::DataType;
+use crate::column::ColumnId;
+use crate::error::{Error, Result};
+use crate::kernel::{
+    ColumnVariableBinding, KernelBuilder, KernelError, PendingErrors, ScalarFunction, VariableId,
+    scalar,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKind {
     Add,
@@ -33,44 +40,22 @@ pub enum FunctionKind {
     IsDistinctFrom,
     IsNotDistinctFrom,
 }
+
+/// A built-in function. Binary operands must have the same type; arithmetic
+/// returns that type and every other function returns Boolean.
 #[derive(Clone, Debug)]
 pub struct FunctionExpression {
     function: FunctionKind,
     arguments: Vec<ScalarExprRef>,
-    result_type: ExpressionResultType,
+    output: ColumnId,
 }
-impl FunctionExpression {
-    pub(crate) fn build_suboperator(
-        &self,
-        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
-    ) -> crate::error::Result<crate::suboperator::VariableId> {
-        let args = self
-            .arguments()
-            .iter()
-            .map(|a| a.build_suboperator(builder))
-            .collect::<crate::error::Result<Vec<_>>>()?;
-        match args.as_slice() {
-            [a] => builder.unary(self.function(), *a),
-            [a, b] => builder.binary(self.function(), *a, *b),
-            _ => Err(crate::error::Error::InvalidPlan(
-                "invalid function arity".into(),
-            )),
-        }
-    }
 
-    pub fn unary(
-        function: FunctionKind,
-        argument: ScalarExprRef,
-        data_type: DataType,
-        nullable: bool,
-    ) -> Self {
+impl FunctionExpression {
+    pub fn unary(function: FunctionKind, argument: ScalarExprRef, output: ColumnId) -> Self {
         Self {
             function,
             arguments: vec![argument],
-            result_type: ExpressionResultType {
-                data_type,
-                nullable,
-            },
+            output,
         }
     }
 
@@ -78,16 +63,12 @@ impl FunctionExpression {
         function: FunctionKind,
         left: ScalarExprRef,
         right: ScalarExprRef,
-        data_type: DataType,
-        nullable: bool,
+        output: ColumnId,
     ) -> Self {
         Self {
             function,
             arguments: vec![left, right],
-            result_type: ExpressionResultType {
-                data_type,
-                nullable,
-            },
+            output,
         }
     }
 
@@ -99,22 +80,164 @@ impl FunctionExpression {
         &self.arguments
     }
 
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn output(&self) -> ColumnId {
+        self.output
+    }
+
+    pub(super) fn lower(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        use FunctionKind::*;
+        let mut errors = vec![];
+        let mut inputs = vec![];
+        let mut types = vec![];
+        for argument in &self.arguments {
+            let (binding, e) = build_input(builder, argument)?;
+            errors.extend(e);
+            inputs.push(binding);
+            types.push(builder.column_type(argument.output())?.data_type.clone());
+        }
+        let f = self.function;
+        let signature = || Error::InvalidPlan(format!("unsupported signature: {f:?}{types:?}"));
+        let t = &types[0];
+        let unary = matches!(f, Negate | IsNull | IsNotNull);
+        if unary != (inputs.len() == 1) || (!unary && inputs.len() != 2) {
+            return Err(Error::InvalidPlan("invalid function arity".into()));
+        }
+        if !unary && types[0] != types[1] {
+            return Err(Error::InvalidPlan(
+                "operand types differ; insert an explicit cast".into(),
+            ));
+        }
+        let binding = match f {
+            IsNull | IsNotNull => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let value = match inputs[0].validity() {
+                    None => builder.boolean(f == IsNotNull)?,
+                    Some(v) if f == IsNull => builder.not(v)?,
+                    Some(v) => v,
+                };
+                ColumnVariableBinding::Boolean {
+                    value,
+                    validity: None,
+                }
+            }
+            Negate | Add | Subtract | Multiply | Divide | Remainder => {
+                let signed = !matches!(
+                    t,
+                    DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+                );
+                if !scalar::numeric(t) || (f == Negate && !signed) {
+                    return Err(signature());
+                }
+                let validity = builder.strict_validity(&inputs)?;
+                let values = inputs
+                    .iter()
+                    .map(|b| b.value().unwrap())
+                    .collect::<Vec<_>>();
+                let function = match f {
+                    Negate => ScalarFunction::Negate,
+                    Add => ScalarFunction::Add,
+                    Subtract => ScalarFunction::Subtract,
+                    Multiply => ScalarFunction::Multiply,
+                    Divide => ScalarFunction::Divide,
+                    _ => ScalarFunction::Remainder,
+                };
+                let out = builder.call(function, values)?;
+                let flags: &[KernelError] = match (f, out.len()) {
+                    (_, 1) => &[],
+                    (Divide, _) => &[KernelError::DivideByZero, KernelError::ArithmeticOverflow],
+                    (Remainder, _) => &[KernelError::DivideByZero],
+                    _ => &[KernelError::ArithmeticOverflow],
+                };
+                for (flag, error) in out[1..].iter().zip(flags) {
+                    errors.push(builder.pending(*flag, validity, *error, vec![])?);
+                }
+                let ty = builder.variable_type(out[0])?;
+                ColumnVariableBinding::fixed(ty, out[0], validity)?
+            }
+            Equal | NotEqual | LessThan | LessThanOrEqual | GreaterThan | GreaterThanOrEqual => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let value = compare(builder, f, &inputs[0], &inputs[1])?;
+                let validity = if *t == DataType::Null {
+                    Some(builder.boolean(false)?)
+                } else {
+                    builder.strict_validity(&inputs)?
+                };
+                ColumnVariableBinding::Boolean { value, validity }
+            }
+            IsDistinctFrom | IsNotDistinctFrom => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let (a, b) = (&inputs[0], &inputs[1]);
+                let ne = compare(builder, NotEqual, a, b)?;
+                let distinct = match (a.validity(), b.validity()) {
+                    (None, None) => ne,
+                    (av, bv) => {
+                        let av = builder.materialize_validity(av)?;
+                        let bv = builder.materialize_validity(bv)?;
+                        let one_null = builder.call(ScalarFunction::NotEqual, vec![av, bv])?[0];
+                        let both = builder.and(av, bv)?;
+                        let differ = builder.and(both, ne)?;
+                        builder.or(one_null, differ)?
+                    }
+                };
+                let value = if f == IsDistinctFrom {
+                    distinct
+                } else {
+                    builder.not(distinct)?
+                };
+                ColumnVariableBinding::Boolean {
+                    value,
+                    validity: None,
+                }
+            }
+        };
+        Ok((binding, errors))
     }
 }
+
+/// The comparison of the values only; NULL operands are handled by callers.
+/// NULL-typed operands compare as false.
+fn compare(
+    builder: &mut KernelBuilder<'_>,
+    f: FunctionKind,
+    a: &ColumnVariableBinding,
+    b: &ColumnVariableBinding,
+) -> Result<VariableId> {
+    if a.is_null_type() {
+        return builder.boolean(false);
+    }
+    let function = match f {
+        FunctionKind::Equal => ScalarFunction::Equal,
+        FunctionKind::NotEqual => ScalarFunction::NotEqual,
+        FunctionKind::LessThan => ScalarFunction::LessThan,
+        FunctionKind::LessThanOrEqual => ScalarFunction::LessThanOrEqual,
+        FunctionKind::GreaterThan => ScalarFunction::GreaterThan,
+        _ => ScalarFunction::GreaterThanOrEqual,
+    };
+    let mut inputs = a.values();
+    inputs.extend(b.values());
+    Ok(builder.call(function, inputs)?[0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::array::ArrayRef;
     use crate::arrow::array::{
-        Array, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-        Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+        Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+        Int32Array, Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
+    use crate::expr::scalar::test_support::*;
     use crate::expr::scalar::{
         CaseExpression, CoalesceExpression, ConstantExpression, ReferenceExpression,
     };
-    use crate::suboperator::test_support::*;
     use std::sync::Arc;
 
     fn ints(array: &ArrayRef) -> Vec<i64> {
@@ -125,13 +248,13 @@ mod tests {
             .values()
             .to_vec()
     }
+
     fn compare_scalar_with_broadcast(
         array: ArrayRef,
         scalar: ArrayRef,
         functions: &[FunctionKind],
     ) {
         let data_type = array.data_type().clone();
-        let executor = TestInput::new(std::slice::from_ref(&array), array.len());
         let broadcast = crate::arrow::compute::take(
             scalar.as_ref(),
             &crate::arrow::array::UInt64Array::from(vec![0; array.len()]),
@@ -148,21 +271,19 @@ mod tests {
                 _ => DataType::Boolean,
             };
             for left_scalar in [false, true] {
-                let reference =
-                    ReferenceExpression::new(0, ExpressionResultType::new(data_type.clone(), true))
+                let mut t = TestPlan::new(&[(data_type.clone(), true)]);
+                let reference = ReferenceExpression::new(t.input(0)).into_ref();
+                let constant =
+                    ConstantExpression::try_new(scalar.clone(), t.column(data_type.clone(), true))
+                        .unwrap()
                         .into_ref();
-                let constant = ConstantExpression::try_new(scalar.clone())
-                    .unwrap()
-                    .into_ref();
                 let (left, right) = if left_scalar {
                     (constant, reference)
                 } else {
                     (reference, constant)
                 };
-                let evaluation =
-                    FunctionExpression::binary(function, left, right, output_type.clone(), true)
-                        .prepare_test()
-                        .unwrap();
+                let output = t.column(output_type.clone(), true);
+                let expr = FunctionExpression::binary(function, left, right, output).into_ref();
                 let baseline =
                     |left: &ArrayRef, right: &ArrayRef| -> crate::error::Result<ArrayRef> {
                         use ::arrow::compute::kernels::{cmp, numeric};
@@ -189,7 +310,7 @@ mod tests {
                 } else {
                     baseline(&array, &broadcast)
                 };
-                let actual = evaluation.evaluate(&executor);
+                let actual = t.evaluate(&expr, std::slice::from_ref(&array), array.len());
                 let context = format!(
                     "{data_type:?} {function:?} left_scalar={left_scalar} scalar={scalar:?}"
                 );
@@ -331,45 +452,43 @@ mod tests {
     }
 
     #[test]
-    fn constant_pair_execution_stays_lazy_and_repeated_outputs_remain_owned() {
-        let add = |a, b| {
+    fn failures_in_unselected_branches_are_not_raised() {
+        let mut t = TestPlan::new(&[]);
+        let add = |t: &mut TestPlan, a, b| {
+            let (l, r, o) = (
+                t.column(DataType::Int64, false),
+                t.column(DataType::Int64, false),
+                t.column(DataType::Int64, false),
+            );
             FunctionExpression::binary(
                 FunctionKind::Add,
-                ConstantExpression::int64(Some(a)).into_ref(),
-                ConstantExpression::int64(Some(b)).into_ref(),
-                DataType::Int64,
-                false,
+                ConstantExpression::int64(Some(a), l).into_ref(),
+                ConstantExpression::int64(Some(b), r).into_ref(),
+                o,
             )
             .into_ref()
         };
-        let dangerous = add(i64::MAX, 1);
-        let evaluation = dangerous.prepare_test().unwrap();
-        let empty = TestInput::new(&[], 0);
-        assert!(evaluation.evaluate(&empty).unwrap().is_empty());
-        let input = TestInput::new(&[], 4);
-        assert!(evaluation.evaluate(&input).is_err());
+        let dangerous = add(&mut t, i64::MAX, 1);
+        assert!(t.evaluate(&dangerous, &[], 0).unwrap().is_empty());
+        assert!(t.evaluate(&dangerous, &[], 4).is_err());
 
+        let five = add(&mut t, 2, 3);
+        let no = t.column(DataType::Boolean, false);
         let case = CaseExpression::new(
             vec![(
-                ConstantExpression::boolean(Some(false)).into_ref(),
+                ConstantExpression::boolean(Some(false), no).into_ref(),
                 dangerous.clone(),
             )],
-            add(2, 3),
-            DataType::Int64,
-            false,
+            five,
+            t.column(DataType::Int64, false),
         )
-        .prepare_test()
-        .unwrap();
-        let coalesce = CoalesceExpression::new(vec![add(3, 4), dangerous], DataType::Int64, false)
-            .prepare_test()
-            .unwrap();
-        let first = case.evaluate(&input).unwrap();
-        assert_eq!(ints(&first), vec![5; 4]);
-        assert_eq!(ints(&coalesce.evaluate(&input).unwrap()), vec![7; 4]);
-        assert_eq!(
-            ints(&case.evaluate(&TestInput::new(&[], 2)).unwrap()),
-            vec![5; 2]
-        );
-        assert_eq!(ints(&first), vec![5; 4]);
+        .into_ref();
+        let seven = add(&mut t, 3, 4);
+        let coalesce =
+            CoalesceExpression::new(vec![seven, dangerous], t.column(DataType::Int64, false))
+                .into_ref();
+        assert_eq!(ints(&t.evaluate(&case, &[], 4).unwrap()), vec![5; 4]);
+        assert_eq!(ints(&t.evaluate(&coalesce, &[], 4).unwrap()), vec![7; 4]);
+        assert_eq!(ints(&t.evaluate(&case, &[], 2).unwrap()), vec![5; 2]);
     }
 }

@@ -96,15 +96,6 @@ pub(crate) fn signed(t: &DataType) -> bool {
             | DataType::Timestamp(_, _)
     )
 }
-pub(crate) fn width(t: &DataType) -> u32 {
-    match t {
-        DataType::Boolean | DataType::Int8 | DataType::UInt8 => 8,
-        DataType::Int16 | DataType::UInt16 => 16,
-        DataType::Int32 | DataType::UInt32 | DataType::Float32 | DataType::Date32 => 32,
-        _ => 64,
-    }
-}
-
 pub(crate) fn decode(a: &ArrayRef) -> Result<Vec<Cell>> {
     macro_rules! primitive {
         ($t:ty, $convert:expr) => {{

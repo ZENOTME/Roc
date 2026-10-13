@@ -145,7 +145,7 @@ mod tests {
     }
     fn executor(consumer: PendingThenReady) -> ScanExec<()> {
         ScanExec {
-            operator: ScanOperator::new((), Arc::new(TestStorage)),
+            operator: ScanOperator::new((), Arc::new(TestStorage), vec![]),
             consumer: Some(Box::new(consumer)),
             handle: Some(Arc::new(TestHandle)),
         }

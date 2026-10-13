@@ -12,61 +12,102 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ExpressionResultType;
 use crate::arrow::{
-    array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, new_null_array},
+    array::{Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, new_null_array},
     datatypes::DataType,
 };
+use crate::column::ColumnId;
 use crate::error::{Error, Result};
+use crate::kernel::{
+    ColumnVariableBinding, ConstantValue, KernelBuilder, PendingErrors, VariableType, scalar,
+};
 use std::sync::Arc;
+
+/// A one-row literal. Its Arrow type must equal the output column type.
 #[derive(Clone, Debug)]
 pub struct ConstantExpression {
     value: ArrayRef,
-    result_type: ExpressionResultType,
+    output: ColumnId,
 }
-impl ConstantExpression {
-    pub(crate) fn build_suboperator(
-        &self,
-        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
-    ) -> crate::error::Result<crate::suboperator::VariableId> {
-        builder.constant(self.value().clone())
-    }
 
-    pub fn try_new(value: ArrayRef) -> Result<Self> {
+impl ConstantExpression {
+    pub fn try_new(value: ArrayRef, output: ColumnId) -> Result<Self> {
         if value.len() != 1 {
             return Err(Error::InvalidPlan(
                 "constant must contain exactly one value".into(),
             ));
         }
-        Ok(Self::from_array(value))
-    }
-    fn from_array(value: ArrayRef) -> Self {
-        let result_type = ExpressionResultType {
-            data_type: value.data_type().clone(),
-            nullable: value.logical_null_count() != 0,
-        };
-        Self { value, result_type }
+        Ok(Self { value, output })
     }
     pub fn value(&self) -> &ArrayRef {
         &self.value
     }
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn output(&self) -> ColumnId {
+        self.output
     }
 
-    pub fn null(data_type: &DataType) -> Self {
-        Self::from_array(new_null_array(data_type, 1))
+    pub fn null(data_type: &DataType, output: ColumnId) -> Self {
+        Self {
+            value: new_null_array(data_type, 1),
+            output,
+        }
     }
-    pub fn int64(value: Option<i64>) -> Self {
-        Self::from_array(Arc::new(Int64Array::from(vec![value])))
+    pub fn int64(value: Option<i64>, output: ColumnId) -> Self {
+        Self {
+            value: Arc::new(Int64Array::from(vec![value])),
+            output,
+        }
     }
-    pub fn float64(value: Option<f64>) -> Self {
-        Self::from_array(Arc::new(Float64Array::from(vec![value])))
+    pub fn float64(value: Option<f64>, output: ColumnId) -> Self {
+        Self {
+            value: Arc::new(Float64Array::from(vec![value])),
+            output,
+        }
     }
-    pub fn boolean(value: Option<bool>) -> Self {
-        Self::from_array(Arc::new(BooleanArray::from(vec![value])))
+    pub fn boolean(value: Option<bool>, output: ColumnId) -> Self {
+        Self {
+            value: Arc::new(BooleanArray::from(vec![value])),
+            output,
+        }
     }
-    pub fn string(value: Option<&str>) -> Self {
-        Self::from_array(Arc::new(StringArray::from(vec![value])))
+    pub fn string(value: Option<&str>, output: ColumnId) -> Self {
+        Self {
+            value: Arc::new(StringArray::from(vec![value])),
+            output,
+        }
+    }
+
+    pub(super) fn lower(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        let data_type = self.value.data_type();
+        if !scalar::supported(data_type) {
+            return Err(Error::InvalidPlan(format!(
+                "unsupported constant type: {data_type}"
+            )));
+        }
+        if self.value.is_null(0) || *data_type == DataType::Null {
+            return Ok((builder.null_binding(data_type)?, vec![]));
+        }
+        let cell = scalar::decode(&self.value)?[0];
+        if scalar::bytes_type(data_type) {
+            // SAFETY: the cell borrows `self.value`, alive during this call.
+            let bytes: Arc<[u8]> = Arc::from(unsafe { cell.as_bytes() });
+            let ptr = builder.constant(ConstantValue::BytePointer(bytes))?;
+            let len = builder.constant(ConstantValue::Usize(cell.len))?;
+            return Ok((
+                ColumnVariableBinding::Bytes {
+                    ptr,
+                    len,
+                    validity: None,
+                },
+                vec![],
+            ));
+        }
+        let ty = VariableType::of(data_type)
+            .ok_or_else(|| Error::InvalidPlan(format!("unsupported constant type: {data_type}")))?;
+        let value = builder.constant(ConstantValue::from_bits(ty, cell.bits))?;
+        Ok((ColumnVariableBinding::fixed(ty, value, None)?, vec![]))
     }
 }

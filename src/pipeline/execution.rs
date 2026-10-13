@@ -15,7 +15,8 @@
 //! Pipeline task execution and pipeline-graph scheduling.
 use super::{Pipeline, PipelineGraph};
 use crate::arrow::record_batch::RecordBatch;
-use crate::suboperator::ProgramExecutionContext;
+use crate::exec::{SinkExec, SinkStatus};
+use crate::kernel::{LocalState, Program};
 use crate::{
     Shutdown,
     error::{Error, Result},
@@ -146,27 +147,27 @@ impl Pipeline {
         // A single worker has no CPU parallelism to schedule, so run inline
         // and yield after bounded work instead of dispatching each batch.
         if parallelism == 1 {
-            let mut local = self.program.new_execution_context();
-            self.program.initialize(&mut local)?;
+            let mut local = self.program.new_local()?;
             let mut completed = 0;
+            let mut stop = false;
             while let Some(batch) = self.source.next_batch(&shutdown_guard).await? {
                 if shutdown_guard.is_shutdown_requested() {
                     return Err(Error::Cancelled);
                 }
                 for offset in (0..batch.num_rows()).step_by(config.batch_rows) {
                     let rows = config.batch_rows.min(batch.num_rows() - offset);
-                    if offset == 0 && rows == batch.num_rows() {
-                        run_inline(&self.program, &batch, &mut local, &shutdown_guard)?;
+                    let chunk = if offset == 0 && rows == batch.num_rows() {
+                        run_inline(&self.program, &batch, &mut local, &shutdown_guard)?
                     } else {
                         run_inline(
                             &self.program,
                             &batch.slice(offset, rows),
                             &mut local,
                             &shutdown_guard,
-                        )?;
-                    }
-                    self.sink.flush(&mut local, &shutdown_guard).await?;
-                    if local.stopped {
+                        )?
+                    };
+                    stop = consume(self.sink.as_mut(), chunk, &shutdown_guard).await?;
+                    if stop {
                         break;
                     }
                     completed += 1;
@@ -174,7 +175,7 @@ impl Pipeline {
                         yield_now().await;
                     }
                 }
-                if local.stopped {
+                if stop {
                     break;
                 }
                 if batch.num_rows() == 0 {
@@ -203,9 +204,7 @@ impl Pipeline {
         let program = Arc::new(self.program);
         let mut idle = Vec::with_capacity(parallelism);
         for _ in 0..parallelism {
-            let mut local = program.new_execution_context();
-            program.initialize(&mut local)?;
-            idle.push(local);
+            idle.push(program.new_local()?);
         }
         let mut jobs = FuturesUnordered::new();
         let mut morsel: Option<RecordBatch> = None;
@@ -256,13 +255,15 @@ impl Pipeline {
                 let code = program.clone();
                 let guard = shutdown_guard.clone();
                 jobs.push(on_cpu(move || {
+                    let mut chunks = Vec::new();
                     for batch in batches {
-                        code.run(&batch, &mut local, &guard)?;
-                        if local.stopped {
-                            break;
+                        if let Some(chunk) = code.run(&batch, &mut local, &guard)?
+                            && chunk.num_rows() != 0
+                        {
+                            chunks.push(chunk);
                         }
                     }
-                    Ok(local)
+                    Ok((local, chunks))
                 }));
                 continue;
             }
@@ -277,7 +278,7 @@ impl Pipeline {
                 loop {
                     enum Event {
                         Input(Result<Option<RecordBatch>>),
-                        Done(Result<ProgramExecutionContext>),
+                        Done(Result<Completed>),
                     }
                     let event = async {
                         if jobs.is_empty() {
@@ -310,11 +311,12 @@ impl Pipeline {
                             }
                             break;
                         }
-                        Event::Done(local) => {
-                            stop |= return_local(
+                        Event::Done(completed_job) => {
+                            stop = return_local(
                                 self.sink.as_mut(),
-                                local?,
+                                completed_job?,
                                 &mut idle,
+                                stop,
                                 &shutdown_guard,
                             )
                             .await?;
@@ -335,7 +337,8 @@ impl Pipeline {
                     Either::Left(_) => return Err(Error::Cancelled),
                     Either::Right((local, _)) => local.expect("pending CPU work")?,
                 };
-                stop |= return_local(self.sink.as_mut(), local, &mut idle, &shutdown_guard).await?;
+                stop = return_local(self.sink.as_mut(), local, &mut idle, stop, &shutdown_guard)
+                    .await?;
                 completed += 1;
                 if completed % config.yield_batches == 0 {
                     yield_now().await;
@@ -346,7 +349,7 @@ impl Pipeline {
             }
         }
         // Combine only after every CPU job succeeds. Empty input still combines
-        // initialized local states, which is required for a global COUNT = 0.
+        // fresh local states, which is required for a global COUNT = 0.
         for local in idle {
             self.sink.combine(local, &shutdown_guard).await?;
         }
@@ -359,28 +362,52 @@ impl Pipeline {
     }
 }
 
+/// A finished CPU job: its local state and its non-empty output chunks.
+type Completed = (LocalState, Vec<RecordBatch>);
+
 fn run_inline(
-    program: &crate::suboperator::ProgramContext,
+    program: &Program,
     batch: &RecordBatch,
-    local: &mut ProgramExecutionContext,
+    local: &mut LocalState,
     guard: &ShutdownGuard,
-) -> Result<()> {
+) -> Result<Option<RecordBatch>> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         program.run(batch, local, guard)
     }))
     .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())))
 }
 
-async fn return_local(
-    sink: &mut dyn crate::exec::SinkExec,
-    mut local: ProgramExecutionContext,
-    idle: &mut Vec<ProgramExecutionContext>,
+/// Passes a non-empty chunk to the sink. Returns whether the sink finished.
+async fn consume(
+    sink: &mut dyn SinkExec,
+    chunk: Option<RecordBatch>,
     guard: &ShutdownGuard,
 ) -> Result<bool> {
-    let stopped = local.stopped;
-    sink.flush(&mut local, guard).await?;
+    match chunk {
+        Some(chunk) if chunk.num_rows() != 0 => {
+            Ok(sink.consume(chunk, guard).await? == SinkStatus::Finished)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Returns a job's local state to the pool and consumes its chunks unless the
+/// sink has already finished. Returns whether the sink is finished.
+async fn return_local(
+    sink: &mut dyn SinkExec,
+    (local, chunks): Completed,
+    idle: &mut Vec<LocalState>,
+    mut stop: bool,
+    guard: &ShutdownGuard,
+) -> Result<bool> {
     idle.push(local);
-    Ok(stopped)
+    for chunk in chunks {
+        if stop {
+            break;
+        }
+        stop = consume(sink, Some(chunk), guard).await?;
+    }
+    Ok(stop)
 }
 
 /// Rayon runs synchronous work only. Catch worker panics and return them through
@@ -495,21 +522,19 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use crate::exec::{SinkExec, SourceExec};
-    use crate::suboperator::{
-        ExecutionMode, ProgramControl, StateBuilder, StateId, SuboperatorScopeBuilder,
-    };
+    use crate::column::{ColumnContext, ColumnId, ColumnType};
+    use crate::exec::{SinkExec, SinkStatus, SourceExec};
+    use crate::kernel::KernelBuilder;
     use futures::{executor::block_on, future::BoxFuture};
     use std::sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     #[derive(Default)]
     struct Observed {
         source_calls: AtomicUsize,
         cursors: AtomicUsize,
-        locals: AtomicUsize,
         combined: AtomicUsize,
         values: Mutex<Vec<i64>>,
         batch_sizes: Mutex<Vec<usize>>,
@@ -537,32 +562,49 @@ mod tests {
         }
     }
 
-    struct RecordingState {
+    /// Records consumed chunks and finishes after `stop_after` values.
+    struct RecordingSink {
         observed: Arc<Observed>,
         stop_after: Option<usize>,
     }
 
-    impl RecordingState {
-        fn sink(&mut self, input: &RecordBatch) -> Result<ProgramControl> {
-            assert!(input.num_rows() > 0);
-            self.observed.batches.lock().unwrap().push(input.clone());
-            self.observed
-                .batch_sizes
-                .lock()
-                .unwrap()
-                .push(input.num_rows());
-            let mut collected = self.observed.values.lock().unwrap();
-            collected.extend(values(input));
-            Ok(
-                if self
-                    .stop_after
-                    .is_some_and(|limit| collected.len() >= limit)
-                {
-                    ProgramControl::Stop
-                } else {
-                    ProgramControl::Continue
-                },
-            )
+    impl SinkExec for RecordingSink {
+        fn consume<'a>(
+            &'a mut self,
+            chunk: RecordBatch,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
+            Box::pin(async move {
+                assert!(chunk.num_rows() > 0);
+                self.observed
+                    .batch_sizes
+                    .lock()
+                    .unwrap()
+                    .push(chunk.num_rows());
+                let mut collected = self.observed.values.lock().unwrap();
+                collected.extend(values(&chunk));
+                self.observed.batches.lock().unwrap().push(chunk);
+                Ok(
+                    if self
+                        .stop_after
+                        .is_some_and(|limit| collected.len() >= limit)
+                    {
+                        SinkStatus::Finished
+                    } else {
+                        SinkStatus::Continue
+                    },
+                )
+            })
+        }
+        fn combine<'a>(
+            &'a mut self,
+            _: LocalState,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.observed.combined.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
         }
     }
 
@@ -592,66 +634,44 @@ mod tests {
             yield_batches: 1,
         }
     }
-    struct SinkDefinition {
-        state: StateId,
-        observed: Arc<Observed>,
+    /// A program over one non-nullable Int64 column producing `build`'s output.
+    fn program(
+        build: impl FnOnce(&mut ColumnContext, ColumnId) -> crate::expr::scalar::ScalarExprRef,
+    ) -> Program {
+        let mut columns = ColumnContext::new();
+        let input = columns.allocate(ColumnType::new(DataType::Int64, false));
+        let expression = build(&mut columns, input);
+        let mut builder = KernelBuilder::new(&columns);
+        builder.bind_inputs(&[input]).unwrap();
+        let errors = expression.build_kernels(&mut builder).unwrap();
+        builder.raise(errors).unwrap();
+        Program::compile(builder.finish(Some(&[expression.output()])).unwrap()).unwrap()
     }
-    impl SinkExec for SinkDefinition {
-        fn combine<'a>(
-            &'a mut self,
-            mut local: ProgramExecutionContext,
-            _: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async move {
-                local
-                    .take_state(self.state)
-                    .unwrap()
-                    .into_inner::<RecordingState>()?;
-                self.observed.combined.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        }
+    fn passthrough() -> Program {
+        program(|_, input| crate::expr::scalar::ReferenceExpression::new(input).into_ref())
     }
     fn executor(
         batches: Vec<RecordBatch>,
-        mut builder: SuboperatorScopeBuilder,
+        program: Program,
         stop_after: Option<usize>,
     ) -> (Pipeline, Arc<Observed>) {
         let observed = Arc::new(Observed::default());
-        let monitor = observed.clone();
-        let state = builder.state(StateBuilder::new(move || {
-            monitor.locals.fetch_add(1, Ordering::SeqCst);
-            Ok(RecordingState {
-                observed: monitor.clone(),
-                stop_after,
-            })
-        }));
-        builder
-            .batch_update(state, |state, batch| {
-                state.get_mut::<RecordingState>()?.sink(batch)
-            })
-            .unwrap();
         let pipeline = Pipeline::new(
             Box::new(Source {
                 batches: batches.into(),
                 observed: observed.clone(),
             }),
-            builder,
-            Box::new(SinkDefinition {
-                state,
+            program,
+            Box::new(RecordingSink {
                 observed: observed.clone(),
+                stop_after,
             }),
-            ExecutionMode::Compiled,
-        )
-        .unwrap();
+        );
         (pipeline, observed)
-    }
-    fn empty_program() -> SuboperatorScopeBuilder {
-        SuboperatorScopeBuilder::new()
     }
     #[test]
     fn source_morsels_split_and_empty_batches_are_skipped() {
-        let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], empty_program(), None);
+        let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], passthrough(), None);
         block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
         assert_eq!(*observed.batch_sizes.lock().unwrap(), [2, 1]);
@@ -662,7 +682,7 @@ mod tests {
     fn whole_batches_keep_their_arrow_owners() {
         let input = batch(&[1, 2]);
         let owner = input.column(0).clone();
-        let (exec, observed) = executor(vec![input], empty_program(), None);
+        let (exec, observed) = executor(vec![input], passthrough(), None);
         block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert!(Arc::ptr_eq(
             &owner,
@@ -670,12 +690,9 @@ mod tests {
         ));
     }
     #[test]
-    fn sink_stop_does_not_read_more_input_and_combines_once() {
-        let (exec, observed) = executor(
-            vec![batch(&[1, 2, 3]), batch(&[4])],
-            empty_program(),
-            Some(1),
-        );
+    fn sink_finish_does_not_read_more_input_and_combines_once() {
+        let (exec, observed) =
+            executor(vec![batch(&[1, 2, 3]), batch(&[4])], passthrough(), Some(1));
         block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
@@ -683,25 +700,19 @@ mod tests {
     }
     #[test]
     fn program_errors_do_not_publish_partial_results() {
-        use crate::{
-            expr::{ExpressionResultType, scalar::*},
-            operator::{Projection, ProjectionExpression},
-        };
-        let x = ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false))
-            .into_ref();
-        let division = FunctionExpression::binary(
-            FunctionKind::Divide,
-            x,
-            ConstantExpression::int64(Some(0)).into_ref(),
-            DataType::Int64,
-            false,
-        )
-        .into_ref();
-        let mut builder = SuboperatorScopeBuilder::new();
-        Projection::new(vec![ProjectionExpression::new(division, "x")])
-            .build_suboperator(&mut builder)
-            .unwrap();
-        let (exec, observed) = executor(vec![batch(&[1])], builder, None);
+        use crate::expr::scalar::*;
+        let division = program(|columns, input| {
+            let zero = columns.allocate(ColumnType::new(DataType::Int64, false));
+            let output = columns.allocate(ColumnType::new(DataType::Int64, false));
+            FunctionExpression::binary(
+                FunctionKind::Divide,
+                ReferenceExpression::new(input).into_ref(),
+                ConstantExpression::int64(Some(0), zero).into_ref(),
+                output,
+            )
+            .into_ref()
+        });
+        let (exec, observed) = executor(vec![batch(&[1])], division, None);
         assert!(block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).is_err());
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
@@ -710,12 +721,11 @@ mod tests {
     fn one_source_and_bounded_reused_locals_for_many_batches() {
         let (exec, observed) = executor(
             vec![batch(&(0..100).collect::<Vec<_>>())],
-            empty_program(),
+            passthrough(),
             None,
         );
         block_on(exec.execute(asyncband::shutdown::new().1, config(), 3)).unwrap();
         assert_eq!(observed.cursors.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.locals.load(Ordering::SeqCst), 3);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 3);
         let mut values = observed.values.lock().unwrap().clone();
         values.sort();
@@ -723,7 +733,7 @@ mod tests {
     }
     #[test]
     fn cancellation_does_not_read_or_combine() {
-        let (exec, observed) = executor(vec![batch(&[1, 2])], empty_program(), None);
+        let (exec, observed) = executor(vec![batch(&[1, 2])], passthrough(), None);
         let (shutdown, guard) = asyncband::shutdown::new();
         shutdown.request_shutdown();
         assert!(matches!(
@@ -735,11 +745,11 @@ mod tests {
     }
     #[test]
     fn empty_source_still_returns_local_state_for_combine() {
-        let (exec, observed) = executor(vec![], empty_program(), None);
+        let (exec, observed) = executor(vec![], passthrough(), None);
         block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
-    // The second source read cannot finish until the first batch is flushed.
+    // The second source read cannot finish until the first chunk is consumed.
     // This catches coordinators that await source input while neglecting CPU
     // completions, and accidental cancellation/recreation of pending reads.
     struct FeedbackCursor {
@@ -761,7 +771,7 @@ mod tests {
                             .take()
                             .expect("one persistent read")
                             .await
-                            .map_err(|_| Error::Execution("lost flush notification".into()))?;
+                            .map_err(|_| Error::Execution("lost consume notification".into()))?;
                         Ok(Some(batch(&[2])))
                     }
                     _ => Ok(None),
@@ -771,63 +781,56 @@ mod tests {
     }
     struct FeedbackSink {
         send: Option<futures::channel::oneshot::Sender<()>>,
-        state: StateId,
+        consumed: usize,
     }
     impl SinkExec for FeedbackSink {
-        fn flush<'a>(
+        fn consume<'a>(
             &'a mut self,
-            local: &'a mut ProgramExecutionContext,
+            _: RecordBatch,
             _: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
             Box::pin(async move {
-                let updated = local.state_mut(self.state)?.get_mut::<bool>()?;
-                assert!(*updated);
-                *updated = false;
+                self.consumed += 1;
                 if let Some(send) = self.send.take() {
                     let _ = send.send(());
                 }
+                Ok(SinkStatus::Continue)
+            })
+        }
+        fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                assert_eq!(self.consumed, 2);
                 Ok(())
             })
         }
     }
     #[tokio::test]
-    async fn pending_source_read_keeps_progress_while_completed_batches_flush() {
+    async fn pending_source_read_keeps_progress_while_completed_chunks_are_consumed() {
         let (send, receive) = futures::channel::oneshot::channel();
-        let mut builder = SuboperatorScopeBuilder::new();
-        let state = builder.state(StateBuilder::new(|| Ok(false)));
-        builder
-            .batch_update(state, |state, _| {
-                assert!(rayon::current_thread_index().is_some());
-                *state.get_mut::<bool>()? = true;
-                Ok(ProgramControl::Continue)
-            })
-            .unwrap();
         let pipeline = Pipeline::new(
             Box::new(FeedbackCursor {
                 read: 0,
                 ready: Some(receive),
             }),
-            builder,
+            passthrough(),
             Box::new(FeedbackSink {
                 send: Some(send),
-                state,
+                consumed: 0,
             }),
-            ExecutionMode::Compiled,
-        )
-        .unwrap();
+        );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             pipeline.execute(asyncband::shutdown::new().1, config(), 2),
         )
         .await
-        .expect("source and flush deadlocked")
+        .expect("source and consume deadlocked")
         .unwrap();
     }
     // A source whose second read never completes must still be finalized after
-    // a CPU program stops. Keep the source owned by the coordinator, not the read.
+    // the sink finishes. Keep the source owned by the coordinator, not the read.
     struct PendingStopSource {
         first: bool,
-        pending: Arc<std::sync::atomic::AtomicBool>,
+        pending: Arc<AtomicBool>,
         finished: Arc<AtomicUsize>,
     }
     impl SourceExec for PendingStopSource {
@@ -851,63 +854,62 @@ mod tests {
             })
         }
     }
+    /// Finishes on the first chunk, once the second source read is pending.
+    struct StopSink {
+        pending: Arc<AtomicBool>,
+        combined: Arc<AtomicUsize>,
+    }
+    impl SinkExec for StopSink {
+        fn consume<'a>(
+            &'a mut self,
+            _: RecordBatch,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
+            Box::pin(async move {
+                assert!(
+                    self.pending.load(Ordering::SeqCst),
+                    "second read never polled"
+                );
+                Ok(SinkStatus::Finished)
+            })
+        }
+        fn combine<'a>(
+            &'a mut self,
+            _: LocalState,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.combined.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
     #[tokio::test]
     async fn early_stop_drops_pending_read_but_finishes_owned_source() {
-        let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pending = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::new(Observed::default());
-        let mut builder = SuboperatorScopeBuilder::new();
-        let monitor = observed.clone();
-        let state = builder.state(StateBuilder::new(move || {
-            Ok(RecordingState {
-                observed: monitor.clone(),
-                stop_after: None,
-            })
-        }));
-        builder
-            .batch_update(state, |state, batch| {
-                state.get_mut::<RecordingState>()?.sink(batch)
-            })
-            .unwrap();
-        let read_pending = pending.clone();
-        let wait_state = builder.state(StateBuilder::new(move || Ok(read_pending.clone())));
-        builder
-            .batch_update(wait_state, |state, _| {
-                let pending = state.get_mut::<Arc<std::sync::atomic::AtomicBool>>()?;
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-                while !pending.load(Ordering::SeqCst) {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "second read never polled"
-                    );
-                    std::thread::yield_now();
-                }
-                Ok(ProgramControl::Stop)
-            })
-            .unwrap();
+        let combined = Arc::new(AtomicUsize::new(0));
         let pipeline = Pipeline::new(
             Box::new(PendingStopSource {
                 first: true,
-                pending,
+                pending: pending.clone(),
                 finished: finished.clone(),
             }),
-            builder,
-            Box::new(SinkDefinition {
-                state,
-                observed: observed.clone(),
+            passthrough(),
+            Box::new(StopSink {
+                pending,
+                combined: combined.clone(),
             }),
-            ExecutionMode::Compiled,
-        )
-        .unwrap();
+        );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             pipeline.execute(asyncband::shutdown::new().1, config(), 2),
         )
         .await
-        .expect("stop must interrupt pending source read")
+        .expect("finish must interrupt pending source read")
         .unwrap();
         assert_eq!(finished.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 2);
+        assert_eq!(combined.load(Ordering::SeqCst), 2);
     }
     #[test]
     fn cpu_panics_are_returned_as_errors() {

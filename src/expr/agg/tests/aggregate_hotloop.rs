@@ -8,9 +8,8 @@ use crate::arrow::{
     record_batch::RecordBatch,
 };
 use crate::expr::{
-    ExpressionResultType,
     agg::{AggregateExpression, AggregateFunction, test_support::AccumulatorTestHarness},
-    scalar::ReferenceExpression,
+    scalar::{ReferenceExpression, test_support::TestPlan},
 };
 use std::sync::Arc;
 
@@ -35,13 +34,14 @@ fn execute(
         vec![values],
     )
     .unwrap();
-    let mut executor = AccumulatorTestHarness::try_new(Arc::new(AggregateExpression::new(
+    let mut plan = TestPlan::new(&[(data_type, true)]);
+    let output = plan.column(output_type, true);
+    let expression = AggregateExpression::new(
         function,
-        vec![ReferenceExpression::new(0, ExpressionResultType::new(data_type, true)).into_ref()],
-        output_type,
-        true,
-    )))
-    .unwrap();
+        vec![ReferenceExpression::new(plan.input(0)).into_ref()],
+        output,
+    );
+    let mut executor = AccumulatorTestHarness::try_new(&plan, Arc::new(expression)).unwrap();
     executor.update(&input, ids, groups).unwrap();
     executor.evaluate().unwrap()
 }

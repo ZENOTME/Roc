@@ -20,7 +20,10 @@ use crate::arrow::{
     array::ArrayRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
+use crate::column::ColumnContext;
 use crate::expr::agg::accumulator::Accumulator;
+use crate::kernel::{LocalState, StateId};
+use crate::operator::Operator;
 use crate::{
     error::{Error, Result},
     operator::AggregateOperator,
@@ -68,31 +71,11 @@ impl PartialAggregate {
 }
 
 impl AggregateMergeState {
-    fn new(operator: &AggregateOperator) -> Result<Self> {
-        let schema = operator.groups().output_schema();
+    fn new(operator: &AggregateOperator, columns: &ColumnContext) -> Result<Self> {
+        let schema = columns.schema(&operator.group_columns())?;
         let mut accumulators = Vec::new();
         for aggregate in operator.aggregates() {
-            let types = aggregate
-                .arguments()
-                .iter()
-                .map(|e| e.result_type().data_type().clone())
-                .collect::<Vec<_>>();
-            let types = match aggregate.function() {
-                crate::expr::agg::AggregateFunction::Sum => {
-                    vec![aggregate.result_type().data_type().clone(); types.len()]
-                }
-                crate::expr::agg::AggregateFunction::Avg
-                | crate::expr::agg::AggregateFunction::CovarPop => {
-                    vec![crate::arrow::datatypes::DataType::Float64; types.len()]
-                }
-                _ => types,
-            };
-            let mut accumulator = Accumulator::new(
-                aggregate.function(),
-                aggregate.is_distinct(),
-                &types,
-                aggregate.result_type().data_type(),
-            )?;
+            let mut accumulator = aggregate.accumulator(columns)?;
             if schema.fields().is_empty() {
                 accumulator.resize(1);
             }
@@ -101,7 +84,7 @@ impl AggregateMergeState {
         Ok(Self {
             index: GroupIndex::new(&schema)?,
             group_ids: vec![],
-            output_schema: operator.output_schema(),
+            output_schema: columns.schema(&operator.output_columns())?,
             accumulators,
         })
     }
@@ -163,7 +146,7 @@ pub struct AggregateExecuteState {
 }
 
 pub struct AggregateSinkExec {
-    states: Vec<crate::suboperator::StateId>,
+    states: Vec<StateId>,
     merge: Option<AggregateMergeState>,
     result: Arc<AggregateSharedState>,
 }
@@ -172,16 +155,16 @@ pub struct AggregateSourceExec {
     next_row: usize,
 }
 impl AggregateOperator {
-    pub fn new_execute_state(&self) -> Result<AggregateExecuteState> {
+    pub fn new_execute_state(&self, columns: &ColumnContext) -> Result<AggregateExecuteState> {
         Ok(AggregateExecuteState {
-            merge: AggregateMergeState::new(self)?,
+            merge: AggregateMergeState::new(self, columns)?,
             result: Arc::new(AggregateSharedState::default()),
         })
     }
     pub fn build_exec(
         &self,
         state: AggregateExecuteState,
-        locals: Vec<crate::suboperator::StateId>,
+        locals: Vec<StateId>,
     ) -> (AggregateSourceExec, AggregateSinkExec) {
         let source = AggregateSourceExec {
             result: state.result.clone(),
@@ -199,12 +182,11 @@ impl AggregateOperator {
 impl SinkExec for AggregateSinkExec {
     fn combine<'a>(
         &'a mut self,
-        mut local: crate::suboperator::ProgramExecutionContext,
+        mut local: LocalState,
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let (groups, states) =
-                crate::suboperator::aggregation::partial(&mut local, &self.states)?;
+            let (groups, states) = crate::kernel::aggregation::partial(&mut local, &self.states)?;
             let partial = PartialAggregate { groups, states };
             let merge = self
                 .merge
@@ -275,153 +257,236 @@ impl SourceExec for AggregateSourceExec {
 
 #[cfg(test)]
 mod tests {
-    use crate::expr::agg::test_support::AccumulatorTestHarness;
-    struct AggregateState {
-        program: crate::suboperator::ProgramContext,
-        local: crate::suboperator::ProgramExecutionContext,
-        states: Vec<crate::suboperator::StateId>,
-        merged: super::AggregateMergeState,
-    }
-    impl AggregateState {
-        fn new(operator: &crate::operator::AggregateOperator) -> crate::error::Result<Self> {
-            let mut builder = crate::suboperator::SuboperatorScopeBuilder::new();
-            let states = operator.build_suboperator(&mut builder)?;
-            let program = builder
-                .finish(vec![])?
-                .compile(crate::suboperator::ExecutionMode::Compiled)?;
-            let mut local = program.new_execution_context();
-            program.initialize(&mut local)?;
-            Ok(Self {
-                program,
-                local,
-                states,
-                merged: super::AggregateMergeState::new(operator)?,
-            })
-        }
-        fn update(
-            &mut self,
-            batch: &crate::arrow::record_batch::RecordBatch,
-        ) -> crate::error::Result<()> {
-            self.program.execute_batch(batch, &mut self.local)?;
-            Ok(())
-        }
-        fn finish_partial(mut self) -> crate::error::Result<super::PartialAggregate> {
-            let (groups, states) =
-                crate::suboperator::aggregation::partial(&mut self.local, &self.states)?;
-            Ok(super::PartialAggregate { groups, states })
-        }
-        fn merge(&mut self, partial: &super::PartialAggregate) -> crate::error::Result<()> {
-            self.merged.merge(partial)
-        }
-        fn finish(mut self) -> crate::error::Result<crate::arrow::record_batch::RecordBatch> {
-            let (groups, states) =
-                crate::suboperator::aggregation::partial(&mut self.local, &self.states)?;
-            self.merged
-                .merge(&super::PartialAggregate { groups, states })?;
-            self.merged.finish()
-        }
-    }
-
     use super::*;
     use crate::arrow::{
         array::{Array, Float64Array, Int64Array, StringArray},
-        datatypes::{DataType, Field, Schema, SchemaRef},
+        datatypes::DataType,
     };
-    use crate::{
-        expr::ExpressionResultType,
-        expr::scalar::ScalarExprRef,
-        expr::{
-            agg::{AggregateExpression, AggregateFunction},
-            scalar::ReferenceExpression,
+    use crate::column::ColumnId;
+    use crate::expr::{
+        agg::{AggregateExpression, AggregateFunction},
+        scalar::{
+            ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression,
+            ScalarExprRef, test_support::TestPlan,
         },
-        operator::Projection,
     };
+    use crate::kernel::{ExecutionMode, KernelBuilder, MODES, Program, agree};
+    use asyncband::shutdown::Shutdown;
 
-    fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, true),
-            Field::new("value", DataType::Float64, true),
-        ]))
+    /// One worker per execution mode: the aggregate's input program and its
+    /// local state, plus a merge state standing in for the sink. Every input
+    /// goes to all workers; their results must agree.
+    struct AggregateState {
+        workers: Vec<(ExecutionMode, Program, LocalState, AggregateMergeState)>,
+        states: Vec<StateId>,
+        _shutdown: Shutdown,
+        guard: ShutdownGuard,
     }
 
-    /// Column 1 (`value`) of `schema`.
-    fn value() -> ScalarExprRef {
-        ReferenceExpression::new(1, ExpressionResultType::new(DataType::Float64, true)).into_ref()
+    /// DISTINCT states list hash set members in unspecified order.
+    fn same_partial(a: &PartialAggregate, b: &PartialAggregate) -> bool {
+        use crate::arrow::array::AsArray;
+        let members = |array: &ArrayRef| {
+            let list = array.as_list::<i32>();
+            (0..list.len())
+                .map(|i| {
+                    let mut values = (0..list.value(i).len())
+                        .map(|j| list.value(i).as_binary::<i32>().value(j).to_vec())
+                        .collect::<Vec<_>>();
+                    values.sort();
+                    values
+                })
+                .collect::<Vec<_>>()
+        };
+        let same = |x: &ArrayRef, y: &ArrayRef| match x.data_type() {
+            DataType::List(_) => x.data_type() == y.data_type() && members(x) == members(y),
+            _ => x == y,
+        };
+        a.groups == b.groups
+            && a.states.len() == b.states.len()
+            && a.states
+                .iter()
+                .zip(&b.states)
+                .all(|(x, y)| x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y)))
     }
-    fn groups(grouped: bool) -> Projection {
-        Projection::from_indices(schema(), if grouped { &[0] } else { &[] }).unwrap()
+
+    impl AggregateState {
+        fn new(plan: &TestPlan, operator: &AggregateOperator) -> Result<Self> {
+            let mut workers = vec![];
+            let mut states = vec![];
+            for mode in MODES {
+                let merged = AggregateMergeState::new(operator, &plan.columns)?;
+                let mut builder = KernelBuilder::new(&plan.columns);
+                builder.bind_inputs(&plan.inputs)?;
+                states = operator.build_kernels(&mut builder)?;
+                let program = Program::new(builder.finish(None)?, mode)?;
+                let local = program.new_local()?;
+                workers.push((mode, program, local, merged));
+            }
+            let (shutdown, guard) = asyncband::shutdown::new();
+            Ok(Self {
+                workers,
+                states,
+                _shutdown: shutdown,
+                guard,
+            })
+        }
+        fn update(&mut self, batch: &RecordBatch) -> Result<()> {
+            let results = self
+                .workers
+                .iter_mut()
+                .map(|(mode, program, local, _)| {
+                    (*mode, program.run(batch, local, &self.guard).map(|_| ()))
+                })
+                .collect();
+            agree(results, |_, _| true)
+        }
+        fn finish_partial(mut self) -> Result<PartialAggregate> {
+            let results = self
+                .workers
+                .iter_mut()
+                .map(|(mode, _, local, _)| {
+                    let partial = crate::kernel::aggregation::partial(local, &self.states)
+                        .map(|(groups, states)| PartialAggregate { groups, states });
+                    (*mode, partial)
+                })
+                .collect();
+            agree(results, same_partial)
+        }
+        fn merge(&mut self, partial: &PartialAggregate) -> Result<()> {
+            let results = self
+                .workers
+                .iter_mut()
+                .map(|(mode, _, _, merged)| (*mode, merged.merge(partial)))
+                .collect();
+            agree(results, |_, _| true)
+        }
+        fn finish(self) -> Result<RecordBatch> {
+            let states = self.states;
+            let results = self
+                .workers
+                .into_iter()
+                .map(|(mode, _, mut local, mut merged)| {
+                    let result = (|| {
+                        let (groups, states) =
+                            crate::kernel::aggregation::partial(&mut local, &states)?;
+                        merged.merge(&PartialAggregate { groups, states })?;
+                        merged.finish()
+                    })();
+                    (mode, result)
+                })
+                .collect();
+            agree(results, |a, b| a == b)
+        }
+    }
+
+    /// Input columns `key: Utf8?` and `value: Float64?`.
+    fn plan() -> TestPlan {
+        TestPlan::new(&[(DataType::Utf8, true), (DataType::Float64, true)])
+    }
+    fn value(plan: &TestPlan) -> ScalarExprRef {
+        ReferenceExpression::new(plan.input(1)).into_ref()
+    }
+    fn groups(plan: &TestPlan, grouped: bool) -> Vec<ScalarExprRef> {
+        if grouped {
+            vec![ReferenceExpression::new(plan.input(0)).into_ref()]
+        } else {
+            vec![]
+        }
+    }
+    fn aggregate(
+        plan: &mut TestPlan,
+        function: AggregateFunction,
+        arguments: Vec<ScalarExprRef>,
+        data_type: DataType,
+        nullable: bool,
+    ) -> AggregateExpression {
+        let output = plan.column(data_type, nullable);
+        AggregateExpression::new(function, arguments, output)
     }
     /// Result types and nullability are host-supplied: SUM over Float64 is
     /// Float64, AVG and COVAR_POP are Float64, and only COUNT is non-nullable.
-    fn aggregates() -> Vec<Arc<AggregateExpression>> {
+    fn aggregates(plan: &mut TestPlan) -> Vec<Arc<AggregateExpression>> {
         use AggregateFunction::*;
+        let v = value(plan);
         vec![
-            Arc::new(AggregateExpression::new(
+            Arc::new(aggregate(
+                plan,
                 Sum,
-                vec![value()],
+                vec![v.clone()],
                 DataType::Float64,
                 true,
             )),
+            Arc::new(aggregate(
+                plan,
+                Avg,
+                vec![v.clone()],
+                DataType::Float64,
+                true,
+            )),
+            Arc::new(aggregate(
+                plan,
+                Count,
+                vec![v.clone()],
+                DataType::Int64,
+                false,
+            )),
             Arc::new(
-                AggregateExpression::new(Avg, vec![value()], DataType::Float64, true)
-                    .with_alias("avg"),
+                aggregate(plan, Count, vec![v.clone()], DataType::Int64, false).with_distinct(),
             ),
-            Arc::new(
-                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
-                    .with_alias("count"),
-            ),
-            Arc::new(
-                AggregateExpression::new(Count, vec![value()], DataType::Int64, false)
-                    .with_distinct()
-                    .with_alias("distinct"),
-            ),
-            Arc::new(
-                AggregateExpression::new(CovarPop, vec![value(), value()], DataType::Float64, true)
-                    .with_alias("covar"),
-            ),
-            Arc::new(
-                AggregateExpression::new(Count, vec![], DataType::Int64, false).with_alias("rows"),
-            ),
+            Arc::new(aggregate(
+                plan,
+                CovarPop,
+                vec![v.clone(), v],
+                DataType::Float64,
+                true,
+            )),
+            Arc::new(aggregate(plan, Count, vec![], DataType::Int64, false)),
         ]
     }
-
-    fn batch(keys: Vec<Option<&str>>, values: Vec<Option<f64>>) -> RecordBatch {
-        RecordBatch::try_new(
-            schema(),
+    fn input(plan: &TestPlan, columns: Vec<ArrayRef>) -> RecordBatch {
+        RecordBatch::try_new(plan.columns.schema(&plan.inputs).unwrap(), columns).unwrap()
+    }
+    fn batch(plan: &TestPlan, keys: Vec<Option<&str>>, values: Vec<Option<f64>>) -> RecordBatch {
+        input(
+            plan,
             vec![
                 Arc::new(StringArray::from(keys)),
                 Arc::new(Float64Array::from(values)),
             ],
         )
-        .unwrap()
+    }
+    fn empty(plan: &TestPlan) -> RecordBatch {
+        RecordBatch::new_empty(plan.columns.schema(&plan.inputs).unwrap())
+    }
+    fn int(plan: &mut TestPlan, v: i64) -> ScalarExprRef {
+        let output = plan.column(DataType::Int64, false);
+        ConstantExpression::int64(Some(v), output).into_ref()
+    }
+    fn output_schema(plan: &TestPlan, operator: &AggregateOperator) -> SchemaRef {
+        plan.columns.schema(&operator.output_columns()).unwrap()
+    }
+    fn group_schema(plan: &TestPlan, operator: &AggregateOperator) -> SchemaRef {
+        let columns: Vec<ColumnId> = operator.group_columns();
+        plan.columns.schema(&columns).unwrap()
     }
 
     #[test]
     fn generated_global_reductions_handle_sliced_bitmaps_arbitrary_null_payloads_and_tails() {
         use crate::arrow::buffer::NullBuffer;
         use crate::expr::agg::AggregateFunction::{Count, Sum};
-        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
-        let reference =
-            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, true))
-                .into_ref();
-        let operator = AggregateOperator::try_new(
-            Projection::new(vec![]),
-            vec![
-                Arc::new(AggregateExpression::new(
-                    Sum,
-                    vec![reference.clone()],
-                    DataType::Int64,
-                    true,
-                )),
-                Arc::new(AggregateExpression::new(
-                    Count,
-                    vec![reference],
-                    DataType::Int64,
-                    false,
-                )),
-            ],
-        )
-        .unwrap();
+        let mut plan = TestPlan::new(&[(DataType::Int64, true)]);
+        let reference = ReferenceExpression::new(plan.input(0)).into_ref();
+        let sum = aggregate(
+            &mut plan,
+            Sum,
+            vec![reference.clone()],
+            DataType::Int64,
+            true,
+        );
+        let count = aggregate(&mut plan, Count, vec![reference], DataType::Int64, false);
+        let operator =
+            AggregateOperator::try_new(vec![], vec![Arc::new(sum), Arc::new(count)]).unwrap();
         for pattern in [0, 1, 2, 17] {
             for offset in [0, 1, 7, 9] {
                 let values = (0..150)
@@ -430,19 +495,17 @@ mod tests {
                 let valid = (0..150)
                     .map(|i| pattern == 0 || (pattern != 1 && i % pattern != 0))
                     .collect::<Vec<_>>();
-                let input = Int64Array::new(values.into(), Some(NullBuffer::from(valid)))
+                let values = Int64Array::new(values.into(), Some(NullBuffer::from(valid)))
                     .slice(offset, 140);
                 for len in [0, 1, 7, 8, 63, 64, 65, 127, 129] {
-                    let input = input.slice(0, len);
-                    let expected = input.iter().flatten().fold(0i64, i64::wrapping_add);
-                    let count = input.len() - input.null_count();
-                    let batch =
-                        RecordBatch::try_new(schema.clone(), vec![Arc::new(input)]).unwrap();
-                    let mut state = AggregateState::new(&operator).unwrap();
-                    let (_, guard) = asyncband::shutdown::new();
-                    state.program.run(&batch, &mut state.local, &guard).unwrap();
+                    let values = values.slice(0, len);
+                    let expected = values.iter().flatten().fold(0i64, i64::wrapping_add);
+                    let count = values.len() - values.null_count();
+                    let batch = input(&plan, vec![Arc::new(values)]);
+                    let mut state = AggregateState::new(&plan, &operator).unwrap();
+                    state.update(&batch).unwrap();
                     // Repeated calls also exercise persisted state and wrapping merges.
-                    state.program.run(&batch, &mut state.local, &guard).unwrap();
+                    state.update(&batch).unwrap();
                     let out = state.finish().unwrap();
                     let sum = out.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
                     let actual_count = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -458,33 +521,36 @@ mod tests {
 
     #[test]
     fn merges_distinct_and_multi_column_states_across_workers() {
-        let aggregates = aggregates();
-        let operator = Arc::new(AggregateOperator::try_new(groups(true), aggregates).unwrap());
+        let mut plan = plan();
+        let aggregates = aggregates(&mut plan);
+        let operator = AggregateOperator::try_new(groups(&plan, true), aggregates).unwrap();
         let batches = [
             batch(
+                &plan,
                 vec![Some("a"), None, Some("a"), Some("b")],
                 vec![Some(1.), Some(2.), Some(3.), None],
             ),
             batch(
+                &plan,
                 vec![Some("b"), Some("a"), None],
                 vec![Some(8.), Some(3.), Some(4.)],
             ),
         ];
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for batch in batches {
-            let mut worker = AggregateState::new(&operator).unwrap();
+            let mut worker = AggregateState::new(&plan, &operator).unwrap();
             // Exercise repeated updates and one-row partial merge chunks.
             for row in 0..batch.num_rows() {
                 worker.update(&batch.slice(row, 1)).unwrap();
             }
             let partial = worker.finish_partial().unwrap();
-            assert_eq!(partial.groups.schema(), operator.groups().output_schema());
+            assert_eq!(partial.groups.schema(), group_schema(&plan, &operator));
             for row in 0..partial.num_rows() {
                 merged.merge(&partial.slice(row, 1)).unwrap();
             }
         }
         let result = merged.finish().unwrap();
-        assert_eq!(result.schema(), operator.output_schema());
+        assert_eq!(result.schema(), output_schema(&plan, &operator));
         assert_eq!(result.num_rows(), 3);
         let keys = result
             .column(0)
@@ -522,18 +588,23 @@ mod tests {
 
     #[test]
     fn empty_global_input_has_one_row() {
-        let operator = Arc::new(AggregateOperator::try_new(groups(false), aggregates()).unwrap());
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let mut plan = plan();
+        let aggregates = aggregates(&mut plan);
+        let operator = AggregateOperator::try_new(vec![], aggregates).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for update_empty in [false, true] {
-            let mut worker = AggregateState::new(&operator).unwrap();
+            let mut worker = AggregateState::new(&plan, &operator).unwrap();
             if update_empty {
-                worker.update(&RecordBatch::new_empty(schema())).unwrap();
+                worker.update(&empty(&plan)).unwrap();
             }
             merged.merge(&worker.finish_partial().unwrap()).unwrap();
         }
         for result in [
             merged.finish().unwrap(),
-            AggregateState::new(&operator).unwrap().finish().unwrap(),
+            AggregateState::new(&plan, &operator)
+                .unwrap()
+                .finish()
+                .unwrap(),
         ] {
             assert_eq!(result.num_rows(), 1);
             for col in [0, 1, 4] {
@@ -559,17 +630,19 @@ mod tests {
 
     #[test]
     fn all_null_group_stays_null_across_empty_batches_and_merges() {
-        let operator = Arc::new(AggregateOperator::try_new(groups(true), aggregates()).unwrap());
-        let mut worker = AggregateState::new(&operator).unwrap();
+        let mut plan = plan();
+        let aggregates = aggregates(&mut plan);
+        let operator = AggregateOperator::try_new(groups(&plan, true), aggregates).unwrap();
+        let mut worker = AggregateState::new(&plan, &operator).unwrap();
         worker
-            .update(&batch(vec![Some("a"); 2], vec![None; 2]))
+            .update(&batch(&plan, vec![Some("a"); 2], vec![None; 2]))
             .unwrap();
-        worker.update(&RecordBatch::new_empty(schema())).unwrap();
-        let mut merged = AggregateState::new(&operator).unwrap();
+        worker.update(&empty(&plan)).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         merged.merge(&worker.finish_partial().unwrap()).unwrap();
         merged
             .merge(
-                &AggregateState::new(&operator)
+                &AggregateState::new(&plan, &operator)
                     .unwrap()
                     .finish_partial()
                     .unwrap(),
@@ -595,12 +668,14 @@ mod tests {
 
     #[test]
     fn global_input_merges_distinct_and_multi_column_states() {
-        let operator = Arc::new(AggregateOperator::try_new(groups(false), aggregates()).unwrap());
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let mut plan = plan();
+        let aggregates = aggregates(&mut plan);
+        let operator = AggregateOperator::try_new(vec![], aggregates).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for values in [vec![Some(2.), None], vec![Some(2.), Some(4.)]] {
-            let mut worker = AggregateState::new(&operator).unwrap();
+            let mut worker = AggregateState::new(&plan, &operator).unwrap();
             worker
-                .update(&batch(vec![None; values.len()], values))
+                .update(&batch(&plan, vec![None; values.len()], values))
                 .unwrap();
             merged.merge(&worker.finish_partial().unwrap()).unwrap();
         }
@@ -637,36 +712,39 @@ mod tests {
 
     #[test]
     fn empty_grouped_input_and_grouping_without_aggregates() {
-        for aggregates in [aggregates(), vec![]] {
-            let operator = Arc::new(AggregateOperator::try_new(groups(true), aggregates).unwrap());
-            let mut state = AggregateState::new(&operator).unwrap();
-            state.update(&RecordBatch::new_empty(schema())).unwrap();
+        let mut plan = plan();
+        for aggregates in [aggregates(&mut plan), vec![]] {
+            let operator = AggregateOperator::try_new(groups(&plan, true), aggregates).unwrap();
+            let mut state = AggregateState::new(&plan, &operator).unwrap();
+            state.update(&empty(&plan)).unwrap();
             let partial = state.finish_partial().unwrap();
             assert_eq!(partial.num_rows(), 0);
-            assert_eq!(partial.groups.schema(), operator.groups().output_schema());
+            assert_eq!(partial.groups.schema(), group_schema(&plan, &operator));
             for (arrays, aggregate) in partial.states.iter().zip(operator.aggregates()) {
-                let fields = AccumulatorTestHarness::try_new(aggregate.clone())
-                    .unwrap()
-                    .state_types();
+                let fields = aggregate.accumulator(&plan.columns).unwrap().state_types();
                 assert_eq!(arrays.len(), fields.len());
                 for (array, field) in arrays.iter().zip(fields) {
                     assert_eq!(array.len(), 0);
                     assert_eq!(array.data_type(), &field);
                 }
             }
-            let mut merged = AggregateState::new(&operator).unwrap();
+            let mut merged = AggregateState::new(&plan, &operator).unwrap();
             merged.merge(&partial).unwrap();
             let result = merged.finish().unwrap();
             assert_eq!(result.num_rows(), 0);
-            assert_eq!(result.schema(), operator.output_schema());
+            assert_eq!(result.schema(), output_schema(&plan, &operator));
         }
 
-        let operator = Arc::new(AggregateOperator::try_new(groups(true), vec![]).unwrap());
-        let mut worker = AggregateState::new(&operator).unwrap();
+        let operator = AggregateOperator::try_new(groups(&plan, true), vec![]).unwrap();
+        let mut worker = AggregateState::new(&plan, &operator).unwrap();
         worker
-            .update(&batch(vec![Some("a"), None, Some("a")], vec![None; 3]))
+            .update(&batch(
+                &plan,
+                vec![Some("a"), None, Some("a")],
+                vec![None; 3],
+            ))
             .unwrap();
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         merged.merge(&worker.finish_partial().unwrap()).unwrap();
         let result = merged.finish().unwrap();
         assert_eq!((result.num_rows(), result.num_columns()), (2, 1));
@@ -675,81 +753,54 @@ mod tests {
 
     #[test]
     fn rejects_empty_specification() {
-        assert!(AggregateOperator::try_new(groups(false), vec![]).is_err());
+        assert!(AggregateOperator::try_new(vec![], vec![]).is_err());
     }
 
     #[test]
     fn aggregate_filter_runs_before_arguments_and_preserves_empty_groups() {
-        use crate::expr::scalar::{ConstantExpression, FunctionExpression, FunctionKind};
-        let input_schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Utf8, false),
-            Field::new("value", DataType::Int64, false),
-        ]));
-        // Column 1 of this input is Int64, unlike the Float64 column of `schema`.
-        let value = || {
-            ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, false))
-                .into_ref()
-        };
-        let int = |v| ConstantExpression::int64(Some(v)).into_ref();
-        // A comparison declares its Boolean result; arithmetic declares the
-        // numeric type its kernel is bound against.
-        let predicate = FunctionExpression::binary(
-            FunctionKind::NotEqual,
-            value(),
-            int(0),
-            DataType::Boolean,
-            false,
-        )
-        .into_ref();
-        let division = FunctionExpression::binary(
-            FunctionKind::Divide,
-            int(100),
-            value(),
+        let mut plan = TestPlan::new(&[(DataType::Utf8, false), (DataType::Int64, false)]);
+        let value = ReferenceExpression::new(plan.input(1)).into_ref();
+        let zero = int(&mut plan, 0);
+        let hundred = int(&mut plan, 100);
+        let ne = plan.column(DataType::Boolean, false);
+        let predicate =
+            FunctionExpression::binary(FunctionKind::NotEqual, value.clone(), zero, ne).into_ref();
+        let quotient = plan.column(DataType::Int64, true);
+        let division =
+            FunctionExpression::binary(FunctionKind::Divide, hundred, value.clone(), quotient)
+                .into_ref();
+        let sum = aggregate(
+            &mut plan,
+            AggregateFunction::Sum,
+            vec![division],
             DataType::Int64,
             true,
         )
-        .into_ref();
-        let aggregates = vec![
-            Arc::new(
-                AggregateExpression::new(
-                    AggregateFunction::Sum,
-                    vec![division],
-                    DataType::Int64,
-                    true,
-                )
-                .with_filter(predicate.clone())
-                .with_alias("sum"),
-            ),
-            Arc::new(
-                AggregateExpression::new(
-                    AggregateFunction::Count,
-                    vec![value()],
-                    DataType::Int64,
-                    false,
-                )
-                .with_distinct()
-                .with_filter(predicate)
-                .with_alias("distinct"),
-            ),
-        ];
-        let operator = Arc::new(
-            AggregateOperator::try_new(
-                Projection::from_indices(input_schema.clone(), &[0]).unwrap(),
-                aggregates,
-            )
-            .unwrap(),
-        );
-        let mut merged = AggregateState::new(&operator).unwrap();
+        .with_filter(predicate.clone());
+        let distinct = aggregate(
+            &mut plan,
+            AggregateFunction::Count,
+            vec![value],
+            DataType::Int64,
+            false,
+        )
+        .with_distinct()
+        .with_filter(predicate);
+        let operator = AggregateOperator::try_new(
+            vec![ReferenceExpression::new(plan.input(0)).into_ref()],
+            vec![Arc::new(sum), Arc::new(distinct)],
+        )
+        .unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for _ in 0..2 {
-            let input = RecordBatch::try_new(
-                input_schema.clone(),
+            let input = input(
+                &plan,
                 vec![
                     Arc::new(StringArray::from(vec!["a", "b", "a"])),
                     Arc::new(Int64Array::from(vec![2, 0, 4])),
                 ],
-            )
-            .unwrap();
-            let mut worker = AggregateState::new(&operator).unwrap();
+            );
+            let mut worker = AggregateState::new(&plan, &operator).unwrap();
             worker.update(&input).unwrap();
             merged.merge(&worker.finish_partial().unwrap()).unwrap();
         }
@@ -778,28 +829,25 @@ mod tests {
 
     #[test]
     fn extrema_merge_values_and_keep_string_null_semantics() {
-        let input_schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, true)]));
-        let expr =
-            ReferenceExpression::new(0, ExpressionResultType::new(DataType::Utf8, true)).into_ref();
+        let mut plan = TestPlan::new(&[(DataType::Utf8, true)]);
+        let expr = ReferenceExpression::new(plan.input(0)).into_ref();
         let aggregates = [AggregateFunction::Min, AggregateFunction::Max]
             .into_iter()
             .map(|f| {
-                Arc::new(
-                    AggregateExpression::new(f, vec![expr.clone()], DataType::Utf8, true)
-                        .with_alias(format!("{f:?}")),
-                )
+                Arc::new(aggregate(
+                    &mut plan,
+                    f,
+                    vec![expr.clone()],
+                    DataType::Utf8,
+                    true,
+                ))
             })
             .collect();
-        let operator =
-            Arc::new(AggregateOperator::try_new(Projection::new(vec![]), aggregates).unwrap());
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let operator = AggregateOperator::try_new(vec![], aggregates).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for values in [vec![Some("z"), None], vec![None, Some("a")], vec![None]] {
-            let input = RecordBatch::try_new(
-                input_schema.clone(),
-                vec![Arc::new(StringArray::from(values))],
-            )
-            .unwrap();
-            let mut worker = AggregateState::new(&operator).unwrap();
+            let input = input(&plan, vec![Arc::new(StringArray::from(values))]);
+            let mut worker = AggregateState::new(&plan, &operator).unwrap();
             worker.update(&input).unwrap();
             merged.merge(&worker.finish_partial().unwrap()).unwrap();
         }
@@ -822,7 +870,10 @@ mod tests {
                 .value(0),
             "z"
         );
-        let empty = AggregateState::new(&operator).unwrap().finish().unwrap();
+        let empty = AggregateState::new(&plan, &operator)
+            .unwrap()
+            .finish()
+            .unwrap();
         assert!(empty.column(0).is_null(0));
         assert!(empty.column(1).is_null(0));
     }
@@ -853,38 +904,25 @@ mod tests {
             ),
         ] {
             let data_type = array.data_type().clone();
-            let input_schema =
-                Arc::new(Schema::new(vec![Field::new("v", data_type.clone(), true)]));
-            let operator = Arc::new(
-                AggregateOperator::try_new(
-                    Projection::new(vec![]),
-                    vec![Arc::new(
-                        AggregateExpression::new(
-                            AggregateFunction::Sum,
-                            vec![
-                                ReferenceExpression::new(
-                                    0,
-                                    ExpressionResultType::new(data_type.clone(), true),
-                                )
-                                .into_ref(),
-                            ],
-                            data_type.clone(),
-                            true,
-                        )
-                        .with_alias("sum"),
-                    )],
-                )
-                .unwrap(),
+            let mut plan = TestPlan::new(&[(data_type.clone(), true)]);
+            let reference = ReferenceExpression::new(plan.input(0)).into_ref();
+            let sum = aggregate(
+                &mut plan,
+                AggregateFunction::Sum,
+                vec![reference],
+                data_type.clone(),
+                true,
             );
-            let mut state = AggregateState::new(&operator).unwrap();
-            let input = RecordBatch::try_new(input_schema, vec![array]).unwrap();
+            let operator = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
+            let mut state = AggregateState::new(&plan, &operator).unwrap();
+            let input = input(&plan, vec![array]);
             state.update(&input).unwrap();
 
             // Each worker's value fits by itself; overflow occurs only when
             // partial states combine. Include a NULL-only worker as well.
-            let mut merged = AggregateState::new(&operator).unwrap();
+            let mut merged = AggregateState::new(&plan, &operator).unwrap();
             for row in 0..input.num_rows() {
-                let mut worker = AggregateState::new(&operator).unwrap();
+                let mut worker = AggregateState::new(&plan, &operator).unwrap();
                 worker.update(&input.slice(row, 1)).unwrap();
                 merged.merge(&worker.finish_partial().unwrap()).unwrap();
             }
@@ -900,28 +938,28 @@ mod tests {
 
     #[test]
     fn filtered_count_star_handles_zero_column_batches() {
-        use crate::expr::scalar::ConstantExpression;
-        let input_schema = Arc::new(Schema::empty());
+        let mut plan = TestPlan::new(&[]);
         let expressions = [true, false]
             .into_iter()
             .map(|v| {
+                let predicate = plan.column(DataType::Boolean, false);
+                let filter = ConstantExpression::boolean(Some(v), predicate).into_ref();
                 Arc::new(
-                    AggregateExpression::new(
+                    aggregate(
+                        &mut plan,
                         AggregateFunction::Count,
                         vec![],
                         DataType::Int64,
                         false,
                     )
-                    .with_filter(ConstantExpression::boolean(Some(v)).into_ref())
-                    .with_alias(format!("count_{v}")),
+                    .with_filter(filter),
                 )
             })
             .collect();
-        let operator =
-            Arc::new(AggregateOperator::try_new(Projection::new(vec![]), expressions).unwrap());
-        let mut state = AggregateState::new(&operator).unwrap();
+        let operator = AggregateOperator::try_new(vec![], expressions).unwrap();
+        let mut state = AggregateState::new(&plan, &operator).unwrap();
         let batch = RecordBatch::try_new_with_options(
-            input_schema,
+            plan.columns.schema(&[]).unwrap(),
             vec![],
             &RecordBatchOptions::new().with_row_count(Some(3)),
         )
@@ -952,29 +990,22 @@ mod tests {
     fn aggregate_signatures_without_usable_kernels_are_plan_errors() {
         // DISTINCT and MIN/MAX derive their state key type from an argument, so
         // a missing argument has no kernel to build. The operator itself only
-        // assembles descriptions; executor construction is the first point that
+        // assembles descriptions; building its kernels is the first point that
         // builds an accumulator.
+        use AggregateFunction::*;
+        let mut plan = plan();
+        let v = value(&plan);
         for expr in [
-            AggregateExpression::new(AggregateFunction::Count, vec![], DataType::Int64, false)
-                .with_distinct(),
-            AggregateExpression::new(AggregateFunction::Min, vec![], DataType::Utf8, true),
-            AggregateExpression::new(AggregateFunction::Max, vec![], DataType::Utf8, true),
+            aggregate(&mut plan, Count, vec![], DataType::Int64, false).with_distinct(),
+            aggregate(&mut plan, Min, vec![], DataType::Utf8, true),
+            aggregate(&mut plan, Max, vec![], DataType::Utf8, true),
             // Only COUNT keeps a DISTINCT set; the others would silently drop it.
-            AggregateExpression::new(
-                AggregateFunction::Sum,
-                vec![value()],
-                DataType::Float64,
-                true,
-            )
-            .with_distinct(),
+            aggregate(&mut plan, Sum, vec![v.clone()], DataType::Float64, true).with_distinct(),
         ] {
-            let operator = AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(expr.with_alias("invalid"))],
-            )
-            .expect("operator construction does not validate aggregates");
+            let operator = AggregateOperator::try_new(vec![], vec![Arc::new(expr)])
+                .expect("operator construction does not validate aggregates");
             assert!(matches!(
-                AggregateState::new(&operator),
+                AggregateState::new(&plan, &operator),
                 Err(Error::InvalidPlan(_))
             ));
         }
@@ -982,73 +1013,52 @@ mod tests {
 
     #[test]
     fn aggregate_signatures_are_checked_before_code_generation() {
+        use AggregateFunction::*;
+        let mut plan = plan();
+        let v = value(&plan);
         for expr in [
-            AggregateExpression::new(
-                AggregateFunction::Count,
-                vec![value(), value()],
+            aggregate(
+                &mut plan,
+                Count,
+                vec![v.clone(), v.clone()],
                 DataType::Int64,
                 false,
             ),
-            AggregateExpression::new(AggregateFunction::Sum, vec![], DataType::Float64, true),
-            AggregateExpression::new(AggregateFunction::Avg, vec![], DataType::Float64, true),
-            AggregateExpression::new(
-                AggregateFunction::CovarPop,
-                vec![value()],
+            aggregate(&mut plan, Sum, vec![], DataType::Float64, true),
+            aggregate(&mut plan, Avg, vec![], DataType::Float64, true),
+            aggregate(
+                &mut plan,
+                CovarPop,
+                vec![v.clone()],
                 DataType::Float64,
                 true,
             ),
-            AggregateExpression::new(AggregateFunction::Min, vec![value()], DataType::Utf8, true),
-            AggregateExpression::new(AggregateFunction::Count, vec![], DataType::Float64, false),
+            aggregate(&mut plan, Min, vec![v.clone()], DataType::Utf8, true),
+            aggregate(&mut plan, Count, vec![], DataType::Float64, false),
         ] {
-            let operator = AggregateOperator::try_new(groups(false), vec![Arc::new(expr)]).unwrap();
+            let operator = AggregateOperator::try_new(vec![], vec![Arc::new(expr)]).unwrap();
             assert!(matches!(
-                AggregateState::new(&operator),
+                AggregateState::new(&plan, &operator),
                 Err(Error::InvalidPlan(_))
             ));
         }
 
-        use crate::expr::scalar::ConstantExpression;
-        // SUM inserts a generated TRY cast; unparseable text becomes NULL.
-        let operator = Arc::new(
-            AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(
-                    AggregateExpression::new(
-                        AggregateFunction::Sum,
-                        vec![ConstantExpression::string(Some("x")).into_ref()],
-                        DataType::Int64,
-                        true,
-                    )
-                    .with_alias("sum"),
-                )],
-            )
-            .unwrap(),
-        );
-        let mut state = AggregateState::new(&operator).unwrap();
+        // SUM inserts a TRY cast; unparseable text becomes NULL.
+        let text = plan.column(DataType::Utf8, false);
+        let text = ConstantExpression::string(Some("x"), text).into_ref();
+        let sum = aggregate(&mut plan, Sum, vec![text], DataType::Int64, true);
+        let operator = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
+        let mut state = AggregateState::new(&plan, &operator).unwrap();
         state
-            .update(&batch(vec![Some("a")], vec![Some(1.)]))
+            .update(&batch(&plan, vec![Some("a")], vec![Some(1.)]))
             .expect("an unparseable value is skipped, not rejected");
         assert!(state.finish().unwrap().column(0).is_null(0));
 
         // A filter must evaluate to Boolean before rows can be selected.
-        let operator = Arc::new(
-            AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(
-                    AggregateExpression::new(
-                        AggregateFunction::Count,
-                        vec![],
-                        DataType::Int64,
-                        false,
-                    )
-                    .with_filter(value())
-                    .with_alias("rows"),
-                )],
-            )
-            .unwrap(),
-        );
+        let rows = aggregate(&mut plan, Count, vec![], DataType::Int64, false).with_filter(v);
+        let operator = AggregateOperator::try_new(vec![], vec![Arc::new(rows)]).unwrap();
         assert!(matches!(
-            AggregateState::new(&operator),
+            AggregateState::new(&plan, &operator),
             Err(Error::InvalidPlan(_))
         ));
     }
@@ -1056,23 +1066,18 @@ mod tests {
     #[test]
     fn unsupported_sum_result_type_is_rejected_before_codegen() {
         // The host declares the SUM result type; an unusable one must not panic.
-        let operator = Arc::new(
-            AggregateOperator::try_new(
-                groups(false),
-                vec![Arc::new(
-                    AggregateExpression::new(
-                        AggregateFunction::Sum,
-                        vec![value()],
-                        DataType::Utf8,
-                        true,
-                    )
-                    .with_alias("sum"),
-                )],
-            )
-            .unwrap(),
+        let mut plan = plan();
+        let v = value(&plan);
+        let sum = aggregate(
+            &mut plan,
+            AggregateFunction::Sum,
+            vec![v],
+            DataType::Utf8,
+            true,
         );
+        let operator = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
         assert!(matches!(
-            AggregateState::new(&operator),
+            AggregateState::new(&plan, &operator),
             Err(Error::InvalidPlan(_))
         ));
     }
@@ -1080,28 +1085,25 @@ mod tests {
     #[test]
     fn integer_groups_remap_partial_ids_and_keep_null_and_wrapping_sum() {
         use std::collections::BTreeMap;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("key", DataType::Int64, true),
-            Field::new("value", DataType::Int64, true),
-        ]));
-        let value = ReferenceExpression::new(1, ExpressionResultType::new(DataType::Int64, true))
-            .into_ref();
+        let mut plan = TestPlan::new(&[(DataType::Int64, true), (DataType::Int64, true)]);
+        let value = ReferenceExpression::new(plan.input(1)).into_ref();
+        let sum = aggregate(
+            &mut plan,
+            AggregateFunction::Sum,
+            vec![value.clone()],
+            DataType::Int64,
+            true,
+        );
+        let count = aggregate(
+            &mut plan,
+            AggregateFunction::Count,
+            vec![value],
+            DataType::Int64,
+            false,
+        );
         let operator = AggregateOperator::try_new(
-            Projection::from_indices(schema.clone(), &[0]).unwrap(),
-            vec![
-                Arc::new(AggregateExpression::new(
-                    AggregateFunction::Sum,
-                    vec![value.clone()],
-                    DataType::Int64,
-                    true,
-                )),
-                Arc::new(AggregateExpression::new(
-                    AggregateFunction::Count,
-                    vec![value],
-                    DataType::Int64,
-                    false,
-                )),
-            ],
+            vec![ReferenceExpression::new(plan.input(0)).into_ref()],
+            vec![Arc::new(sum), Arc::new(count)],
         )
         .unwrap();
         let inputs = [
@@ -1114,17 +1116,16 @@ mod tests {
                 vec![Some(3), Some(1), None, Some(-1)],
             ),
         ];
-        let mut merged = AggregateState::new(&operator).unwrap();
+        let mut merged = AggregateState::new(&plan, &operator).unwrap();
         for (keys, values) in inputs {
-            let input = RecordBatch::try_new(
-                schema.clone(),
+            let input = input(
+                &plan,
                 vec![
                     Arc::new(Int64Array::from(keys)),
                     Arc::new(Int64Array::from(values)),
                 ],
-            )
-            .unwrap();
-            let mut partial = AggregateState::new(&operator).unwrap();
+            );
+            let mut partial = AggregateState::new(&plan, &operator).unwrap();
             partial.update(&input).unwrap();
             merged.merge(&partial.finish_partial().unwrap()).unwrap();
         }

@@ -4,7 +4,7 @@ use crate::{
     arrow::{array::*, datatypes::*},
     error::{Error, Result},
     expr::agg::AggregateFunction,
-    suboperator::scalar::{self, Cell, OwnedCell},
+    kernel::scalar::{self, Cell, OwnedCell},
 };
 use std::{collections::HashSet, sync::Arc};
 fn overflow() -> Error {
@@ -171,6 +171,10 @@ impl Accumulator {
             data: self.groups.as_mut_ptr(),
             len: self.groups.len(),
         };
+    }
+    /// Group slots, for updates applied to a whole chunk at once.
+    pub(crate) fn groups_mut(&mut self) -> &mut [Group] {
+        &mut self.groups
     }
     #[cfg(test)]
     pub(crate) fn update_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {

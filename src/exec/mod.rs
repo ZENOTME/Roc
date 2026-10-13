@@ -14,6 +14,7 @@
 
 use crate::arrow::record_batch::RecordBatch;
 use crate::error::Result;
+use crate::kernel::LocalState;
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 
@@ -25,7 +26,6 @@ pub use aggregate::{AggregateExecuteState, AggregateSinkExec, AggregateSourceExe
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
 pub use scan::ScanExec;
 
-/// One execution-owned source, including its cursor and concrete runtime state.
 pub trait SourceExec: Send + 'static {
     /// Open execution resources; plan construction must not start I/O.
     fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
@@ -40,24 +40,32 @@ pub trait SourceExec: Send + 'static {
     }
 }
 
-/// Execution lifecycle only. Physical operators build suboperators and provide
-/// completed local-state bindings before the sink enters a Pipeline.
+/// Whether a sink accepts more output chunks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkStatus {
+    Continue,
+    /// No more input is needed; the pipeline stops reading its source.
+    Finished,
+}
+
 pub trait SinkExec: Send + 'static {
     fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
         Ok(())
     }
-    fn flush<'a>(
+    /// Consumes one non-empty output chunk of the pipeline program, on the
+    /// pipeline coordinator and in completion order.
+    fn consume<'a>(
         &'a mut self,
-        _local: &'a mut crate::suboperator::ProgramExecutionContext,
+        _chunk: RecordBatch,
         _guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
+    ) -> BoxFuture<'a, Result<SinkStatus>> {
+        Box::pin(async { Ok(SinkStatus::Continue) })
     }
-    /// Consume one completed local context. The sink resolves its ordinary StateIds
-    /// in this context and merges those states into its own concrete mutable state.
+    /// Consumes one completed execution instance. The sink takes the states it
+    /// declared while building the pipeline and merges them into its own.
     fn combine<'a>(
         &'a mut self,
-        _local: crate::suboperator::ProgramExecutionContext,
+        _local: LocalState,
         _guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })

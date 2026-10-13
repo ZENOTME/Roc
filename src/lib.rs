@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod column;
 pub mod error;
 pub mod exec;
 pub mod expr;
+pub mod kernel;
 pub mod operator;
 pub mod pipeline;
-pub mod suboperator;
 
 // Type-checked design draft for editor navigation; not part of the public API.
-mod new_design;
 
 pub use asyncband::shutdown::Shutdown;
 

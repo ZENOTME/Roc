@@ -1,64 +1,55 @@
 //! Vector lowering for global integer reductions over one Arrow column.
-//! The eligibility check is structural; query names and input values are irrelevant.
+//! The eligibility check is structural: only root-domain Count/Sum updates of
+//! one global group over one Int64/UInt64 input, with no output.
 use super::*;
 use cranelift_module::FuncId;
 
 pub(super) fn compile(
     module: &mut JITModule,
-    scope: &SuboperatorScope,
-    inputs: &[Input],
+    graph: &KernelGraph,
+    plan: &Plan,
 ) -> Result<Option<(FuncId, String)>> {
-    if !scope.boundaries.is_empty() || !scope.outputs.is_empty() {
+    use AggregateUpdateKind as K;
+    if graph.output.is_some() {
         return Ok(None);
     }
-    let mut columns = vec![None; scope.variables.len()];
-    let mut global = vec![false; scope.variables.len()];
+    let mut global = None;
     let mut aggregates = vec![];
-    let mut column = None;
-    for op in &scope.suboperators {
-        match op {
-            Suboperator::SourceColumn {
-                source,
-                column: index,
-                output,
-            } if source.0 == 0 => {
-                let ty = scope.variables[output.index].ty.data_type();
-                if !matches!(ty, DataType::Int64 | DataType::UInt64) {
-                    return Ok(None);
-                }
-                columns[output.index] = Some(*index);
+    let mut slot = None;
+    for (k, (domain, kernel)) in graph.kernels.iter().enumerate() {
+        if !plan.live[k] {
+            continue;
+        }
+        if *domain != DomainId::ROOT {
+            return Ok(None);
+        }
+        match kernel {
+            Kernel::Scalar(ScalarKernel::GroupLookup { keys, output, .. }) if keys.is_empty() => {
+                global = Some(*output);
             }
-            Suboperator::Cast { input, output, .. }
-                if scope.variables[input.index].ty.data_type()
-                    == scope.variables[output.index].ty.data_type() =>
-            {
-                columns[output.index] = columns[input.index];
-            }
-            Suboperator::GroupLookup { inputs, output, .. } if inputs.is_empty() => {
-                global[output.index] = true;
-            }
-            Suboperator::AggregateUpdate {
-                inputs,
-                states,
-                kernel,
-            } if matches!(
-                kernel,
-                AggregateKernel::SumI64
-                    | AggregateKernel::SumU64
-                    | AggregateKernel::CountValues
-                    | AggregateKernel::CountRows
-            ) && global[inputs[0].index] =>
-            {
-                if let Some(input) = inputs.get(1) {
-                    let Some(index) = columns[input.index] else {
-                        return Ok(None);
-                    };
-                    if column.is_some_and(|c| c != index) {
-                        return Ok(None);
+            Kernel::Scalar(ScalarKernel::AggregateUpdate {
+                state,
+                kind: kind @ (K::SumI64 | K::SumU64 | K::CountValues | K::CountRows),
+                group,
+                arguments,
+            }) if global == Some(*group) => {
+                match arguments.as_slice() {
+                    [] => {}
+                    [binding] => {
+                        let Some(i) = graph.inputs.iter().position(|i| {
+                            i.binding == *binding
+                                && matches!(i.ty.data_type, DataType::Int64 | DataType::UInt64)
+                        }) else {
+                            return Ok(None);
+                        };
+                        if slot.is_some_and(|s| s != i) {
+                            return Ok(None);
+                        }
+                        slot = Some(i);
                     }
-                    column = Some(index);
+                    _ => return Ok(None),
                 }
-                aggregates.push((states[1], *kernel));
+                aggregates.push((*state, *kind));
             }
             _ => return Ok(None),
         }
@@ -66,15 +57,13 @@ pub(super) fn compile(
     if aggregates.is_empty() {
         return Ok(None);
     }
-    let Some(column) = column else {
+    let Some(slot) = slot else {
         return Ok(None);
     };
-    let Some(slot) = inputs.iter().position(|i| i.column == Some(column)) else {
-        return Ok(None);
-    };
+    let base = slot * INPUT_WORDS * 8;
     let ptr = types::I64;
     let mut ctx = module.make_context();
-    ctx.func.signature.params = vec![AbiParam::new(ptr); 7];
+    ctx.func.signature.params = vec![AbiParam::new(ptr); 6];
     ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
     let id = module
         .declare_function("roc_global_reduce", Linkage::Local, &ctx.func.signature)
@@ -101,7 +90,7 @@ pub(super) fn compile(
     for (state, _) in &aggregates {
         let state = b
             .ins()
-            .load(ptr, MemFlags::new(), args[4], (state.index * 8) as i32);
+            .load(ptr, MemFlags::new(), args[4], (state.0 * 8) as i32);
         let call = b.ins().call_indirect(sig, address, &[args[0], state, one]);
         let status = b.inst_results(call)[0];
         let ready = b.create_block();
@@ -109,15 +98,13 @@ pub(super) fn compile(
         b.switch_to_block(ready);
         state_ptrs.push(b.ins().load(ptr, MemFlags::new(), state, 0));
     }
-    let data = b
-        .ins()
-        .load(ptr, MemFlags::new(), args[1], (slot * 24) as i32);
+    let data = b.ins().load(ptr, MemFlags::new(), args[1], base as i32);
     let bitmap = b
         .ins()
-        .load(ptr, MemFlags::new(), args[1], (slot * 24 + 8) as i32);
+        .load(ptr, MemFlags::new(), args[1], (base + 16) as i32);
     let bitmap_offset = b
         .ins()
-        .load(ptr, MemFlags::new(), args[1], (slot * 24 + 16) as i32);
+        .load(ptr, MemFlags::new(), args[1], (base + 24) as i32);
     let vt = types::I64X2;
     let vz = b.ins().splat(vt, zero);
     let head = b.create_block();
@@ -289,21 +276,30 @@ pub(super) fn compile(
     b.switch_to_block(done);
     for ((_, kernel), state) in aggregates.iter().zip(state_ptrs) {
         use crate::expr::agg::accumulator::Group;
-        if matches!(
-            kernel,
-            AggregateKernel::CountValues | AggregateKernel::CountRows
-        ) {
+        if matches!(kernel, K::CountValues | K::CountRows) {
             let offset = std::mem::offset_of!(Group, count) as i32;
             let old = b.ins().load(ptr, MemFlags::new(), state, offset);
-            let count = if matches!(kernel, AggregateKernel::CountRows) {
+            let count = if matches!(kernel, K::CountRows) {
                 args[5]
             } else {
                 p[1]
             };
             let (sum, bad) = b.ins().sadd_overflow(old, count);
             let okay = b.create_block();
-            let code = b.ins().iconst(types::I32, 2);
-            b.ins().brif(bad, fail, &[code.into()], okay, &[]);
+            let overflow = b.create_block();
+            b.ins().brif(bad, overflow, &[], okay, &[]);
+            b.switch_to_block(overflow);
+            let mut sig = module.make_signature();
+            sig.params = vec![AbiParam::new(ptr)];
+            sig.returns = vec![AbiParam::new(types::I32)];
+            let sig = b.import_signature(sig);
+            let address = b.ins().iconst(
+                ptr,
+                runtime::aggregate_overflow as *const () as usize as i64,
+            );
+            let call = b.ins().call_indirect(sig, address, &[args[0]]);
+            let status = b.inst_results(call)[0];
+            b.ins().jump(fail, &[status.into()]);
             b.switch_to_block(okay);
             b.ins().store(MemFlags::new(), sum, state, offset);
         } else {

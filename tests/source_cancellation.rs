@@ -19,8 +19,8 @@ use roc::{
     error::{Error, Result},
     exec::{ExchangeSourceExec, ScanExec, SourceExec},
     operator::{
-        ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink, ExchangeSourceOperator,
-        ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
+        ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink, ScanConsumer, ScanHandle,
+        ScanOperator, ScanRequest, ScanStorage,
     },
 };
 use std::{
@@ -125,11 +125,9 @@ impl ExchangeConsumer for Consumer {
 
 fn source(exchange: bool, service: Arc<Service>) -> Box<dyn SourceExec> {
     if exchange {
-        Box::new(ExchangeSourceExec::new(ExchangeSourceOperator::new(
-            0, service,
-        )))
+        Box::new(ExchangeSourceExec::new(0, service))
     } else {
-        Box::new(ScanExec::new(ScanOperator::new((), service)))
+        Box::new(ScanExec::new(ScanOperator::new((), service, vec![])))
     }
 }
 

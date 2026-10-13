@@ -2,7 +2,7 @@
 use crate::{
     arrow::{array::ArrayRef, datatypes::*},
     error::{Error, Result},
-    suboperator::scalar::{self, Cell, OwnedCell},
+    kernel::scalar::{self, Cell, OwnedCell},
 };
 use std::collections::HashMap;
 #[derive(Clone, Copy, Default)]

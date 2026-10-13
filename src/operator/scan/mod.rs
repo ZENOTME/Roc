@@ -20,6 +20,7 @@ pub use storage::{ScanConsumer, ScanHandle, ScanRequest, ScanStorage};
 
 use super::Operator;
 use crate::{
+    column::ColumnId,
     error::{Error, Result},
     exec::ScanExec,
     operator::OperatorTreeNode,
@@ -27,16 +28,19 @@ use crate::{
 };
 use std::{fmt, sync::Arc};
 
+/// Scans one storage task; its batches bind `outputs` in order.
 #[derive(Clone)]
 pub struct ScanOperator<StorageTaskDesc> {
     source: StorageTaskDesc,
     storage: Arc<dyn ScanStorage<StorageTaskDesc = StorageTaskDesc>>,
+    outputs: Vec<ColumnId>,
 }
 
 impl<StorageTaskDesc: fmt::Debug> fmt::Debug for ScanOperator<StorageTaskDesc> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ScanOperator")
             .field("source", &self.source)
+            .field("outputs", &self.outputs)
             .finish_non_exhaustive()
     }
 }
@@ -45,8 +49,13 @@ impl<StorageTaskDesc> ScanOperator<StorageTaskDesc> {
     pub fn new(
         source: StorageTaskDesc,
         storage: Arc<dyn ScanStorage<StorageTaskDesc = StorageTaskDesc>>,
+        outputs: Vec<ColumnId>,
     ) -> Self {
-        Self { source, storage }
+        Self {
+            source,
+            storage,
+            outputs,
+        }
     }
 
     pub fn source(&self) -> &StorageTaskDesc {
@@ -66,11 +75,15 @@ where
         "scan"
     }
 
+    fn output_columns(&self) -> Vec<ColumnId> {
+        self.outputs.clone()
+    }
+
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
             return Err(Error::InvalidPlan(format!(
@@ -80,6 +93,6 @@ where
         }
         graph
             .pipeline_mut(current)?
-            .set_source(Box::new(ScanExec::new(self.clone())))
+            .set_source(Box::new(ScanExec::new(self.clone())), &self.outputs)
     }
 }

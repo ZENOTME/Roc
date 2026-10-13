@@ -16,84 +16,92 @@ mod build;
 mod execution;
 mod graph;
 
-pub use build::{build_pipeline_graph, build_pipeline_on_node};
+pub use build::{build_pipeline_graph, build_pipeline_graph_with_mode, build_pipeline_on_node};
 pub use execution::yield_now;
 pub use execution::{Executor, PipelineExecutionConfig, PipelineGraphExecutor};
 pub use graph::{PipelineGraph, PipelineGraphBuilder, PipelineGraphError, PipelineId};
 
 use crate::{
+    column::{ColumnContext, ColumnId},
     error::{Error, Result},
     exec::{SinkExec, SourceExec},
+    kernel::{ExecutionMode, KernelBuilder, Program},
 };
 
-/// A complete schedulable pipeline. Every role is represented by its execution trait directly.
+/// A source, one fused program over its chunks, and a sink.
 pub struct Pipeline {
     pub source: Box<dyn SourceExec>,
-    pub program: crate::suboperator::ProgramContext,
+    pub program: Program,
     pub sink: Box<dyn SinkExec>,
 }
 
 impl Pipeline {
-    pub fn new(
-        source: Box<dyn SourceExec>,
-        builder: crate::suboperator::SuboperatorScopeBuilder,
-        sink: Box<dyn SinkExec>,
-        mode: crate::suboperator::ExecutionMode,
-    ) -> Result<Self> {
-        let program = builder.finish(vec![])?.compile(mode)?;
-        Ok(Self {
+    pub fn new(source: Box<dyn SourceExec>, program: Program, sink: Box<dyn SinkExec>) -> Self {
+        Self {
             source,
             program,
             sink,
-        })
+        }
     }
 }
 
-/// Operators append suboperators directly, after building their children.
-pub struct PipelineBuilder {
+/// A sink and the columns of the chunks it consumes; without columns it only
+/// combines states.
+type Sink = (Box<dyn SinkExec>, Option<Vec<ColumnId>>);
+
+/// Collects one pipeline while operators are built from the sink upward:
+/// the leaf binds the source columns, then each operator adds kernels in
+/// tree order, and the sink names the output columns, if any.
+pub struct PipelineBuilder<'plan> {
     source: Option<Box<dyn SourceExec>>,
-    pub suboperators: crate::suboperator::SuboperatorScopeBuilder,
-    sink: Option<Box<dyn SinkExec>>,
+    pub kernels: KernelBuilder<'plan>,
+    sink: Option<Sink>,
 }
 
-impl PipelineBuilder {
-    pub(super) fn new() -> Self {
+impl<'plan> PipelineBuilder<'plan> {
+    pub(super) fn new(columns: &'plan ColumnContext) -> Self {
         Self {
             source: None,
-            suboperators: crate::suboperator::SuboperatorScopeBuilder::new(),
+            kernels: KernelBuilder::new(columns),
             sink: None,
         }
     }
 
-    pub fn set_source(&mut self, source: Box<dyn SourceExec>) -> Result<()> {
+    /// Sets the source; its chunks bind `columns` in order.
+    pub fn set_source(&mut self, source: Box<dyn SourceExec>, columns: &[ColumnId]) -> Result<()> {
         if self.source.is_some() {
             return Err(Error::InvalidPlan(
                 "pipeline has more than one source".into(),
             ));
         }
+        self.kernels.bind_inputs(columns)?;
         self.source = Some(source);
         Ok(())
     }
 
-    pub fn set_sink(&mut self, sink: Box<dyn SinkExec>) -> Result<()> {
+    /// Sets the sink. With `outputs`, the program produces a chunk of these
+    /// columns from the current domain for `SinkExec::consume`; without, the
+    /// sink only combines states.
+    pub fn set_sink(
+        &mut self,
+        sink: Box<dyn SinkExec>,
+        outputs: Option<Vec<ColumnId>>,
+    ) -> Result<()> {
         if self.sink.is_some() {
             return Err(Error::InvalidPlan("pipeline has more than one sink".into()));
         }
-        self.sink = Some(sink);
+        self.sink = Some((sink, outputs));
         Ok(())
     }
 
-    pub(super) fn finish(mut self, mode: crate::suboperator::ExecutionMode) -> Result<Pipeline> {
-        let sink = self
+    pub(super) fn finish(self, mode: ExecutionMode) -> Result<Pipeline> {
+        let (sink, outputs) = self
             .sink
-            .take()
             .ok_or_else(|| Error::InvalidPlan("pipeline has no sink".into()))?;
-        Pipeline::new(
-            self.source
-                .ok_or_else(|| Error::InvalidPlan("pipeline has no source".into()))?,
-            self.suboperators,
-            sink,
-            mode,
-        )
+        let source = self
+            .source
+            .ok_or_else(|| Error::InvalidPlan("pipeline has no source".into()))?;
+        let program = Program::new(self.kernels.finish(outputs.as_deref())?, mode)?;
+        Ok(Pipeline::new(source, program, sink))
     }
 }

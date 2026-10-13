@@ -12,35 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{ExpressionResultType, ScalarExprRef};
-use crate::arrow::datatypes::DataType;
+use super::{ScalarExprRef, build_input};
+use crate::column::ColumnId;
+use crate::error::{Error, Result};
+use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
+
 #[derive(Clone, Debug)]
 pub struct NotExpression {
     input: ScalarExprRef,
-    result_type: ExpressionResultType,
+    output: ColumnId,
 }
-impl NotExpression {
-    pub(crate) fn build_suboperator(
-        &self,
-        builder: &mut crate::suboperator::SuboperatorScopeBuilder,
-    ) -> crate::error::Result<crate::suboperator::VariableId> {
-        let input = self.input().build_suboperator(builder)?;
-        builder.not(input)
-    }
 
-    pub fn new(input: ScalarExprRef, nullable: bool) -> Self {
-        Self {
-            input,
-            result_type: ExpressionResultType {
-                data_type: DataType::Boolean,
-                nullable,
-            },
-        }
+impl NotExpression {
+    pub fn new(input: ScalarExprRef, output: ColumnId) -> Self {
+        Self { input, output }
     }
     pub fn input(&self) -> &ScalarExprRef {
         &self.input
     }
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn output(&self) -> ColumnId {
+        self.output
+    }
+
+    pub(super) fn lower(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        let (input, errors) = build_input(builder, &self.input)?;
+        let ColumnVariableBinding::Boolean { value, validity } = input else {
+            return Err(Error::InvalidPlan("NOT requires a Boolean input".into()));
+        };
+        let value = builder.not(value)?;
+        Ok((ColumnVariableBinding::Boolean { value, validity }, errors))
     }
 }
