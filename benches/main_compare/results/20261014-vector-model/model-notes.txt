@@ -1,0 +1,68 @@
+Vector kernel modeling experiment
+
+The semantic kernel graph remains the shared source of truth. Its variables,
+row domains, NULL validity and deferred error flags describe what each row means.
+Zero execution lifts a scalar kernel into a batch loop; full compilation fuses
+multiple scalar kernels into a row loop. Neither the type-specialized scalar
+semantics nor the 1024-row window determines the quality of the batch loop by
+itself. Buffer shapes, aliasing, error representation and storage lifetimes matter.
+
+Concrete example: nullable Int64 x + 1.
+- The value is checked addition. Overflow on an invalid row must be suppressed;
+  it cannot simply disappear from the semantics to make vector execution faster.
+- The 1 is a broadcast scalar, not an arbitrary input column. Dispatching this
+  shape outside the loop lets the scalar load dominate all row iterations.
+- A result and its overflow predicate are ordinary independent scalar values.
+  LLVM 19 did not widen the struct-return overflow intrinsic in the affected
+  loops. Equivalent sign-bit arithmetic preserves the predicate while allowing
+  automatic SIMD lowering. final-add-i64.ll shows four-lane arithmetic and its
+  associated overflow predicates for the real generated signature.
+- Intermediate storage ends at the last consumer in a window. Query outputs
+  have longer lifetimes and must retain previous windows until materialization.
+  Keeping this distinction in the execution plan enables reuse without changing
+  row semantics. Shared expressions and early outputs cannot be overwritten.
+- The Arrow array already owns a stable 64-bit value buffer for compatible
+  physical types. Borrowing that owner preserves offsets and bits and avoids
+  materializing an equivalent scratch column. Narrow types still use the existing
+  canonical-word conversion.
+
+The implemented change uses this mechanism uniformly. Kernel signatures and the
+264-entry prewarm cache remain query independent. Constants are not specialized
+by value, and expression chains are not recognized or fused for zero execution.
+NULL/overflow checks, row-domain selection and error precedence remain present.
+
+What the current experiment proves:
+The existing semantic model can support an efficient zero-generated scalar path.
+Single-thread 16-add and division chains now beat the measured main baseline;
+fusing these kernels still raises performance further. Multi-thread confirmation
+is closer to main and has visible variance. This is evidence for these workloads,
+not a proof of parity for arbitrary SQL or every supported datatype.
+
+What remains structurally incomplete:
+1. Physical vector layout is still mostly canonical u64 words. Boolean validity
+   and narrow primitives do not retain Arrow's compact physical representation.
+   A future layout contract should describe typed buffers, broadcast values,
+   validity bitmaps, offsets, selection and ownership independently of scalar
+   semantic variables. NULL propagation should be a reusable lifting policy,
+   preserving deferred-error semantics rather than query-pattern fusion rules.
+2. Filter, GroupLookup and AggregateUpdate do not all use the generated Call
+   library. Map, selection and stateful/reduction kernels need explicit batch
+   contracts. A single kernel graph does not imply that each implementation is
+   already an Arrow-quality vector operator. Generic aggregate-state and group
+   layout binding must replace repeated per-row interpretation where it exists.
+3. Materialization still reconstructs Arrow output, and filtered execution uses
+   selection vectors. Physical planning should make conversion and compaction
+   boundaries explicit so that buffers can be shared or moved where legal.
+4. Preparing finite shape variants increases process-start compilation from
+   about 1.15 s to 3.39 s. Ahead-of-time library generation or persisted native
+   artifacts are potential lifecycle changes; they are not implemented here.
+
+Acceptance criteria for completing the broader target:
+- Keep identical NULL, overflow, cast and error-order semantics across all modes.
+- Compare against main on equal resident inputs, sinks, affinities and lifecycle
+  timing, including small batches, narrow types, floats, selections and aggregates.
+- No query-specific compilation after complete prewarm and no hard-coded query
+  or expression-chain recognition.
+- Report process startup, query preparation and execution separately.
+- Achieve parity across the representative suite, rather than declaring the
+  scalar improvements sufficient. Filter and aggregates are still below target.

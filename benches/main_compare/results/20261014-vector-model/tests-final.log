@@ -1,0 +1,156 @@
+   Compiling roc v0.1.0 (/home/ze/benchmarks/roc-vector-model-20261014/repo)
+    Finished `release` profile [optimized] target(s) in 7.39s
+     Running unittests src/lib.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/roc-31daa0958e66f305)
+
+running 60 tests
+test exec::aggregate::group_index::tests::word_cache_collisions_keep_full_keys_and_stable_ids ... ok
+test exec::aggregate::group_index::tests::signed_keys_keep_null_extremes_and_reuse_ids_across_batches ... ok
+test exec::aggregate::group_index::tests::unsigned_slices_keep_full_width_values_and_null_offsets ... ok
+test exec::aggregate::group_index::tests::compound_keys_use_row_semantics ... ok
+test exec::aggregate::tests::aggregate_signatures_without_usable_kernels_are_plan_errors ... ok
+test exec::aggregate::tests::rejects_empty_specification ... ok
+test exec::scan::tests::shutdown_during_data_poll_is_seen_before_returning_pending ... ok
+test exec::scan::tests::shutdown_keeps_priority_when_a_pending_read_becomes_ready ... ok
+test exec::aggregate::tests::unsupported_sum_result_type_is_rejected_before_codegen ... ok
+test expr::agg::agg_optimized::global_float_sum_keeps_first_negative_zero_and_ignores_null_payloads ... ok
+test expr::agg::agg_optimized::global_integer_sums_wrap_within_and_between_batches ... ok
+test expr::agg::agg_optimized::global_float_sum_and_avg_keep_grouped_order_across_batches_and_merge ... ok
+test expr::agg::agg_optimized::public_grouped_update_still_rejects_invalid_ids ... ok
+test expr::agg::agg_optimized::grouped_count_and_sum_cross_bitmap_words_without_reading_null_payloads ... ok
+test expr::agg::aggregate_compatibility::avg_empty_and_all_null_states_remain_null_after_round_trip ... ok
+test expr::agg::aggregate_compatibility::avg_grouped_states_distinguish_real_zero_from_empty_and_round_trip ... ok
+test expr::agg::aggregate_compatibility::avg_partial_merge_ignores_payloads_under_null_counts_and_sums ... ok
+test expr::agg::aggregate_hotloop::dense_float_masks_ignore_nan_payloads_and_preserve_first_signed_zero ... ok
+test expr::agg::agg_optimized::grouped_sums_preserve_typed_state_and_sliced_null_bitmaps ... ok
+test operator::scan::channel::tests::dropping_last_receiver_wakes_sender_and_returns_unsent_item ... ok
+test operator::scan::channel::tests::dropping_pending_receive_does_not_consume_an_item ... ok
+test operator::scan::channel::tests::full_queue_applies_backpressure_and_drains_before_disconnect ... ok
+test operator::scan::channel::tests::receiver_is_a_shared_work_queue ... ok
+test pipeline::execution::tests::cancellation_does_not_read_or_combine ... ok
+test pipeline::execution::tests::empty_source_still_returns_local_state_for_combine ... ok
+test expr::agg::aggregate_hotloop::dense_and_sparse_null_masks_match_reference_at_word_and_slice_boundaries ... ok
+test pipeline::execution::tests::early_stop_drops_pending_read_but_finishes_owned_source ... ok
+test pipeline::execution::tests::pending_source_read_keeps_progress_while_completed_chunks_are_consumed ... ok
+test pipeline::execution::tests::cpu_panics_are_returned_as_errors ... ok
+test expr::agg::test_support::tests::filtered_arguments_and_constants_follow_original_group_ids ... ok
+test pipeline::execution::tests::one_source_and_bounded_reused_locals_for_many_batches ... ok
+test pipeline::execution::tests::sink_finish_does_not_read_more_input_and_combines_once ... ok
+test pipeline::execution::tests::source_morsels_split_and_empty_batches_are_skipped ... ok
+test pipeline::execution::tests::whole_batches_keep_their_arrow_owners ... ok
+test pipeline::graph::tests::rejects_cycles ... ok
+test pipeline::graph::tests::rejects_duplicate_dependencies ... ok
+test exec::aggregate::tests::filtered_count_star_handles_zero_column_batches ... ok
+test expr::agg::agg_optimized::global_filter_excludes_errors_before_arguments_are_evaluated ... ok
+test pipeline::execution::tests::program_errors_do_not_publish_partial_results ... ok
+test expr::agg::agg_optimized::global_reduction_matches_grouped_path_across_batches_and_nulls ... ok
+test expr::agg::test_support::tests::mixed_bound_and_computed_arguments_use_filtered_input ... ok
+test expr::agg::test_support::tests::rejected_rows_skip_fallible_arguments ... ok
+test expr::agg::agg_optimized::global_empty_states_and_checked_counts_are_preserved ... ok
+test exec::aggregate::tests::merges_distinct_and_multi_column_states_across_workers ... ok
+test exec::aggregate::tests::empty_global_input_has_one_row ... ok
+test exec::aggregate::tests::all_null_group_stays_null_across_empty_batches_and_merges ... ok
+test exec::aggregate::tests::integer_groups_remap_partial_ids_and_keep_null_and_wrapping_sum ... ok
+test exec::aggregate::tests::aggregate_signatures_are_checked_before_code_generation ... ok
+test exec::aggregate::tests::global_input_merges_distinct_and_multi_column_states ... ok
+test exec::aggregate::tests::empty_grouped_input_and_grouping_without_aggregates ... ok
+test kernel::jit::kernel::tests::generated_kernels_preserve_broadcast_selection_aliases_and_overflow ... ok
+test exec::aggregate::tests::extrema_merge_values_and_keep_string_null_semantics ... ok
+test expr::scalar::function::tests::failures_in_unselected_branches_are_not_raised ... ok
+test exec::aggregate::tests::aggregate_filter_runs_before_arguments_and_preserves_empty_groups ... ok
+test expr::scalar::function::tests::scalar_integer_failures_ignore_null_rows_and_preserve_operand_order ... ok
+test exec::aggregate::tests::integer_sum_stays_exact_and_wraps_on_update_and_partial_merge ... ok
+test expr::scalar::function::tests::scalar_float_special_values_and_arrow_comparison_fallback_match_broadcast ... ok
+test exec::aggregate::tests::generated_global_reductions_handle_sliced_bitmaps_arbitrary_null_payloads_and_tails ... ok
+test kernel::jit::kernel::tests::prewarm_caches_every_signature_once ... ok
+test expr::scalar::function::tests::scalar_numeric_kernels_match_broadcast_for_all_types_and_operand_orders ... ok
+
+test result: ok. 60 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.84s
+
+     Running tests/extensible_pipeline.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/extensible_pipeline-39293ea898f8312a)
+
+running 3 tests
+test host_operator_builds_a_dependency_without_core_dispatch ... ok
+test invalid_project_reports_operator_and_reason ... ok
+test two_input_operator_chooses_both_child_pipelines ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/generated_casts.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/generated_casts-38e7571fcfa5d2a5)
+
+running 5 tests
+test typed_float_branches_merge_and_generated_integer_cast_is_visible_in_ir ... ok
+test binary_to_text_validates_utf8_inside_the_generated_cast ... ok
+test boolean_text_casts_bind_the_boolean_parser ... ok
+test strings_are_typed_scalar_calls_and_survive_the_invocation_arena ... ok
+test generated_numeric_casts_match_arrow_across_widths_nulls_and_boundaries ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.28s
+
+     Running tests/physical_expressions.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/physical_expressions-97c8b0018da83f71)
+
+running 7 tests
+test scan_forwards_host_task_and_preserves_storage_batches_and_cancellation ... ok
+test filter_rejects_non_boolean_results ... ok
+test exchange_read_errors_reach_the_caller_without_becoming_end_of_input ... ok
+test exchange_relays_batches_and_opens_sinks_once_even_for_empty_input ... ok
+test preserves_arrow_kernel_errors ... ok
+test scalar_predicates_and_constant_projections_preserve_batch_shape ... ok
+test executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/pipeline_execution.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/pipeline_execution-0ae163c65f733c0f)
+
+running 6 tests
+test source_failure_does_not_combine_or_request_shutdown ... ok
+test tokio_handle_can_be_used_directly ... ok
+test dropping_graph_execution_does_not_request_shutdown ... ok
+test graph_failure_leaves_other_pipelines_for_caller_to_cancel ... ok
+test runs_pipeline_tasks_and_waits_for_dependencies_to_finalize ... ok
+test caller_can_cancel_execution_without_a_tokio_runtime ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scalar_expressions.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/scalar_expressions-1c840d5bc316b094)
+
+running 20 tests
+test lowering_validates_variable_types_before_execution ... ok
+test input_binding_retains_shared_arrays_and_releases_replaced_input ... ok
+test coalesce_selects_remaining_rows_and_skips_unused_errors ... ok
+test typed_kernels_downcast_used_columns_without_validating_the_input_layout ... ok
+test cast_modes_result_metadata_and_empty_inputs ... ok
+test coalesce_preserves_outputs_and_recovers_after_branch_errors ... ok
+test case_executes_only_matching_rows_in_original_order ... ok
+test nested_case_selects_original_rows_and_recovers_after_branch_errors ... ok
+test constant_only_expressions_return_full_columns_for_each_batch_size ... ok
+test filter_selection_uses_the_boolean_value_result ... ok
+test batches_spanning_many_windows_keep_branch_rows_and_the_first_failing_row ... ok
+test multiple_expressions_share_input_buffers_and_evaluation_recovers_after_errors ... ok
+test nested_branches_and_predicates_preserve_input_order_and_duplicates ... ok
+test zero_column_inputs_keep_row_counts_through_branches_and_predicates ... ok
+test boolean_value_execution_preserves_three_valued_logic ... ok
+test each_description_builds_an_evaluation ... ok
+test numeric_kernels_evaluate_constants_per_row_and_preserve_nulls ... ok
+test comparisons_and_null_safe_comparisons ... ok
+test checked_integer_errors_and_null_rows_match_arrow ... ok
+test all_bound_numeric_signatures_match_arrow ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.61s
+
+     Running tests/source_cancellation.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/source_cancellation-34b08cf95e182fe6)
+
+running 4 tests
+test normal_finalization_and_drop_do_not_request_shutdown ... ok
+test shutdown_waits_for_the_last_source_owner_to_release_its_guard ... ok
+test failed_source_initialization_does_not_request_shutdown_or_leak_guards ... ok
+test sources_observe_the_callers_shared_shutdown_without_forwarding ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/vector_storage.rs (/home/ze/benchmarks/roc-llvm-20261013/harness/target/release/deps/vector_storage-b44eb591c9dacd44)
+
+running 1 test
+test reused_state_keeps_outputs_and_sliced_nullable_inputs_across_windows ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

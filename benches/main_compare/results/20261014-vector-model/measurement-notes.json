@@ -1,0 +1,31 @@
+{
+  "host": "mylinux, Intel i7-14700K, powersave governor unchanged",
+  "remote_root": "/home/ze/benchmarks/roc-vector-model-20261014",
+  "main_commit": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "branch": "codex/llvm-codegen-experiment",
+  "before": "Existing Inkwell/LLVM experiment, captured in before-source.tar.gz; same baseline harness and resident input.",
+  "measurements": "4,000,000 rows, batch 8192, windows 1024, nullable input every 17 rows. Three independent process replicas per mode/thread count, each 12 timed samples per case after correctness and two warmups. Report median of per-process medians. Rotated modes; alternating thread-count order. Preparation, kernel prewarm and result destruction outside execute timing.",
+  "affinity": {
+    "1": "CPU 0",
+    "4": "CPUs 0,2,4,6 (four physical P cores)"
+  },
+  "correctness": "106 existing/new lib and integration tests pass. Every benchmark case validates all output rows, NULLs, duplicate/missing IDs and aggregates against independent Rust calculations before timing; timed samples check row counts.",
+  "warmup_ms": {
+    "before": 1149.338484,
+    "generated": 3389.9438210000003
+  },
+  "implementation": [
+    "Finite scalar/column broadcast shapes are lowered before the row loop for every existing Call signature. No query-expression fusion or constant-value specialization.",
+    "Reusable per-LocalState invocation descriptors and output-column list replace per-window heap allocations for generated calls.",
+    "GEP pointer arithmetic retains affine memory accesses; exact sign-bit formulas for checked Add/Sub avoid LLVM 19 struct-return intrinsic vectorization barrier. Multiplication still uses its intrinsic.",
+    "Last-use analysis recycles owned intermediate columns after their final window read. Output columns remain pinned through all windows. Compatible 64-bit primitive input buffers are borrowed with their Arrow slice offsets and owners."
+  ],
+  "remaining_limits": [
+    "Canonical intermediate representation still uses u64 words for narrow values and Booleans. Validity is expanded from Arrow bitmaps and output is reconstructed.",
+    "Only scalar Call kernels use the generated library. GroupLookup/AggregateUpdate/Filter have separate vector execution logic; generated/native aggregate timings consequently stay close.",
+    "Filtered output still uses selection-vector materialization and Arrow output conversion. No evidence yet that these paths match main.",
+    "Four-thread arithmetic/division medians are close to main, with noticeable per-process variability. Do not infer a universal win from single-thread results.",
+    "Prewarm latency grows with the number of finite shape variants. Prewarm remains outside query timings and does not imply zero process-start compilation."
+  ],
+  "ir_evidence": "final-add-i64.ll contains vector loops for column/column and both scalar/column shapes, with add <4 x i64> and overflow checks retained. add-i64.ll is the prior struct-return-intrinsic version after GEP; vectorize.log contains compiler diagnostics for that earlier generated module."
+}

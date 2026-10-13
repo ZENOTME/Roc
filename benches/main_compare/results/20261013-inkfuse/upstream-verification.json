@@ -1,0 +1,8 @@
+{
+  "files_checked": 300,
+  "modified": [
+    "CMakeLists.txt",
+    "src/exec/QueryExecutor.cpp",
+    "src/exec/QueryExecutor.h"
+  ]
+}

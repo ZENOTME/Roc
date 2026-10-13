@@ -1,0 +1,34 @@
+{
+  "primary_results": "summary.json",
+  "csv": "comparison.csv",
+  "baseline_commit": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "current_commit": "17c6e141d5665a678361bce77f21fd45d2039f3e",
+  "host": "mylinux, Intel Core i7-14700K, 64 GB RAM",
+  "rust": "1.95.0",
+  "build": "release, no RUSTFLAGS, 4 build jobs; identical shared dependency versions verified in initial run",
+  "rows": 4000000,
+  "batch_rows": 8192,
+  "samples_per_replica": 20,
+  "replicas": 5,
+  "aggregation": "Median of per-replica medians. Ranges are min/max of per-replica medians, not confidence intervals.",
+  "affinity": {
+    "1": [
+      0
+    ],
+    "4": [
+      0,
+      2,
+      4,
+      6
+    ]
+  },
+  "validation": "40 process runs completed; each validated all output rows for all six cases before timing. Each timed sample checked output row count.",
+  "timing": "Preparation includes graph construction and JIT. Execution includes scheduling, execution, and output collection. Input generation, full correctness checking and output destruction excluded. Generated-kernel prewarm measured separately once per process.",
+  "limitations": [
+    "Resident synthetic data, no storage IO benchmark.",
+    "Desktop system with powersave governor unchanged; some four-worker cases retain substantial process-to-process variation.",
+    "Initial run used four-core affinity for both worker counts and saw desktop indexing activity; kept separately as 20261013-mylinux.",
+    "Native Rust built for default x86_64; JIT uses its implementation's host code generation. No target-cpu=native comparison was run."
+  ],
+  "artifacts": "Frozen source trees, Cargo lockfiles and binaries remain on mylinux under /home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes; initial local result directory retains build checksums and harness snapshot."
+}

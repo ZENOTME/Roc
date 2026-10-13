@@ -1,0 +1,797 @@
+--- a/src/kernel/jit/kernel.rs
++++ b/src/kernel/jit/kernel.rs
+@@ -208,75 +208,113 @@
+         })
+         .collect::<Vec<_>>();
+     let zero = b.ins().iconst(types::I64, 0);
+-    let count = b.declare_var(types::I64);
+-    b.def_var(count, zero);
+-    let dense = b.create_block();
+-    let dense_body = b.create_block();
+-    let selected = b.create_block();
+-    let selected_body = b.create_block();
+     let done = b.create_block();
+-    b.append_block_param(dense, types::I64);
+-    b.append_block_param(selected, types::I64);
+-    let is_dense = b.ins().icmp_imm(IntCC::Equal, args[3], 0);
+-    b.ins()
+-        .brif(is_dense, dense, &[zero.into()], selected, &[zero.into()]);
+-    let mut c = Compiler {
+-        b,
+-        module,
+-        graph: &graph,
+-        plan: &plan,
+-        vars: vec![None; graph.variables.len()],
+-        args,
+-        row: zero,
+-        setup: entry,
+-        fail,
+-        hoisted: HashMap::new(),
+-        regions: vec![],
+-        count,
+-        sites: vec![],
+-        constants: vec![],
+-        aliases: &[],
+-    };
+-    for (head, body) in [(dense, dense_body), (selected, selected_body)] {
+-        c.b.switch_to_block(head);
+-        let i = c.b.block_params(head)[0];
+-        let more = c.b.ins().icmp(IntCC::UnsignedLessThan, i, c.args[4]);
+-        c.b.ins().brif(more, body, &[], done, &[]);
+-        c.b.switch_to_block(body);
+-        let row = if head == dense {
+-            i
+-        } else {
+-            let at = c.b.ins().ishl_imm(i, 2);
+-            let at = c.b.ins().iadd(c.args[3], at);
+-            c.b.ins().uload32(MemFlags::new(), at, 0)
+-        };
+-        for (k, &(pointer, mask)) in sources.iter().enumerate() {
+-            let r = c.b.ins().band(row, mask);
+-            let offset = c.b.ins().ishl_imm(r, 3);
+-            let at = c.b.ins().iadd(pointer, offset);
+-            let word = c.b.ins().load(types::I64, MemFlags::new(), at, 0);
+-            let v = c.decode(word, inputs[k]);
+-            c.set(VariableId(k), v);
+-        }
+-        c.kernel(0)?;
+-        let offset = c.b.ins().ishl_imm(row, 3);
+-        for (j, &sink) in sinks.iter().enumerate() {
+-            let v = c.get(VariableId(n_in + j));
+-            let word = c.bits(v, outputs[j]);
+-            let at = c.b.ins().iadd(sink, offset);
+-            c.b.ins().store(MemFlags::new(), word, at, 0);
+-        }
+-        let next = c.b.ins().iadd_imm(i, 1);
+-        c.b.ins().jump(head, &[next.into()]);
++    // Scalar broadcasting is an input shape, not a per-row address mask.
++    // Lift the same scalar kernel for every shape in the finite signature.
++    // Dispatch once per invocation; scalar loads dominate the row loops.
++    let mut shape = zero;
++    for (k, &(_, mask)) in sources.iter().enumerate() {
++        let scalar = b.ins().icmp_imm(IntCC::Equal, mask, 0);
++        let scalar = b.ins().uextend(types::I64, scalar);
++        let bit = b.ins().ishl_imm(scalar, k as i64);
++        shape = b.ins().bor(shape, bit);
+     }
+-    c.b.switch_to_block(done);
+-    let ok = c.b.ins().iconst(types::I32, 0);
+-    c.b.ins().return_(&[ok]);
+-    c.b.switch_to_block(fail);
+-    let status = c.b.block_params(fail)[0];
+-    c.b.ins().return_(&[status]);
+-    c.b.seal_all_blocks();
+-    c.b.finalize();
++    let shape_entries = (0..1usize << n_in)
++        .map(|_| b.create_block())
++        .collect::<Vec<_>>();
++    for (s, &target) in shape_entries.iter().enumerate() {
++        if s + 1 == shape_entries.len() {
++            b.ins().jump(target, &[]);
++        } else {
++            let next = b.create_block();
++            let matches = b.ins().icmp_imm(IntCC::Equal, shape, s as i64);
++            b.ins().brif(matches, target, &[], next, &[]);
++            b.switch_to_block(next);
++        }
++    }
++    for (shape, &shape_entry) in shape_entries.iter().enumerate() {
++        b.switch_to_block(shape_entry);
++        let scalar_values = sources
++            .iter()
++            .enumerate()
++            .map(|(k, &(pointer, _))| {
++                (shape & (1 << k) != 0)
++                    .then(|| b.ins().load(types::I64, MemFlags::new(), pointer, 0))
++            })
++            .collect::<Vec<_>>();
++        let count = b.declare_var(types::I64);
++        b.def_var(count, zero);
++        let dense = b.create_block();
++        let dense_body = b.create_block();
++        let selected = b.create_block();
++        let selected_body = b.create_block();
++        b.append_block_param(dense, types::I64);
++        b.append_block_param(selected, types::I64);
++        let is_dense = b.ins().icmp_imm(IntCC::Equal, args[3], 0);
++        b.ins()
++            .brif(is_dense, dense, &[zero.into()], selected, &[zero.into()]);
++        let mut c = Compiler {
++            b,
++            module,
++            graph: &graph,
++            plan: &plan,
++            vars: vec![None; graph.variables.len()],
++            args: args.clone(),
++            row: zero,
++            setup: shape_entry,
++            fail,
++            hoisted: HashMap::new(),
++            regions: vec![],
++            count,
++            sites: vec![],
++            constants: vec![],
++            aliases: &[],
++        };
++        for (head, body) in [(dense, dense_body), (selected, selected_body)] {
++            c.b.switch_to_block(head);
++            let i = c.b.block_params(head)[0];
++            let more = c.b.ins().icmp(IntCC::UnsignedLessThan, i, c.args[4]);
++            c.b.ins().brif(more, body, &[], done, &[]);
++            c.b.switch_to_block(body);
++            let row = if head == dense {
++                i
++            } else {
++                let at = c.b.ins().ishl_imm(i, 2);
++                let at = c.b.ins().address(c.args[3], at);
++                c.b.ins().uload32(MemFlags::new(), at, 0)
++            };
++            for (k, &(pointer, _)) in sources.iter().enumerate() {
++                let word = if let Some(value) = scalar_values[k] {
++                    value
++                } else {
++                    let offset = c.b.ins().ishl_imm(row, 3);
++                    let at = c.b.ins().address(pointer, offset);
++                    c.b.ins().load(types::I64, MemFlags::new(), at, 0)
++                };
++                let v = c.decode(word, inputs[k]);
++                c.set(VariableId(k), v);
++            }
++            c.kernel(0)?;
++            let offset = c.b.ins().ishl_imm(row, 3);
++            for (j, &sink) in sinks.iter().enumerate() {
++                let v = c.get(VariableId(n_in + j));
++                let word = c.bits(v, outputs[j]);
++                let at = c.b.ins().address(sink, offset);
++                c.b.ins().store(MemFlags::new(), word, at, 0);
++            }
++            let next = c.b.ins().iadd_imm(i, 1);
++            c.b.ins().jump(head, &[next.into()]);
++        }
++        b = c.b;
++    }
++    b.switch_to_block(done);
++    let ok = b.ins().iconst(types::I32, 0);
++    b.ins().return_(&[ok]);
++    b.switch_to_block(fail);
++    let status = b.block_params(fail)[0];
++    b.ins().return_(&[status]);
++    b.seal_all_blocks();
++    b.finalize();
+     Ok(id)
+ }
+ 
+@@ -296,24 +334,53 @@
+     }
+ 
+     #[test]
+-    fn generated_kernels_compute_dense_selected_and_constant_rows() {
++    fn generated_kernels_preserve_broadcast_selection_aliases_and_overflow() {
+         let entry = generated(ScalarFunction::Add, &[VariableType::Int32; 2]).unwrap();
+-        let left = [1u64, 2, 3, (-4i64) as u64];
+-        let right = [10u64];
+-        let sources = [[left.as_ptr() as u64, u64::MAX], [right.as_ptr() as u64, 0]];
+-        let run = |rows: Option<&[u32]>| {
+-            let mut sum = [0u64; 4];
+-            let mut overflow = [0u64; 4];
+-            let sinks = [sum.as_mut_ptr(), overflow.as_mut_ptr()];
+-            let (selection, n) = rows.map_or((std::ptr::null(), 4), |r| (r.as_ptr(), r.len()));
+-            let mut runtime = Runtime::default();
+-            // SAFETY: every listed row has a word in each input and output.
+-            let status =
+-                unsafe { entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), selection, n) };
+-            assert_eq!(status, 0);
+-            sum
+-        };
+-        assert_eq!(run(None), [11, 12, 13, 6]);
+-        assert_eq!(run(Some(&[1, 3])), [0, 12, 0, 6]);
++        let n = 4099;
++        let left = (0..n)
++            .map(|i| [i32::MAX, i32::MIN, 17, -29][i % 4] as i64 as u64)
++            .collect::<Vec<_>>();
++        let right = (0..n)
++            .map(|i| [1i32, -1, -100, 200][i % 4] as i64 as u64)
++            .collect::<Vec<_>>();
++        let picked = [4098u32, 0, 31, 2, 4097, 100];
++        for alias in [false, true] {
++            let right = if alias { &left } else { &right };
++            for shape in 0..4 {
++                let scalar = [shape & 1 != 0, shape & 2 != 0];
++                let sources = [
++                    [left.as_ptr() as u64, if scalar[0] { 0 } else { u64::MAX }],
++                    [right.as_ptr() as u64, if scalar[1] { 0 } else { u64::MAX }],
++                ];
++                for selection in [None, Some(picked.as_slice()), Some(&[][..])] {
++                    let mut sum = vec![0xdead; n];
++                    let mut overflow = vec![0xbeef; n];
++                    let sinks = [sum.as_mut_ptr(), overflow.as_mut_ptr()];
++                    let (rows, count) =
++                        selection.map_or((std::ptr::null(), n), |s| (s.as_ptr(), s.len()));
++                    let mut runtime = Runtime::default();
++                    // SAFETY: all inputs cover the selected indices, output
++                    // buffers are disjoint, and broadcast words live here.
++                    assert_eq!(
++                        unsafe {
++                            entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), rows, count)
++                        },
++                        0
++                    );
++                    for r in 0..n {
++                        if selection.is_none_or(|s| s.contains(&(r as u32))) {
++                            let a = left[if scalar[0] { 0 } else { r }] as i32;
++                            let b = right[if scalar[1] { 0 } else { r }] as i32;
++                            let (value, flag) = a.overflowing_add(b);
++                            assert_eq!(sum[r], value as i64 as u64);
++                            assert_eq!(overflow[r], flag as u64);
++                        } else {
++                            assert_eq!(sum[r], 0xdead);
++                            assert_eq!(overflow[r], 0xbeef);
++                        }
++                    }
++                }
++            }
++        }
+     }
+ }
+--- a/src/kernel/jit/llvm.rs
++++ b/src/kernel/jit/llvm.rs
+@@ -395,18 +395,45 @@
+         self.c.f64_type().const_float(v).into()
+     }
+     fn ptr(&mut self, base: Value, offset: i32) -> PointerValue<'static> {
+-        let addr = if offset == 0 {
+-            base
+-        } else {
+-            self.iadd_imm(base, offset as i64)
++        let pointer = match base {
++            Value::PointerValue(pointer) => pointer,
++            _ => self
++                .b
++                .build_int_to_ptr(
++                    base.into_int_value(),
++                    self.c.ptr_type(AddressSpace::default()),
++                    "",
++                )
++                .unwrap(),
+         };
+-        self.b
+-            .build_int_to_ptr(
+-                addr.into_int_value(),
+-                self.c.ptr_type(AddressSpace::default()),
+-                "",
+-            )
+-            .unwrap()
++        if offset == 0 {
++            pointer
++        } else {
++            // GEP without inbounds preserves wrapping address arithmetic.
++            unsafe {
++                self.b
++                    .build_gep(
++                        self.c.i8_type(),
++                        pointer,
++                        &[self.c.i64_type().const_int(offset as u64, true)],
++                        "",
++                    )
++                    .unwrap()
++            }
++        }
++    }
++
++    /// Preserve pointer provenance and affine offsets in the vector loop IR.
++    /// Integer addition followed by inttoptr hides array accesses from LLVM's
++    /// dependence analysis, even when the scalar operation is fully typed.
++    pub fn address(&mut self, base: Value, offset: Value) -> Value {
++        let pointer = self.ptr(base, 0);
++        unsafe {
++            self.b
++                .build_gep(self.c.i8_type(), pointer, &[offset.into_int_value()], "")
++                .unwrap()
++                .into()
++        }
+     }
+     pub fn load(&mut self, t: Type, _: MemFlags, base: Value, offset: i32) -> Value {
+         let p = self.ptr(base, offset);
+@@ -633,7 +660,36 @@
+             .into();
+         (v, flag)
+     }
+-    overflow! {sadd_overflow=>"llvm.sadd.with.overflow",uadd_overflow=>"llvm.uadd.with.overflow",ssub_overflow=>"llvm.ssub.with.overflow",usub_overflow=>"llvm.usub.with.overflow",smul_overflow=>"llvm.smul.with.overflow",umul_overflow=>"llvm.umul.with.overflow"}
++    // Express the two scalar results independently. LLVM 19's loop vectorizer
++    // cannot widen the struct-returning checked-arithmetic intrinsic; the
++    // equivalent sign-bit algebra can be lifted to any SIMD width normally.
++    pub fn sadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
++        let value = self.iadd(a, b);
++        let x = self.bxor(value, a);
++        let y = self.bxor(value, b);
++        let sign = self.band(x, y);
++        let overflow = self.icmp_imm(IntCC::SignedLessThan, sign, 0);
++        (value, overflow)
++    }
++    pub fn uadd_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
++        let value = self.iadd(a, b);
++        let overflow = self.icmp(IntCC::UnsignedLessThan, value, a);
++        (value, overflow)
++    }
++    pub fn ssub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
++        let value = self.isub(a, b);
++        let x = self.bxor(a, b);
++        let y = self.bxor(a, value);
++        let sign = self.band(x, y);
++        let overflow = self.icmp_imm(IntCC::SignedLessThan, sign, 0);
++        (value, overflow)
++    }
++    pub fn usub_overflow(&mut self, a: Value, b: Value) -> (Value, Value) {
++        let value = self.isub(a, b);
++        let overflow = self.icmp(IntCC::UnsignedLessThan, a, b);
++        (value, overflow)
++    }
++    overflow! {smul_overflow=>"llvm.smul.with.overflow",umul_overflow=>"llvm.umul.with.overflow"}
+     pub fn trunc(&mut self, v: Value) -> Value {
+         self.intrinsic("llvm.trunc", &[v.get_type()], &[v])
+     }
+--- a/src/kernel/vector/mod.rs
++++ b/src/kernel/vector/mod.rs
+@@ -52,6 +52,8 @@
+     Empty,
+     Constant(u64),
+     Column(Vec<u64>),
++    /// An Arrow value buffer whose physical representation already is words.
++    Borrowed(Buffer),
+ }
+ 
+ /// The rows of a domain as root row indices.
+@@ -172,6 +174,7 @@
+ /// The prepared steps of one program, each with the domain it runs in.
+ pub(crate) struct Steps {
+     steps: Vec<(Step, DomainId)>,
++    release_after: Vec<Vec<VariableId>>,
+     variables: usize,
+     domains: usize,
+     _constants: Vec<Arc<[u8]>>,
+@@ -209,6 +212,7 @@
+         }
+         let mut constants = vec![];
+         let mut steps = Vec::with_capacity(plan.items.len());
++        let mut last_use = vec![None; graph.variables.len()];
+         for &(item, domain) in &plan.items {
+             let step = match item {
+                 Item::Input(input) => {
+@@ -324,10 +328,35 @@
+                     },
+                 },
+             };
++            if let Item::Kernel(k) = item {
++                let (inputs, outputs) = match &graph.kernels[k].1 {
++                    Kernel::Scalar(kernel) => (kernel.inputs(), kernel.outputs()),
++                    Kernel::Domain(kernel) => (kernel.inputs(), kernel.outputs()),
++                };
++                // Even an unused auxiliary result occupies a buffer until its
++                // producing call returns; every later read extends its life.
++                for v in inputs.into_iter().chain(outputs) {
++                    last_use[v.0] = Some(steps.len());
++                }
++            }
+             steps.push((step, domain));
++        }
++        // Results are materialized after all windows, so their buffers must
++        // retain earlier windows even after the final kernel read.
++        if let Some(output) = &graph.output {
++            for v in output.bindings.iter().flat_map(|b| b.variables()) {
++                last_use[v.0] = None;
++            }
++        }
++        let mut release_after = vec![vec![]; steps.len()];
++        for (v, last) in last_use.into_iter().enumerate() {
++            if let Some(i) = last {
++                release_after[i].push(VariableId(v));
++            }
+         }
+         Ok(Self {
+             steps,
++            release_after,
+             variables: graph.variables.len(),
+             domains: graph.domains.len(),
+             _constants: constants,
+@@ -354,6 +383,7 @@
+             registers: (0..self.variables).map(|_| Register::Empty).collect(),
+             selections: vec![None; self.domains],
+             pool: std::mem::take(&mut local.scratch),
++            calls: std::mem::take(&mut local.calls),
+             strings: vec![],
+             limit: rows,
+             raised: None,
+@@ -368,7 +398,7 @@
+                 break;
+             }
+             frame.selections.iter_mut().for_each(|s| *s = None);
+-            for (step, domain) in &self.steps {
++            for (index, (step, domain)) in self.steps.iter().enumerate() {
+                 if guard.is_shutdown_requested() {
+                     result = Err(Error::Cancelled);
+                     break 'windows;
+@@ -383,6 +413,16 @@
+                     result = Err(e);
+                     break 'windows;
+                 }
++                for v in &self.release_after[index] {
++                    // Borrowed inputs keep their chunk binding across windows;
++                    // only owned scratch columns consume reusable storage.
++                    if matches!(frame.registers[v.0], Register::Column(_)) {
++                        if let Register::Column(column) = std::mem::take(&mut frame.registers[v.0])
++                        {
++                            frame.pool.push(column);
++                        }
++                    }
++                }
+             }
+             if rows == 0 {
+                 break;
+@@ -408,6 +448,7 @@
+             }
+         }
+         local.scratch = frame.pool;
++        local.calls = frame.calls;
+         result
+     }
+ }
+@@ -422,6 +463,7 @@
+     selections: Vec<Option<Vec<u32>>>,
+     /// Columns reused across chunks; each has `rows` words once taken.
+     pool: Vec<Vec<u64>>,
++    calls: CallBuffers,
+     /// Owns strings produced by FormatText until the output is copied.
+     strings: Vec<Box<[u8]>>,
+     /// Steps see only root rows below this. Fused code stops at the first
+@@ -438,6 +480,7 @@
+     match &registers[v.0] {
+         Register::Constant(c) => Ok(Operand::Constant(*c)),
+         Register::Column(c) => Ok(Operand::Column(c)),
++        Register::Borrowed(buffer) => Ok(Operand::Column(buffer.typed_data::<u64>())),
+         Register::Empty => Err(Error::Execution(format!("variable {} has no value", v.0))),
+     }
+ }
+@@ -519,47 +562,70 @@
+     }
+ }
+ 
+-fn invoke(
++/// Invocation metadata is owned by an execution instance, never a kernel.
++/// Its storage survives windows and chunks; only the bound addresses change.
++#[derive(Debug, Default)]
++pub(crate) struct CallBuffers {
++    constants: Vec<u64>,
++    sources: Vec<[u64; 2]>,
++    // Addresses are stored as words so an idle LocalState remains Send. These
++    // addresses are rebound before every call and never dereferenced later.
++    sinks: Vec<usize>,
++    columns: Vec<Vec<u64>>,
++}
++
++fn invoke<'a>(
+     function: Callable,
+-    operands: &[Operand<'_>],
++    operands: impl ExactSizeIterator<Item = Result<Operand<'a>>>,
+     rows: Rows<'_>,
+     outputs: &mut [Vec<u64>],
++    buffers: &mut CallBuffers,
+ ) -> Result<()> {
+     let entry = match function {
+         Callable::Native(f) => {
+-            f(operands, rows, outputs);
++            let operands = operands.collect::<Result<Vec<_>>>()?;
++            f(&operands, rows, outputs);
+             return Ok(());
+         }
+         Callable::Generated(entry) => entry,
+     };
+-    let constants = operands
+-        .iter()
+-        .map(|o| match o {
+-            Operand::Constant(c) => *c,
+-            Operand::Column(_) => 0,
+-        })
+-        .collect::<Vec<_>>();
+-    // A range runs as rows `0..n` of columns offset to its start.
++    // Resize before binding pointers: growing this vector afterward would
++    // invalidate the addresses of broadcast scalar values.
++    buffers.constants.resize(operands.len(), 0);
++    buffers.sources.clear();
++    buffers.sinks.clear();
+     let (offset, selection, n) = match rows {
+         Rows::Range(start, end) => (start, std::ptr::null(), end - start),
+         Rows::Selected(s) => (0, s.as_ptr(), s.len()),
+     };
+-    let sources = operands
+-        .iter()
+-        .zip(&constants)
+-        .map(|(o, c)| match o {
+-            Operand::Constant(_) => [c as *const u64 as u64, 0],
+-            Operand::Column(v) => [v[offset..].as_ptr() as u64, u64::MAX],
+-        })
+-        .collect::<Vec<_>>();
+-    let sinks = outputs
+-        .iter_mut()
+-        .map(|o| o[offset..].as_mut_ptr())
+-        .collect::<Vec<_>>();
++    for (i, operand) in operands.enumerate() {
++        let source = match operand? {
++            Operand::Constant(c) => {
++                buffers.constants[i] = c;
++                [&buffers.constants[i] as *const u64 as u64, 0]
++            }
++            Operand::Column(v) => [v[offset..].as_ptr() as u64, u64::MAX],
++        };
++        buffers.sources.push(source);
++    }
++    buffers.sinks.extend(
++        outputs
++            .iter_mut()
++            .map(|o| o[offset..].as_mut_ptr() as usize),
++    );
+     let mut runtime = Runtime::default();
+-    // SAFETY: input columns and outputs have a word for every root row listed
+-    // by `rows`; constants outlive the call.
+-    let status = unsafe { entry(&mut runtime, sources.as_ptr(), sinks.as_ptr(), selection, n) };
++    // SAFETY: input columns and outputs cover the selected root rows. Scalar
++    // pointers refer to stable storage until this synchronous call returns.
++    // usize and the output pointers have the same representation.
++    let status = unsafe {
++        entry(
++            &mut runtime,
++            buffers.sources.as_ptr(),
++            buffers.sinks.as_ptr().cast(),
++            selection,
++            n,
++        )
++    };
+     if status == 0 {
+         Ok(())
+     } else {
+@@ -720,6 +786,17 @@
+                         Register::Column(c)
+                     }
+                 }
++            } else if VariableType::of(array.data_type()).is_some_and(|t| t.bits() == 64) {
++                // No conversion is needed for 64-bit primitive payloads. Keep
++                // Arrow's sliced owner rather than copying into scratch words.
++                // Narrow values still need canonical sign/zero extension.
++                if matches!(self.registers[v.0], Register::Borrowed(_)) {
++                    continue;
++                }
++                let data = array.to_data();
++                Register::Borrowed(
++                    data.buffers()[0].slice_with_length(data.offset() * 8, data.len() * 8),
++                )
+             } else {
+                 let mut c = self.target(v);
+                 match *binding {
+@@ -742,31 +819,36 @@
+         outputs: &[VariableId],
+         rows: Rows<'_>,
+     ) -> Result<()> {
+-        if inputs
++        let scalar = inputs
+             .iter()
+-            .all(|v| matches!(self.registers[v.0], Register::Constant(_)))
+-        {
+-            let operands = inputs
+-                .iter()
+-                .map(|v| operand(&self.registers, *v))
+-                .collect::<Result<Vec<_>>>()?;
+-            let mut values = vec![vec![0]; outputs.len()];
+-            invoke(function, &operands, Rows::Range(0, 1), &mut values)?;
+-            for (v, value) in outputs.iter().zip(values) {
+-                self.registers[v.0] = Register::Constant(value[0]);
++            .all(|v| matches!(self.registers[v.0], Register::Constant(_)));
++        let mut columns = std::mem::take(&mut self.calls.columns);
++        debug_assert!(columns.is_empty());
++        for &v in outputs {
++            let mut column = self.target(v);
++            if scalar && column.is_empty() {
++                column.resize(1, 0);
+             }
+-            return Ok(());
+-        }
+-        let mut columns = outputs.iter().map(|&v| self.target(v)).collect::<Vec<_>>();
+-        let operands = inputs
+-            .iter()
+-            .map(|v| operand(&self.registers, *v))
+-            .collect::<Result<Vec<_>>>()?;
+-        invoke(function, &operands, rows, &mut columns)?;
+-        for (v, c) in outputs.iter().zip(columns) {
+-            self.registers[v.0] = Register::Column(c);
++            columns.push(column);
+         }
+-        Ok(())
++        let operands = inputs.iter().map(|v| operand(&self.registers, *v));
++        let result = invoke(
++            function,
++            operands,
++            if scalar { Rows::Range(0, 1) } else { rows },
++            &mut columns,
++            &mut self.calls,
++        );
++        for (v, column) in outputs.iter().zip(columns.drain(..)) {
++            if scalar {
++                self.registers[v.0] = Register::Constant(column[0]);
++                self.pool.push(column);
++            } else {
++                self.registers[v.0] = Register::Column(column);
++            }
++        }
++        self.calls.columns = columns;
++        result
+     }
+ 
+     fn format(
+--- a/src/kernel/program.rs
++++ b/src/kernel/program.rs
+@@ -107,6 +107,7 @@
+     states: Vec<Option<State>>,
+     /// Columns reused by zero-compile execution across chunks.
+     pub(crate) scratch: Vec<Vec<u64>>,
++    pub(crate) calls: super::vector::CallBuffers,
+ }
+ 
+ impl LocalState {
+@@ -187,6 +188,7 @@
+         Ok(LocalState {
+             states,
+             scratch: vec![],
++            calls: Default::default(),
+         })
+     }
+ 
+--- a/tests/vector_storage.rs
++++ b/tests/vector_storage.rs
+@@ -0,0 +1,129 @@
++//! Lifetime and binding checks across windows and reused execution instances.
++use arrow::{
++    array::{Array, Int64Array},
++    buffer::NullBuffer,
++    datatypes::{DataType, Field, Schema},
++    record_batch::RecordBatch,
++};
++use roc::{
++    column::{ColumnContext, ColumnType},
++    expr::scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression},
++    kernel::{ExecutionMode, KernelBuilder, KernelLibrary, Program},
++};
++use std::sync::Arc;
++
++#[test]
++fn reused_state_keeps_outputs_and_sliced_nullable_inputs_across_windows() {
++    for mode in [
++        ExecutionMode::Compile,
++        ExecutionMode::ZeroCompile(KernelLibrary::Generated),
++        ExecutionMode::ZeroCompile(KernelLibrary::Native),
++    ] {
++        let mut columns = ColumnContext::new();
++        let input = columns.allocate(ColumnType::new(DataType::Int64, true));
++        let mut expr = ReferenceExpression::new(input).into_ref();
++        let mut first = None;
++        for i in 1..=16 {
++            let constant = columns.allocate(ColumnType::new(DataType::Int64, false));
++            let output = columns.allocate(ColumnType::new(DataType::Int64, true));
++            expr = FunctionExpression::binary(
++                FunctionKind::Add,
++                expr,
++                ConstantExpression::int64(Some(i), constant).into_ref(),
++                output,
++            )
++            .into_ref();
++            if i == 1 {
++                first = Some(output);
++            }
++        }
++        let mut builder = KernelBuilder::new(&columns);
++        builder.bind_inputs(&[input]).unwrap();
++        let errors = expr.build_kernels(&mut builder).unwrap();
++        builder.raise(errors).unwrap();
++        let program = Program::new(
++            builder
++                .finish(Some(&[first.unwrap(), expr.output(), input]))
++                .unwrap(),
++            mode,
++        )
++        .unwrap();
++        let mut local = program.new_local().unwrap();
++        let (_shutdown, guard) = asyncband::shutdown::new();
++        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
++        let mut retained = vec![];
++        // Grow and shrink buffers, cross window boundaries, and follow failure
++        // with another batch using the same LocalState.
++        for (iteration, rows) in [8195, 1, 0, 1024, 1025, 37, 16391, 1023]
++            .into_iter()
++            .enumerate()
++        {
++            let offset = 137;
++            let values = (0..rows + offset)
++                .map(|i| {
++                    if i % 17 == 0 {
++                        i64::MAX
++                    } else {
++                        i as i64 - 700
++                    }
++                })
++                .collect::<Vec<_>>();
++            let valid =
++                NullBuffer::from((0..rows + offset).map(|i| i % 17 != 0).collect::<Vec<_>>());
++            let input = Int64Array::new(values.into(), Some(valid)).slice(offset, rows);
++            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(input)]).unwrap();
++            let output = program.run(&batch, &mut local, &guard).unwrap().unwrap();
++            for (c, delta) in [1, 136, 0].into_iter().enumerate() {
++                let array = output
++                    .column(c)
++                    .as_any()
++                    .downcast_ref::<Int64Array>()
++                    .unwrap();
++                for r in 0..rows {
++                    let i = r + offset;
++                    assert_eq!(
++                        array.is_null(r),
++                        i % 17 == 0,
++                        "{mode:?}, batch {iteration}, row {r}"
++                    );
++                    if i % 17 != 0 {
++                        assert_eq!(array.value(r), i as i64 - 700 + delta);
++                    }
++                }
++            }
++            let saved = output
++                .columns()
++                .iter()
++                .map(|a| {
++                    a.as_any()
++                        .downcast_ref::<Int64Array>()
++                        .unwrap()
++                        .iter()
++                        .collect::<Vec<_>>()
++                })
++                .collect::<Vec<_>>();
++            retained.push((output, saved));
++            if rows > 0 {
++                let mut bad = vec![0; rows];
++                bad[rows - 1] = i64::MAX;
++                let bad =
++                    RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(bad))])
++                        .unwrap();
++                assert!(program.run(&bad, &mut local, &guard).is_err());
++            }
++        }
++        for (output, saved) in retained {
++            for (array, expected) in output.columns().iter().zip(saved) {
++                assert_eq!(
++                    array
++                        .as_any()
++                        .downcast_ref::<Int64Array>()
++                        .unwrap()
++                        .iter()
++                        .collect::<Vec<_>>(),
++                    expected
++                );
++            }
++        }
++    }
++}

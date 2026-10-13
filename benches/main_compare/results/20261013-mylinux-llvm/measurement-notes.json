@@ -1,0 +1,57 @@
+{
+  "experiment": "Replace all Cranelift-generated fused loops, cached scalar kernels and specialized SIMD reductions with Inkwell/LLVM.",
+  "branch": "codex/llvm-codegen-experiment",
+  "baseline_main": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "baseline_cranelift": "17c6e141d5665a678361bce77f21fd45d2039f3e",
+  "llvm_source": "Dirty source captured in llvm-source.tar.gz; llvm.patch excludes the new llvm.rs, which is present in the archive and metadata hashes.",
+  "toolchain": {
+    "rust": "1.95.0",
+    "inkwell": "0.7.1",
+    "llvm": "19.1.7",
+    "optimization": "default<O3> and MCJIT Aggressive; host CPU/features; no fast math; constrained floating arithmetic to preserve tested NaN behavior"
+  },
+  "build": "RUSTUP_TOOLCHAIN=1.95.0 LLVM_SYS_191_PREFIX=/home/ze/benchmarks/roc-llvm-20261013/llvm19/usr CARGO_BUILD_JOBS=4 cargo build --release --manifest-path harness/Cargo.toml",
+  "tests": {
+    "command": "cargo test --locked -p roc --lib --tests",
+    "passed": 105,
+    "failed": 0
+  },
+  "measurement": {
+    "rows": 4000000,
+    "batch_rows": 8192,
+    "replicas": 5,
+    "samples_per_replica": 20,
+    "threads": [
+      1,
+      4
+    ],
+    "cpus": {
+      "1": [
+        0
+      ],
+      "4": [
+        0,
+        2,
+        4,
+        6
+      ]
+    },
+    "process_runs": 60,
+    "cases_per_process": 6,
+    "mode_order": "rotated each replica",
+    "thread_order": "alternated each replica",
+    "summary": "Median of replica medians; ranges are observed replica minima/maxima, not confidence intervals. Total uses median of paired preparation+execution samples."
+  },
+  "scope": "Resident-input whole-engine benchmark; input generation, full correctness checking and output destruction outside timed regions. Each process validates all output rows before timed samples; timed samples check output count. Generated-library prewarm is measured separately once per process.",
+  "limitations": [
+    "First LLVM port preserving graph lowering and runtime structure, not a separately tuned LLVM execution engine.",
+    "Single-thread results generally stable; some four-worker cases retain large run-to-run variation on this desktop host.",
+    "No disk IO, cold data, or varied row counts tested.",
+    "LLVM full compile includes compiling both the general loop and specialized reduction when eligible, as did the Cranelift baseline.",
+    "Only Linux x86_64 was built and tested; LLVM 19 development tools are now a build dependency."
+  ],
+  "headline": {
+    "generated_prewarm_cranelift_ms": 30.272562,
+    "generated_prewarm_llvm_ms": 1165.1573799999999
+  }
+}

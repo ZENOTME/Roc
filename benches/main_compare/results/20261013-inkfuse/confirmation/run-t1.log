@@ -1,0 +1,10 @@
+fragment_startup_ms=3517.1
+load_ms=9430.23
+finished q1 threads=1
+finished q3 threads=1
+finished q4 threads=1
+finished q5 threads=1
+finished q6 threads=1
+finished q14 threads=1
+finished q19 threads=1
+finished q_bigjoin threads=1

@@ -1,0 +1,47 @@
+{
+  "baseline": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "current_head": "17c6e141d5665a678361bce77f21fd45d2039f3e",
+  "current_status": "M benches/main_compare/run.py",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2",
+  "machine": "Linux zenotme 6.14.3-arch1-1 #1 SMP PREEMPT_DYNAMIC Sun, 20 Apr 2025 12:38:52 +0000 x86_64 GNU/Linux\nArchitecture:                         x86_64\nCPU op-mode(s):                       32-bit, 64-bit\nAddress sizes:                        46 bits physical, 48 bits virtual\nByte Order:                           Little Endian\nCPU(s):                               28\nOn-line CPU(s) list:                  0-27\nVendor ID:                            GenuineIntel\nModel name:                           Intel(R) Core(TM) i7-14700K\nCPU family:                           6\nModel:                                183\nThread(s) per core:                   2\nCore(s) per socket:                   20\nSocket(s):                            1\nStepping:                             1\nCPU(s) scaling MHz:                   42%\nCPU max MHz:                          5600.0000\nCPU min MHz:                          800.0000\nBogoMIPS:                             6835.20\nFlags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb intel_pt sha_ni xsaveopt xsavec xgetbv1 xsaves split_lock_detect user_shstk avx_vnni dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp hwp_pkg_req hfi vnmi umip pku ospke waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize pconfig arch_lbr ibt flush_l1d arch_capabilities\nVirtualization:                       VT-x\nL1d cache:                            768 KiB (20 instances)\nL1i cache:                            1 MiB (20 instances)\nL2 cache:                             28 MiB (11 instances)\nL3 cache:                             33 MiB (1 instance)\nNUMA node(s):                         1\nNUMA node0 CPU(s):                    0-27\nVulnerability Gather data sampling:   Not affected\nVulnerability Ghostwrite:             Not affected\nVulnerability Itlb multihit:          Not affected\nVulnerability L1tf:                   Not affected\nVulnerability Mds:                    Not affected\nVulnerability Meltdown:               Not affected\nVulnerability Mmio stale data:        Not affected\nVulnerability Reg file data sampling: Mitigation; Clear Register File\nVulnerability Retbleed:               Not affected\nVulnerability Spec rstack overflow:   Not affected\nVulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                  Not affected\nVulnerability Tsx async abort:        Not affected\nMemTotal:       65573036 kB\nMemFree:        49166888 kB\nMemAvailable:   60672380 kB\nBuffers:            2620 kB\nCached:         11890268 kB\nSwapCached:         3088 kB\nActive:          6088648 kB\nInactive:        8790876 kB\nActive(anon):    3046556 kB\nInactive(anon):        4 kB\nActive(file):    3042092 kB\nInactive(file):  8790872 kB\nUnevictable:          64 kB\nMlocked:              64 kB\nSwapTotal:      62499836 kB\nSwapFree:       62164380 kB\nZswap:             12288 kB\nZswapped:          53804 kB\nDirty:               760 kB\nWriteback:             0 kB\nAnonPages:       2770392 kB\nMapped:          1941344 kB\nShmem:             60000 kB\nKReclaimable:     402032 kB\nSlab:             706940 kB\nSReclaimable:     402032 kB\nSUnreclaim:       304908 kB\nKernelStack:       15424 kB\nPageTables:        31176 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    95286352 kB\nCommitted_AS:    7532648 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:      272884 kB\nVmallocChunk:          0 kB\nPercpu:            29344 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:   1878016 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:   1122304 kB\nFilePmdMapped:    440320 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:     2457404 kB\nDirectMap2M:    20346880 kB\nDirectMap1G:    44040192 kB\n",
+  "args": {
+    "output": "target/mylinux-modes",
+    "rows": 4000000,
+    "samples": 10,
+    "replicas": 3,
+    "resume_build": false,
+    "baseline": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a"
+  },
+  "builds": {
+    "main": {
+      "source_sha256": "7b4f8deb2b7c554bfb64b85c93860c68c19c49d58e4b96e93f8323f8dc42e002",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "9369891cb3a8d5de7f7d2880b601c30d7e80494558b64dde15779cafc15a8f84",
+      "lock_sha256": "d5775cca00c6034462e8aeb3431f24ac414c9b964187a904d8cbd45f1fc4db3b",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes/main/harness/Cargo.toml",
+        "--features",
+        "main-engine"
+      ],
+      "rustflags": null
+    },
+    "current": {
+      "source_sha256": "e6f694c3a8f12899bdf5720645fea5a7dcdc64e577e01ae3447a7162d894f4c6",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "a1fb0c7269d0e8e866db7aff8274cb28031ca14379e08e829eec8eef7ec9afa8",
+      "lock_sha256": "287b1071a113e065c0f76d9e558ee4f7a40bc76bfe660b2973aa25c8c98e94c6",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes/current/harness/Cargo.toml"
+      ],
+      "rustflags": null
+    }
+  }
+}

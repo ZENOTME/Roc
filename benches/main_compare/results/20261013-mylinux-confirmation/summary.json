@@ -1,0 +1,836 @@
+{
+  "prewarm_ms": {
+    "t1": [
+      30.258118,
+      30.072616,
+      30.422579000000002,
+      30.45279,
+      30.371141
+    ],
+    "t4": [
+      29.634315,
+      29.832357000000002,
+      30.51541,
+      30.176174,
+      30.078269000000002
+    ]
+  },
+  "cases": [
+    {
+      "case": "scan",
+      "threads": 1,
+      "main_prepare_ms": 0.000419,
+      "main_prepare_range_ms": [
+        0.0003945,
+        0.000432
+      ],
+      "main_execute_ms": 0.09298100000000001,
+      "main_execute_range_ms": [
+        0.092839,
+        0.093844
+      ],
+      "main_total_ms": 0.093404,
+      "main_total_range_ms": [
+        0.09324100000000002,
+        0.094247
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.0043905,
+      "compile_prepare_range_ms": [
+        0.0042955,
+        0.0045525
+      ],
+      "compile_execute_ms": 0.1188525,
+      "compile_execute_range_ms": [
+        0.1177495,
+        0.1198115
+      ],
+      "compile_total_ms": 0.12354499999999999,
+      "compile_total_range_ms": [
+        0.121916,
+        0.1241985
+      ],
+      "compile_over_main": 1.2782450177993352,
+      "zero-generated_prepare_ms": 0.0042970000000000005,
+      "zero-generated_prepare_range_ms": [
+        0.0041655,
+        0.0044115000000000005
+      ],
+      "zero-generated_execute_ms": 0.1249705,
+      "zero-generated_execute_range_ms": [
+        0.1242605,
+        0.12657000000000002
+      ],
+      "zero-generated_total_ms": 0.12913249999999998,
+      "zero-generated_total_range_ms": [
+        0.1283765,
+        0.13108399999999998
+      ],
+      "zero-generated_over_main": 1.3440434067175013,
+      "zero-native_prepare_ms": 0.004305,
+      "zero-native_prepare_range_ms": [
+        0.0042935000000000004,
+        0.0043465
+      ],
+      "zero-native_execute_ms": 0.128954,
+      "zero-native_execute_range_ms": [
+        0.128195,
+        0.129371
+      ],
+      "zero-native_total_ms": 0.1333405,
+      "zero-native_total_range_ms": [
+        0.132665,
+        0.1338455
+      ],
+      "zero-native_over_main": 1.3868854927350749
+    },
+    {
+      "case": "filter_project",
+      "threads": 1,
+      "main_prepare_ms": 0.003588,
+      "main_prepare_range_ms": [
+        0.003304,
+        0.004739500000000001
+      ],
+      "main_execute_ms": 13.382931500000002,
+      "main_execute_range_ms": [
+        13.3177415,
+        13.7538135
+      ],
+      "main_total_ms": 13.386588500000002,
+      "main_total_range_ms": [
+        13.321282,
+        13.75863
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.3579555,
+      "compile_prepare_range_ms": [
+        0.331352,
+        0.404203
+      ],
+      "compile_execute_ms": 9.210832,
+      "compile_execute_range_ms": [
+        8.987972500000001,
+        10.192138499999999
+      ],
+      "compile_total_ms": 9.555063,
+      "compile_total_range_ms": [
+        9.3186215,
+        10.617736999999998
+      ],
+      "compile_over_main": 0.6882521964638315,
+      "zero-generated_prepare_ms": 0.0178965,
+      "zero-generated_prepare_range_ms": [
+        0.017535000000000002,
+        0.0251525
+      ],
+      "zero-generated_execute_ms": 19.782316,
+      "zero-generated_execute_range_ms": [
+        19.671492999999998,
+        20.094679499999998
+      ],
+      "zero-generated_total_ms": 19.7995855,
+      "zero-generated_total_range_ms": [
+        19.6887765,
+        20.119121999999997
+      ],
+      "zero-generated_over_main": 1.4781750919071803,
+      "zero-native_prepare_ms": 0.027646999999999998,
+      "zero-native_prepare_range_ms": [
+        0.016326,
+        0.027997
+      ],
+      "zero-native_execute_ms": 18.1142985,
+      "zero-native_execute_range_ms": [
+        16.6445435,
+        18.211129
+      ],
+      "zero-native_total_ms": 18.1427415,
+      "zero-native_total_range_ms": [
+        16.6602225,
+        18.2427865
+      ],
+      "zero-native_over_main": 1.3535374144297159
+    },
+    {
+      "case": "arithmetic_chain",
+      "threads": 1,
+      "main_prepare_ms": 0.004113500000000001,
+      "main_prepare_range_ms": [
+        0.003485,
+        0.005048
+      ],
+      "main_execute_ms": 53.795316,
+      "main_execute_range_ms": [
+        53.093540499999996,
+        54.200514
+      ],
+      "main_total_ms": 53.7997825,
+      "main_total_range_ms": [
+        53.096788499999995,
+        54.206069
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.5459050000000001,
+      "compile_prepare_range_ms": [
+        0.5354265,
+        0.6167644999999999
+      ],
+      "compile_execute_ms": 17.068804999999998,
+      "compile_execute_range_ms": [
+        17.0097155,
+        17.3620025
+      ],
+      "compile_total_ms": 17.6083645,
+      "compile_total_range_ms": [
+        17.552933000000003,
+        17.975044
+      ],
+      "compile_over_main": 0.31729165788337405,
+      "zero-generated_prepare_ms": 0.058145999999999996,
+      "zero-generated_prepare_range_ms": [
+        0.054737,
+        0.0772005
+      ],
+      "zero-generated_execute_ms": 88.9588175,
+      "zero-generated_execute_range_ms": [
+        88.7896495,
+        90.2936985
+      ],
+      "zero-generated_total_ms": 89.022576,
+      "zero-generated_total_range_ms": [
+        88.841125,
+        90.378253
+      ],
+      "zero-generated_over_main": 1.6536535913275423,
+      "zero-native_prepare_ms": 0.0538575,
+      "zero-native_prepare_range_ms": [
+        0.050539,
+        0.0571875
+      ],
+      "zero-native_execute_ms": 61.2969545,
+      "zero-native_execute_range_ms": [
+        60.765674499999996,
+        61.5186135
+      ],
+      "zero-native_total_ms": 61.3531805,
+      "zero-native_total_range_ms": [
+        60.821168,
+        61.580102
+      ],
+      "zero-native_over_main": 1.1394478006226416
+    },
+    {
+      "case": "integer_division",
+      "threads": 1,
+      "main_prepare_ms": 0.0037044999999999995,
+      "main_prepare_range_ms": [
+        0.0033935,
+        0.005392
+      ],
+      "main_execute_ms": 59.739216,
+      "main_execute_range_ms": [
+        59.169519,
+        60.257703
+      ],
+      "main_total_ms": 59.742487,
+      "main_total_range_ms": [
+        59.172726,
+        60.262825
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.596271,
+      "compile_prepare_range_ms": [
+        0.592456,
+        0.630766
+      ],
+      "compile_execute_ms": 18.2139795,
+      "compile_execute_range_ms": [
+        18.068479,
+        18.387518
+      ],
+      "compile_total_ms": 18.8155145,
+      "compile_total_range_ms": [
+        18.657217499999998,
+        19.0013805
+      ],
+      "compile_over_main": 0.30489150543924115,
+      "zero-generated_prepare_ms": 0.0633125,
+      "zero-generated_prepare_range_ms": [
+        0.059841500000000006,
+        0.068268
+      ],
+      "zero-generated_execute_ms": 100.9774305,
+      "zero-generated_execute_range_ms": [
+        100.6438125,
+        101.238974
+      ],
+      "zero-generated_total_ms": 101.054265,
+      "zero-generated_total_range_ms": [
+        100.7082155,
+        101.31659350000001
+      ],
+      "zero-generated_over_main": 1.6903039119227812,
+      "zero-native_prepare_ms": 0.05844,
+      "zero-native_prepare_range_ms": [
+        0.055144,
+        0.0692855
+      ],
+      "zero-native_execute_ms": 69.213696,
+      "zero-native_execute_range_ms": [
+        69.0676575,
+        70.074094
+      ],
+      "zero-native_total_ms": 69.272036,
+      "zero-native_total_range_ms": [
+        69.12293199999999,
+        70.13281850000001
+      ],
+      "zero-native_over_main": 1.1585973274239154
+    },
+    {
+      "case": "global_aggregate",
+      "threads": 1,
+      "main_prepare_ms": 0.002445,
+      "main_prepare_range_ms": [
+        0.0019329999999999998,
+        0.0025465
+      ],
+      "main_execute_ms": 1.8111875,
+      "main_execute_range_ms": [
+        1.8034835,
+        2.1949389999999998
+      ],
+      "main_total_ms": 1.8131844999999998,
+      "main_total_range_ms": [
+        1.805533,
+        2.1972695
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 1.458872,
+      "compile_prepare_range_ms": [
+        1.4394795,
+        1.4741565
+      ],
+      "compile_execute_ms": 1.1873905,
+      "compile_execute_range_ms": [
+        1.182133,
+        1.4467055
+      ],
+      "compile_total_ms": 2.6618850000000003,
+      "compile_total_range_ms": [
+        2.6316525,
+        2.92791
+      ],
+      "compile_over_main": 0.6555867352220573,
+      "zero-generated_prepare_ms": 0.0152325,
+      "zero-generated_prepare_range_ms": [
+        0.013763000000000001,
+        0.016108499999999998
+      ],
+      "zero-generated_execute_ms": 3.7081705000000005,
+      "zero-generated_execute_range_ms": [
+        3.6359744999999997,
+        3.757033
+      ],
+      "zero-generated_total_ms": 3.7213830000000003,
+      "zero-generated_total_range_ms": [
+        3.6496009999999997,
+        3.7715490000000003
+      ],
+      "zero-generated_over_main": 2.0473697505089894,
+      "zero-native_prepare_ms": 0.0140225,
+      "zero-native_prepare_range_ms": [
+        0.013606,
+        0.0143785
+      ],
+      "zero-native_execute_ms": 3.631685,
+      "zero-native_execute_range_ms": [
+        3.6194395,
+        3.6584234999999996
+      ],
+      "zero-native_total_ms": 3.6458649999999997,
+      "zero-native_total_range_ms": [
+        3.632901,
+        3.6739545
+      ],
+      "zero-native_over_main": 2.005140273991511
+    },
+    {
+      "case": "grouped_aggregate",
+      "threads": 1,
+      "main_prepare_ms": 0.0027805,
+      "main_prepare_range_ms": [
+        0.0024025,
+        0.003262
+      ],
+      "main_execute_ms": 14.457014000000001,
+      "main_execute_range_ms": [
+        14.410024,
+        14.662758
+      ],
+      "main_total_ms": 14.460242500000001,
+      "main_total_range_ms": [
+        14.41264,
+        14.6656085
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.45785750000000003,
+      "compile_prepare_range_ms": [
+        0.4555755,
+        0.4818615
+      ],
+      "compile_execute_ms": 9.564363,
+      "compile_execute_range_ms": [
+        9.30094,
+        10.0663555
+      ],
+      "compile_total_ms": 10.080057499999999,
+      "compile_total_range_ms": [
+        9.745962500000001,
+        10.527839
+      ],
+      "compile_over_main": 0.6615725072964583,
+      "zero-generated_prepare_ms": 0.016196000000000002,
+      "zero-generated_prepare_range_ms": [
+        0.0160405,
+        0.017209500000000003
+      ],
+      "zero-generated_execute_ms": 22.9378955,
+      "zero-generated_execute_range_ms": [
+        22.853918,
+        22.990672500000002
+      ],
+      "zero-generated_total_ms": 22.954241,
+      "zero-generated_total_range_ms": [
+        22.871059000000002,
+        23.0099435
+      ],
+      "zero-generated_over_main": 1.5866274667784093,
+      "zero-native_prepare_ms": 0.016371499999999997,
+      "zero-native_prepare_range_ms": [
+        0.015956,
+        0.016903
+      ],
+      "zero-native_execute_ms": 22.9622445,
+      "zero-native_execute_range_ms": [
+        22.892644,
+        23.048031
+      ],
+      "zero-native_total_ms": 22.9798995,
+      "zero-native_total_range_ms": [
+        22.9081295,
+        23.065278499999998
+      ],
+      "zero-native_over_main": 1.5883117011576526
+    },
+    {
+      "case": "scan",
+      "threads": 4,
+      "main_prepare_ms": 0.0006585,
+      "main_prepare_range_ms": [
+        0.0006284999999999999,
+        0.0006705
+      ],
+      "main_execute_ms": 0.178776,
+      "main_execute_range_ms": [
+        0.17737150000000002,
+        0.1824025
+      ],
+      "main_total_ms": 0.1795025,
+      "main_total_range_ms": [
+        0.178013,
+        0.1830945
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.004487,
+      "compile_prepare_range_ms": [
+        0.0044399999999999995,
+        0.0048355
+      ],
+      "compile_execute_ms": 0.110065,
+      "compile_execute_range_ms": [
+        0.108235,
+        0.11386199999999999
+      ],
+      "compile_total_ms": 0.1150555,
+      "compile_total_range_ms": [
+        0.11354349999999999,
+        0.11901999999999999
+      ],
+      "compile_over_main": 0.6156587013916857,
+      "zero-generated_prepare_ms": 0.005007,
+      "zero-generated_prepare_range_ms": [
+        0.004626,
+        0.005627
+      ],
+      "zero-generated_execute_ms": 0.11302200000000001,
+      "zero-generated_execute_range_ms": [
+        0.1101745,
+        0.11462900000000001
+      ],
+      "zero-generated_total_ms": 0.119142,
+      "zero-generated_total_range_ms": [
+        0.11630299999999999,
+        0.120281
+      ],
+      "zero-generated_over_main": 0.6321989528795813,
+      "zero-native_prepare_ms": 0.0046645,
+      "zero-native_prepare_range_ms": [
+        0.004556,
+        0.004897
+      ],
+      "zero-native_execute_ms": 0.11673800000000001,
+      "zero-native_execute_range_ms": [
+        0.1153795,
+        0.121119
+      ],
+      "zero-native_total_ms": 0.122639,
+      "zero-native_total_range_ms": [
+        0.1200795,
+        0.126698
+      ],
+      "zero-native_over_main": 0.6529847406810758
+    },
+    {
+      "case": "filter_project",
+      "threads": 4,
+      "main_prepare_ms": 0.0040290000000000005,
+      "main_prepare_range_ms": [
+        0.0036515000000000002,
+        0.006049499999999999
+      ],
+      "main_execute_ms": 4.293375000000001,
+      "main_execute_range_ms": [
+        4.116356,
+        4.3020975
+      ],
+      "main_total_ms": 4.298427,
+      "main_total_range_ms": [
+        4.1210305,
+        4.307705
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.41315199999999996,
+      "compile_prepare_range_ms": [
+        0.405946,
+        0.418577
+      ],
+      "compile_execute_ms": 5.641805,
+      "compile_execute_range_ms": [
+        5.394569000000001,
+        5.9072629999999995
+      ],
+      "compile_total_ms": 6.05718,
+      "compile_total_range_ms": [
+        5.8171064999999995,
+        6.336938999999999
+      ],
+      "compile_over_main": 1.3140722624974521,
+      "zero-generated_prepare_ms": 0.025657,
+      "zero-generated_prepare_range_ms": [
+        0.020543,
+        0.027474
+      ],
+      "zero-generated_execute_ms": 6.6421025,
+      "zero-generated_execute_range_ms": [
+        5.8372304999999995,
+        7.201299000000001
+      ],
+      "zero-generated_total_ms": 6.6662954999999995,
+      "zero-generated_total_range_ms": [
+        5.857637,
+        7.227542
+      ],
+      "zero-generated_over_main": 1.5470585495094182,
+      "zero-native_prepare_ms": 0.019077499999999997,
+      "zero-native_prepare_range_ms": [
+        0.018235,
+        0.0214205
+      ],
+      "zero-native_execute_ms": 5.1845475,
+      "zero-native_execute_range_ms": [
+        4.9771325,
+        6.824147999999999
+      ],
+      "zero-native_total_ms": 5.202951499999999,
+      "zero-native_total_range_ms": [
+        4.996015,
+        6.854627499999999
+      ],
+      "zero-native_over_main": 1.2075692200192154
+    },
+    {
+      "case": "arithmetic_chain",
+      "threads": 4,
+      "main_prepare_ms": 0.0070314999999999996,
+      "main_prepare_range_ms": [
+        0.0067209999999999995,
+        0.0071389999999999995
+      ],
+      "main_execute_ms": 16.020528000000002,
+      "main_execute_range_ms": [
+        15.872578,
+        16.090059
+      ],
+      "main_total_ms": 16.027279,
+      "main_total_range_ms": [
+        15.87893,
+        16.096364
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.567952,
+      "compile_prepare_range_ms": [
+        0.5585635,
+        0.575931
+      ],
+      "compile_execute_ms": 5.1628685,
+      "compile_execute_range_ms": [
+        5.0745260000000005,
+        7.255927
+      ],
+      "compile_total_ms": 5.7396935,
+      "compile_total_range_ms": [
+        5.6527769999999995,
+        7.8076205000000005
+      ],
+      "compile_over_main": 0.32226581421036804,
+      "zero-generated_prepare_ms": 0.08932,
+      "zero-generated_prepare_range_ms": [
+        0.068053,
+        0.0956905
+      ],
+      "zero-generated_execute_ms": 36.769087,
+      "zero-generated_execute_range_ms": [
+        36.251338000000004,
+        40.734894
+      ],
+      "zero-generated_total_ms": 36.852809,
+      "zero-generated_total_range_ms": [
+        36.348096999999996,
+        40.799229
+      ],
+      "zero-generated_over_main": 2.2951232943133957,
+      "zero-native_prepare_ms": 0.0751155,
+      "zero-native_prepare_range_ms": [
+        0.0640495,
+        0.0878255
+      ],
+      "zero-native_execute_ms": 25.621602000000003,
+      "zero-native_execute_range_ms": [
+        25.176447,
+        26.126311
+      ],
+      "zero-native_total_ms": 25.699900500000002,
+      "zero-native_total_range_ms": [
+        25.271186999999998,
+        26.197119
+      ],
+      "zero-native_over_main": 1.5992982253768415
+    },
+    {
+      "case": "integer_division",
+      "threads": 4,
+      "main_prepare_ms": 0.007351,
+      "main_prepare_range_ms": [
+        0.0070465,
+        0.0078285
+      ],
+      "main_execute_ms": 17.493057999999998,
+      "main_execute_range_ms": [
+        17.173126000000003,
+        17.5687425
+      ],
+      "main_total_ms": 17.4985715,
+      "main_total_range_ms": [
+        17.181148,
+        17.575618999999996
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.6148375,
+      "compile_prepare_range_ms": [
+        0.6086785,
+        0.6310849999999999
+      ],
+      "compile_execute_ms": 5.7593630000000005,
+      "compile_execute_range_ms": [
+        5.317906,
+        7.5936775
+      ],
+      "compile_total_ms": 6.3691175,
+      "compile_total_range_ms": [
+        5.9336020000000005,
+        8.242094
+      ],
+      "compile_over_main": 0.3292370607814826,
+      "zero-generated_prepare_ms": 0.078369,
+      "zero-generated_prepare_range_ms": [
+        0.069961,
+        0.089202
+      ],
+      "zero-generated_execute_ms": 40.2411685,
+      "zero-generated_execute_range_ms": [
+        39.641322,
+        47.634640000000005
+      ],
+      "zero-generated_total_ms": 40.310535,
+      "zero-generated_total_range_ms": [
+        39.7390195,
+        47.70785450000001
+      ],
+      "zero-generated_over_main": 2.3004078818008837,
+      "zero-native_prepare_ms": 0.07434750000000001,
+      "zero-native_prepare_range_ms": [
+        0.07082000000000001,
+        0.085061
+      ],
+      "zero-native_execute_ms": 29.109252,
+      "zero-native_execute_range_ms": [
+        28.668612,
+        32.51644
+      ],
+      "zero-native_total_ms": 29.190355500000003,
+      "zero-native_total_range_ms": [
+        28.759570500000002,
+        32.597986500000005
+      ],
+      "zero-native_over_main": 1.6640459318204974
+    },
+    {
+      "case": "global_aggregate",
+      "threads": 4,
+      "main_prepare_ms": 0.0029440000000000004,
+      "main_prepare_range_ms": [
+        0.0025835,
+        0.003104
+      ],
+      "main_execute_ms": 0.530462,
+      "main_execute_range_ms": [
+        0.5131190000000001,
+        0.6024909999999999
+      ],
+      "main_total_ms": 0.532969,
+      "main_total_range_ms": [
+        0.5160895000000001,
+        0.6059154999999999
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 1.4694155000000002,
+      "compile_prepare_range_ms": [
+        1.4650884999999998,
+        1.4871750000000001
+      ],
+      "compile_execute_ms": 0.689564,
+      "compile_execute_range_ms": [
+        0.6686825000000001,
+        0.731506
+      ],
+      "compile_total_ms": 2.165422,
+      "compile_total_range_ms": [
+        2.147175,
+        2.1976845000000003
+      ],
+      "compile_over_main": 1.29993100354031,
+      "zero-generated_prepare_ms": 0.016573499999999998,
+      "zero-generated_prepare_range_ms": [
+        0.014838500000000001,
+        0.0215365
+      ],
+      "zero-generated_execute_ms": 1.7883295000000001,
+      "zero-generated_execute_range_ms": [
+        1.751712,
+        1.9072775
+      ],
+      "zero-generated_total_ms": 1.8040159999999998,
+      "zero-generated_total_range_ms": [
+        1.766815,
+        1.932614
+      ],
+      "zero-generated_over_main": 3.3712678759270225,
+      "zero-native_prepare_ms": 0.0169375,
+      "zero-native_prepare_range_ms": [
+        0.0158065,
+        0.0209785
+      ],
+      "zero-native_execute_ms": 1.752447,
+      "zero-native_execute_range_ms": [
+        1.1419765,
+        1.8265075
+      ],
+      "zero-native_total_ms": 1.7680205,
+      "zero-native_total_range_ms": [
+        1.159694,
+        1.8410920000000002
+      ],
+      "zero-native_over_main": 3.3036240107679724
+    },
+    {
+      "case": "grouped_aggregate",
+      "threads": 4,
+      "main_prepare_ms": 0.0032985,
+      "main_prepare_range_ms": [
+        0.0031725,
+        0.003424
+      ],
+      "main_execute_ms": 3.882248,
+      "main_execute_range_ms": [
+        3.8094040000000002,
+        3.9804779999999997
+      ],
+      "main_total_ms": 3.8854035000000002,
+      "main_total_range_ms": [
+        3.812672,
+        3.983978
+      ],
+      "main_over_main": 1.0,
+      "compile_prepare_ms": 0.5087705,
+      "compile_prepare_range_ms": [
+        0.487309,
+        0.5157365
+      ],
+      "compile_execute_ms": 4.6871575,
+      "compile_execute_range_ms": [
+        4.4902915,
+        4.711216
+      ],
+      "compile_total_ms": 5.1902525,
+      "compile_total_range_ms": [
+        4.9854585,
+        5.2234315
+      ],
+      "compile_over_main": 1.2073307784561933,
+      "zero-generated_prepare_ms": 0.023515,
+      "zero-generated_prepare_range_ms": [
+        0.019285999999999998,
+        0.029963
+      ],
+      "zero-generated_execute_ms": 6.3932255,
+      "zero-generated_execute_range_ms": [
+        6.365439,
+        7.815053499999999
+      ],
+      "zero-generated_total_ms": 6.4186165,
+      "zero-generated_total_range_ms": [
+        6.3849635,
+        7.8364665
+      ],
+      "zero-generated_over_main": 1.6467844145969035,
+      "zero-native_prepare_ms": 0.0248875,
+      "zero-native_prepare_range_ms": [
+        0.022032,
+        0.025472
+      ],
+      "zero-native_execute_ms": 7.622481499999999,
+      "zero-native_execute_range_ms": [
+        6.4837405,
+        9.182452
+      ],
+      "zero-native_total_ms": 7.645160499999999,
+      "zero-native_total_range_ms": [
+        6.508015,
+        9.205133
+      ],
+      "zero-native_over_main": 1.9634195187942654
+    }
+  ]
+}

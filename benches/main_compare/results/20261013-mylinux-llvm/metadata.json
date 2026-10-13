@@ -1,0 +1,152 @@
+{
+  "baseline": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a",
+  "current_head": "17c6e141d5665a678361bce77f21fd45d2039f3e",
+  "current_status": "M benches/main_compare/run.py",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2",
+  "machine": "Linux zenotme 6.14.3-arch1-1 #1 SMP PREEMPT_DYNAMIC Sun, 20 Apr 2025 12:38:52 +0000 x86_64 GNU/Linux\nArchitecture:                         x86_64\nCPU op-mode(s):                       32-bit, 64-bit\nAddress sizes:                        46 bits physical, 48 bits virtual\nByte Order:                           Little Endian\nCPU(s):                               28\nOn-line CPU(s) list:                  0-27\nVendor ID:                            GenuineIntel\nModel name:                           Intel(R) Core(TM) i7-14700K\nCPU family:                           6\nModel:                                183\nThread(s) per core:                   2\nCore(s) per socket:                   20\nSocket(s):                            1\nStepping:                             1\nCPU(s) scaling MHz:                   42%\nCPU max MHz:                          5600.0000\nCPU min MHz:                          800.0000\nBogoMIPS:                             6835.20\nFlags:                                fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb intel_pt sha_ni xsaveopt xsavec xgetbv1 xsaves split_lock_detect user_shstk avx_vnni dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp hwp_pkg_req hfi vnmi umip pku ospke waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize pconfig arch_lbr ibt flush_l1d arch_capabilities\nVirtualization:                       VT-x\nL1d cache:                            768 KiB (20 instances)\nL1i cache:                            1 MiB (20 instances)\nL2 cache:                             28 MiB (11 instances)\nL3 cache:                             33 MiB (1 instance)\nNUMA node(s):                         1\nNUMA node0 CPU(s):                    0-27\nVulnerability Gather data sampling:   Not affected\nVulnerability Ghostwrite:             Not affected\nVulnerability Itlb multihit:          Not affected\nVulnerability L1tf:                   Not affected\nVulnerability Mds:                    Not affected\nVulnerability Meltdown:               Not affected\nVulnerability Mmio stale data:        Not affected\nVulnerability Reg file data sampling: Mitigation; Clear Register File\nVulnerability Retbleed:               Not affected\nVulnerability Spec rstack overflow:   Not affected\nVulnerability Spec store bypass:      Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:             Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:             Mitigation; Enhanced / Automatic IBRS; IBPB conditional; RSB filling; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                  Not affected\nVulnerability Tsx async abort:        Not affected\nMemTotal:       65573036 kB\nMemFree:        49166888 kB\nMemAvailable:   60672380 kB\nBuffers:            2620 kB\nCached:         11890268 kB\nSwapCached:         3088 kB\nActive:          6088648 kB\nInactive:        8790876 kB\nActive(anon):    3046556 kB\nInactive(anon):        4 kB\nActive(file):    3042092 kB\nInactive(file):  8790872 kB\nUnevictable:          64 kB\nMlocked:              64 kB\nSwapTotal:      62499836 kB\nSwapFree:       62164380 kB\nZswap:             12288 kB\nZswapped:          53804 kB\nDirty:               760 kB\nWriteback:             0 kB\nAnonPages:       2770392 kB\nMapped:          1941344 kB\nShmem:             60000 kB\nKReclaimable:     402032 kB\nSlab:             706940 kB\nSReclaimable:     402032 kB\nSUnreclaim:       304908 kB\nKernelStack:       15424 kB\nPageTables:        31176 kB\nSecPageTables:         0 kB\nNFS_Unstable:          0 kB\nBounce:                0 kB\nWritebackTmp:          0 kB\nCommitLimit:    95286352 kB\nCommitted_AS:    7532648 kB\nVmallocTotal:   34359738367 kB\nVmallocUsed:      272884 kB\nVmallocChunk:          0 kB\nPercpu:            29344 kB\nHardwareCorrupted:     0 kB\nAnonHugePages:   1878016 kB\nShmemHugePages:        0 kB\nShmemPmdMapped:        0 kB\nFileHugePages:   1122304 kB\nFilePmdMapped:    440320 kB\nCmaTotal:              0 kB\nCmaFree:               0 kB\nUnaccepted:            0 kB\nHugePages_Total:       0\nHugePages_Free:        0\nHugePages_Rsvd:        0\nHugePages_Surp:        0\nHugepagesize:       2048 kB\nHugetlb:               0 kB\nDirectMap4k:     2457404 kB\nDirectMap2M:    20346880 kB\nDirectMap1G:    44040192 kB\n",
+  "args": {
+    "output": "target/mylinux-modes",
+    "rows": 4000000,
+    "samples": 10,
+    "replicas": 3,
+    "resume_build": false,
+    "baseline": "62f8bb97a87a09be8eea4d19ea56c9fa2ced905a"
+  },
+  "builds": {
+    "main": {
+      "source_sha256": "7b4f8deb2b7c554bfb64b85c93860c68c19c49d58e4b96e93f8323f8dc42e002",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "9369891cb3a8d5de7f7d2880b601c30d7e80494558b64dde15779cafc15a8f84",
+      "lock_sha256": "d5775cca00c6034462e8aeb3431f24ac414c9b964187a904d8cbd45f1fc4db3b",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes/main/harness/Cargo.toml",
+        "--features",
+        "main-engine"
+      ],
+      "rustflags": null
+    },
+    "current": {
+      "source_sha256": "e6f694c3a8f12899bdf5720645fea5a7dcdc64e577e01ae3447a7162d894f4c6",
+      "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+      "binary_sha256": "a1fb0c7269d0e8e866db7aff8274cb28031ca14379e08e829eec8eef7ec9afa8",
+      "lock_sha256": "287b1071a113e065c0f76d9e558ee4f7a40bc76bfe660b2973aa25c8c98e94c6",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--manifest-path",
+        "/home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes/current/harness/Cargo.toml"
+      ],
+      "rustflags": null
+    }
+  },
+  "llvm": {
+    "version": "19.1.7",
+    "inkwell": "0.7.1",
+    "optimization": "default<O3> + MCJIT aggressive, host CPU/features",
+    "binary_sha256": "244b9824f0dbcb028b86669a70478eefde2e0ab536d22c79e3eb660152cab1b2",
+    "harness_sha256": "038b41b3ab86f114024a45707f187a1d86395f46a294847d508b64809f7c6583",
+    "lock_sha256": "04a2fded9daeccf915a570579dc868f84e203be49d636616f76928664b10da78",
+    "common_dependency_differences": {},
+    "removed_codegen_only_versions": {
+      "foldhash": [
+        "0.1.5"
+      ],
+      "hashbrown": [
+        "0.15.5",
+        "0.16.1"
+      ]
+    },
+    "common_dependency_names": 105,
+    "source_files_sha256": {
+      "Cargo.lock": "99ad72bb094ef2b0e6badbece7298a8c896497df5fac7292cc138d8a9080ebf0",
+      "Cargo.toml": "331d05b2ed7d2a20d0f810cb482ea9a5549b89aae256df07da73b69ea4dddc56",
+      "src/column.rs": "a592da63e0a08e80ec6b028907f1f45d81f8ef76ba1d62de06648b09134ad0c6",
+      "src/error.rs": "b13dc6a2ff187bd2b93162fc9929dc9b48b0f0a2ba73807970e4658d3ce9df28",
+      "src/exec/aggregate/group_index.rs": "f5cac97bfa7777cc48c27b852b82b53e7f5f788d0a8feca342bd8d881ff9446b",
+      "src/exec/aggregate.rs": "ab48c2672f9b99ef12bc107046a1538ba685615e8c9e05642d9224c566367ded",
+      "src/exec/exchange.rs": "d1e186cc5142d1cbf50b683a8f8be59cfb384be6795e356314c73bb70212631b",
+      "src/exec/mod.rs": "db53ccdc0bdad13e840a79c8778ab19f21b1a33bb151b0045335a774a91d5f7f",
+      "src/exec/scan.rs": "12b0d9d4941abc18aac28e038ea68fb3d184ca8f2f4fecca9b46aedafbc58ae7",
+      "src/expr/agg/accumulator.rs": "0d3d8f753acddaa5f46e28a136c23eeca8fd8d71c5d6573ce20ff9ddcf25afab",
+      "src/expr/agg/aggregate.rs": "fcb5a6f5e6a22cea1a220e79cb1521a11f71d1025a4fb6dea524c46a23067a62",
+      "src/expr/agg/mod.rs": "b2bef20feb2ea6261b7524284cfcbc5455e0853ef414c66a1bcc3bcd6757682e",
+      "src/expr/agg/test_support.rs": "f952a44dce83efc155455834798ed060766dbb11504674330890c53ff5317bcf",
+      "src/expr/agg/tests/agg_optimized.rs": "6ec9a6c885be000edb44f3f0bf6c2240057d0b9b7cc83e326f5fea27cc967888",
+      "src/expr/agg/tests/aggregate_compatibility.rs": "547ffdd0d2f59f53cd925b0cb3dfe278bdc60b51317c2d7ee5ff1f2751bb96d8",
+      "src/expr/agg/tests/aggregate_hotloop.rs": "423a0cb8790e169bcffef25fad68d002bf26e8f63692645961ca8f58a0b93ae3",
+      "src/expr/mod.rs": "593e3158d2e3ddf6fccb7c51586e99645c4b318edf884a721ff81fbb094c7e50",
+      "src/expr/scalar/case.rs": "c8d2ab62d7cf0662aab67d57c959fc397592ef2471bfe647a39960eafbbc5f5a",
+      "src/expr/scalar/cast.rs": "e852e3c74ff4a40351e0b202e98b0ee997d72a122c9267dce2dfbff47f25d9ca",
+      "src/expr/scalar/coalesce.rs": "9eeaac2b7146354977f39afd764f06472e67651d3301348cd62cf67165cea56c",
+      "src/expr/scalar/conjunction.rs": "0c033a3755594afb44d7bf0b342adcf43e2869c43317eab0dcc6733e8cb1ab98",
+      "src/expr/scalar/constant.rs": "a9a932b87b299e62ca0566d961ea57055edca41b9aefcc59271880ad083452dc",
+      "src/expr/scalar/function.rs": "75ad2c602ed6cfc1316fcc009c7d4d6a71566422e5e68b0200c7a0c8c68e4a06",
+      "src/expr/scalar/mod.rs": "ad390fb91e8b32f2458a081f0b2c130f9679c81b13e861186941ddd3c1f00260",
+      "src/expr/scalar/not.rs": "0c1edd7d51621af0dc75a2d52f2e01c56f58990fdae7a469f7ce3dc057480aea",
+      "src/expr/scalar/reference.rs": "ccc09d99f902486abd874e9f1de90b985146a7505193f330e02d5f1c602fe026",
+      "src/expr/scalar/test_support.rs": "91a51f8aa12278e5c33f3681c81b6945c697b87a964f9996ce15b149d868b4c5",
+      "src/kernel/aggregation.rs": "7d3d436c8f2efa72d1e000b9e9fa2f1ca69ff9fb1a137d57bff6af917d25cee1",
+      "src/kernel/builder.rs": "89a35fd47a59cb5f939ebd2605591417effd5076063d3580b7339b95e9a393d1",
+      "src/kernel/io.rs": "d56ae398a2de86202da8c0c3481095650b001307e10675e8cefe73cd653b3011",
+      "src/kernel/jit/cast.rs": "bfc368bb3ee04dc17751bb309523a8440b76c093aca6e03f6e734bc23024bd06",
+      "src/kernel/jit/emit.rs": "e3261407b797c93ba225d753ae2e89058a638d6cd889f503fd1bf5e2cb4b3831",
+      "src/kernel/jit/kernel.rs": "00ecc3bc8a1cba6bab0603d9de003338b2a291aed1c2376f0d7d6c233bba97f0",
+      "src/kernel/jit/llvm.rs": "81ba24c6f2261bc219e7ac4e910e54cb3c3af66469cbd676c13a30d72b399e3c",
+      "src/kernel/jit/mod.rs": "7fda70c6f39d7987975c38751063fc5ac2a66b426c25f164ceee2e79d08d1d86",
+      "src/kernel/jit/reduce.rs": "1bccbf22779ca1c8bd9d940bb9bdf04ec22229b3ec4adc43de56167a90d6102b",
+      "src/kernel/lower.rs": "563fd5729795d49492950f3379d20e3c899af4e48b6a0896015043787947373e",
+      "src/kernel/mod.rs": "344e1d4796919ea4e47da10c350ca972fd5ac8dbc281cb423578602f21de73f1",
+      "src/kernel/model.rs": "f2e47462d9abf0a9569e95063484aa2e037482ed6bd007e05409e133ea913d52",
+      "src/kernel/plan.rs": "72421fe017f292ac995dc3a474a72568e58890b32932285872877da01d51aae0",
+      "src/kernel/program.rs": "3f01180a0d461345f4d678f791cade1500b4fab65aaf57494862dec833d25a17",
+      "src/kernel/runtime.rs": "5a8640cf26ac6bcd4c89104b27917f90ea82e9bebe651232e76c31d6b27e0f25",
+      "src/kernel/scalar.rs": "b2ffc3208419c1fde52431b795bf2a947cf251fe1c2a56ee4729b9963fc60ac1",
+      "src/kernel/state.rs": "47c4ac5f8340a62f17cd9957d0593339a08ea13c889b29bed789b38d53710660",
+      "src/kernel/vector/functions.rs": "1dd4bf252a3d5deec82a2a896e9e44a0eb4d455ce6a7c3518e24b977fa042349",
+      "src/kernel/vector/mod.rs": "c0c40e8125e17162fccdc3b5df6348610e66de485467502c66ad26297d630ced",
+      "src/lib.rs": "40a4e2fcb37b24ff185fc9ab0fbf0a7dc94cf4c62e1db8b33c302abd633ea3d1",
+      "src/operator/aggregate.rs": "2029ad11c35b75ec50d2a4dcf4f3c62848af8342779cdcf6b42409ebb70d333b",
+      "src/operator/exchange/mod.rs": "152d8b659388b03254393f76ab728781476cad0bd4d19576dd854142fe8c993f",
+      "src/operator/exchange/service.rs": "cae387158cf0a6bb6207aa3c94fd4ddcdd495ede3b85ed6c5ca778c4a1defd62",
+      "src/operator/filter.rs": "2df0584b56e8e77e1ce83da0c77116130bc4cbf42e2c7ebdd94780c50c027503",
+      "src/operator/mod.rs": "cec7db97ee91d72d70b17e8432e514f0ea0dd333a29596e0ddc6a26002c8dfab",
+      "src/operator/project.rs": "27dfef07488f5a1b7d0ae06900990b7356ebde98b2afd601061fc34904da534b",
+      "src/operator/scan/channel.rs": "d2402a6bf16ea191a5c94d7148e02ee89bf3e2450822eeb6f7724e84b65940ed",
+      "src/operator/scan/mod.rs": "d52f9591dd8babc65e120cca6815176ede709446b9c4a78bccd8f5953223c205",
+      "src/operator/scan/storage.rs": "4b7ff635d237704a2b29a56d346272c3be1b62049768dea68281a97aa3c4e617",
+      "src/pipeline/build.rs": "f00f052ce57b65dddf199be9db53f96c2fbf205c82e3c92c720d66595c527397",
+      "src/pipeline/execution.rs": "77282757433e00429e781c67df172051e6f6fde96ae66b99cd8619f31796dbf7",
+      "src/pipeline/graph.rs": "67d6f3bfa5d9b34cf0bfa6fa4b4f42d34a8a4888c7d9bfc77e846bdd06493ba8",
+      "src/pipeline/mod.rs": "9568fecb6234df871ba6545a244f3264b6c6c13191d46ffc3c019e75c118dca9"
+    }
+  },
+  "confirmation": {
+    "rows": 4000000,
+    "samples": 20,
+    "replicas": 5,
+    "affinity": {
+      "1": [
+        0
+      ],
+      "4": [
+        0,
+        2,
+        4,
+        6
+      ]
+    },
+    "load_before": [
+      1.45654296875,
+      1.64599609375,
+      1.21630859375
+    ],
+    "order": "rotate variants per replica; alternate thread-count order",
+    "started_unix": 1791927537.7469893,
+    "source_run": "/home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes"
+  }
+}

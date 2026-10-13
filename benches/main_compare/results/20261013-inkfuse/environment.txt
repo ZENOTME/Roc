@@ -1,0 +1,16 @@
+Tue Oct 13 22:06:52 UTC 2026
+Linux zenotme 6.14.3-arch1-1 #1 SMP PREEMPT_DYNAMIC Sun, 20 Apr 2025 12:38:52 +0000 x86_64 GNU/Linux
+powersave
+Ubuntu clang version 14.0.0-1ubuntu1.1
+Target: x86_64-pc-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+555377c1d5ef9cf8f09682cc2b31549d797ef4cdb6d57f64187da777f0c28254  /work/build/libinkfuse.a
+89f8229c070d6716bce3c82cb95357351039ed7a3487d1fadfaf64cd020b9d19  /tmp/xxhash_static.o
+224fba8d8050bc89150ba4ba39d90245452c9904ded9411e2e5fdb08a3535263  /tmp/ExternRuntime.cpp.o
+eb21e4998a181fd920fc4da12cd1d13b82003a8af7c0892a3baa3f20adb048e4  /tmp/HashTables.cpp.o
+0c185769732f4b0a1746d2649c1e78799dd15a9c9312bf634a4d477c08bb2996  /tmp/NewHashTables.cpp.o
+8d750c555c63637462bfbb092d3d25ee2404172321d0db0b9757f7a73ea3cf3e  /tmp/MemoryRuntime.cpp.o
+55d0f9a711a76c36395662c965a86b09ec1d25fe15f66221181958deefe9d1e2  /tmp/TupleMaterializer.cpp.o
+04627c1f7e409a825f0fa83e22761212898dc81083c7ceea0e0f202ffd50e494  /source/results-20261013/baseline
+dbf082fa53b64fdfb852965aa93e7a4c903c7b3e9ea3df66c45d5cb72078facd  /source/results-20261013/chain

@@ -1,0 +1,6 @@
+scan threads=4 prepare=0.001ms execute=0.163ms
+filter_project threads=4 prepare=0.006ms execute=4.366ms
+arithmetic_chain threads=4 prepare=0.006ms execute=16.134ms
+integer_division threads=4 prepare=0.007ms execute=16.905ms
+global_aggregate threads=4 prepare=0.003ms execute=0.531ms
+grouped_aggregate threads=4 prepare=0.003ms execute=3.986ms

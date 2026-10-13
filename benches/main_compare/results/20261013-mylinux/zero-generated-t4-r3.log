@@ -1,0 +1,7 @@
+prewarmed 264 kernels in 30.095ms
+scan threads=4 prepare=0.005ms execute=0.120ms
+filter_project threads=4 prepare=0.020ms execute=6.647ms
+arithmetic_chain threads=4 prepare=0.067ms execute=37.215ms
+integer_division threads=4 prepare=0.079ms execute=40.875ms
+global_aggregate threads=4 prepare=0.017ms execute=1.787ms
+grouped_aggregate threads=4 prepare=0.030ms execute=6.321ms

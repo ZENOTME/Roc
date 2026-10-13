@@ -1,0 +1,32 @@
+{
+  "upstream_commit": "8b6b31b01da0a4e79704d528e464f7da760d8333",
+  "host": "mylinux",
+  "container": "inkfuse-bench-20261010, Ubuntu 22.04",
+  "worker_threads": 1,
+  "worker_affinity": "InkFuse worker 0 uses logical CPU 0; Roc entire process taskset CPU 0",
+  "cpu": "Intel Core i7-14700K",
+  "governor": "powersave, unchanged",
+  "inkfuse_compiler": "Clang 14, -O3 -march=native; interpreter linked with runtime bitcode using LTO",
+  "roc_compiler": "LLVM 19.1.7 through Inkwell 0.7.1; Rust 1.95.0; existing experiment code unchanged",
+  "baseline_provenance": "300 upstream files hashed; only CMakeLists.txt and QueryExecutor.cpp/.h differ. Differences add benchmark target and wait-for-compilation helper. All execution, codegen, suboperator and runtime implementations match upstream. Original runtime bitcode restored with inkfuse_install_runtime before running.",
+  "timing": [
+    "Resident input. Input creation/loading, fragment startup, physical-plan construction and QueryControlBlock creation excluded.",
+    "prepare_ms: construct StepwiseExecutor, prepareQuery, and for full compilation join all compiler jobs. This recompiles each query and does not imply a query cache exists.",
+    "elapsed_ms: runQuery and executor destruction; includes runtime state initialization, pipeline scheduling and runtime tasks. Interpreted fragment runner setup is deferred by upstream to runQuery and is therefore included in elapsed_ms.",
+    "Zero compile means no query-specific compilation after fragment prewarm. InkFuse fragment startup measured about 3.5 seconds and is excluded from query timings.",
+    "Warmup attaches output stream for correctness validation; timed runs materialize chunks and count rows but do not print results.",
+    "TPC-H initial run retained; confirmation is reported because a separate harness was built while the initial run was in progress. Confirmation, chain run and Roc diagnostic runs had no concurrent benchmark/build started by this task.",
+    "TPC-H: 1 validation warmup per mode/query, 7 measured samples, rotated mode order. Two process runs; confirmation is primary. Single-thread only.",
+    "Synthetic: 4,000,000 signed Int64, non-NULL values (i % 1000) - 500, chain of x + 1 + ... + N, N in 0/1/16/64. 1 all-row validation warmup per mode/depth and 15 timed samples, alternating modes.",
+    "Roc diagnostic: 3 independent processes per mode/nullability, 20 samples each, report median of per-process medians. Existing arithmetic_chain workload, all-row validation and duplicate/missing-ID checks retained. Nonnullable changes input schema, expression nullability and data; overflow checks remain."
+  ],
+  "comparability_limits": [
+    "TPC-H uses upstream hand-built relational plans and simplified schema; this is not an official TPC-H result. Q13 excluded because previous independent validation found upstream wrong results. This run validates mode-to-mode numeric output agreement, not an independent SQL implementation.",
+    "InkFuse arithmetic uses unchecked C signed addition and no NULL values. Roc preserves checked overflow; its original data has one NULL in 17 rows.",
+    "InkFuse Print materializes and reuses 512-row output buffers and retains no full result. Roc collects Arrow RecordBatches including ID plus result and retains output until execution ends. Cross-engine absolute times are not equivalent-work comparisons.",
+    "Roc zero execution window is 1024 rows inside 8192-row Arrow batches, stores intermediate variables in u64 arrays (including Boolean flags). InkFuse uses typed 512-row columns.",
+    "Roc nullable/nonnullable ablation measures NULL handling plus changes enabled by non-null data/schema; it does not isolate only the And kernels.",
+    "Machine powersave governor and incidental external activity can alter clock speed. Current paired Roc absolute timings differ from the previous experiment; do not mix them as a controlled before/after."
+  ],
+  "correctness": "All 16 TPC-H query/run mode comparisons matched (floating relative tolerance 1e-8, absolute 1e-7). All eight InkFuse chain mode/depth warmups independently validated every one of 4M values. Roc warmups use existing independent value/NULL/ID checks."
+}

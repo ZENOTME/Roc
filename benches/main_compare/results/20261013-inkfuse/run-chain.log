@@ -1,0 +1,9 @@
+fragment_startup_ms=3508.02
+validated depth=0 fused=0 rows=4000000
+validated depth=0 fused=1 rows=4000000
+validated depth=1 fused=0 rows=4000000
+validated depth=1 fused=1 rows=4000000
+validated depth=16 fused=0 rows=4000000
+validated depth=16 fused=1 rows=4000000
+validated depth=64 fused=0 rows=4000000
+validated depth=64 fused=1 rows=4000000

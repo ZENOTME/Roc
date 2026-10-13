@@ -1,0 +1,1203 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index b10466a..edcbf74 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -82,12 +82,6 @@ version = "1.0.104"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+ 
+-[[package]]
+-name = "arbitrary"
+-version = "1.5.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+-
+ [[package]]
+ name = "arrow"
+ version = "59.3.0"
+@@ -363,12 +357,6 @@ dependencies = [
+  "num-traits",
+ ]
+ 
+-[[package]]
+-name = "bitflags"
+-version = "1.3.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
+-
+ [[package]]
+ name = "bitflags"
+ version = "2.13.2"
+@@ -401,9 +389,6 @@ name = "bumpalo"
+ version = "3.20.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+-dependencies = [
+- "allocator-api2",
+-]
+ 
+ [[package]]
+ name = "bytes"
+@@ -544,172 +529,6 @@ version = "0.8.7"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
+ 
+-[[package]]
+-name = "cranelift-assembler-x64"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4b242b4c3675139f52f0b55624fb92571551a344305c5998f55ad20fa527bc55"
+-dependencies = [
+- "cranelift-assembler-x64-meta",
+-]
+-
+-[[package]]
+-name = "cranelift-assembler-x64-meta"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "499715f19799219f32641b14f2a162f91e50bc1b61c2d2184c2be971716f5c56"
+-dependencies = [
+- "cranelift-srcgen",
+-]
+-
+-[[package]]
+-name = "cranelift-bforest"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1ebca2ea7c62c56feb88a5b23ec380460fe6d7c18134520f6ddf4bfa35cbea68"
+-dependencies = [
+- "cranelift-entity",
+-]
+-
+-[[package]]
+-name = "cranelift-bitset"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fe11f154b62d7421d909503a746e89995393b1b71926e6f12b08a2076396d7fb"
+-dependencies = [
+- "wasmtime-internal-core",
+-]
+-
+-[[package]]
+-name = "cranelift-codegen"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1f2d0da3d51979dc0183fac3076a535477eab794716b063143ecb16632408664"
+-dependencies = [
+- "bumpalo",
+- "cranelift-assembler-x64",
+- "cranelift-bforest",
+- "cranelift-bitset",
+- "cranelift-codegen-meta",
+- "cranelift-codegen-shared",
+- "cranelift-control",
+- "cranelift-entity",
+- "cranelift-isle",
+- "gimli",
+- "hashbrown 0.15.5",
+- "libm",
+- "log",
+- "regalloc2",
+- "rustc-hash",
+- "serde",
+- "smallvec",
+- "target-lexicon",
+- "wasmtime-internal-core",
+-]
+-
+-[[package]]
+-name = "cranelift-codegen-meta"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "483b2c94a1b7f6fba0714387ba34ca56d114b2214a80be018acbb2ed40e09a1e"
+-dependencies = [
+- "cranelift-assembler-x64-meta",
+- "cranelift-codegen-shared",
+- "cranelift-srcgen",
+- "heck",
+-]
+-
+-[[package]]
+-name = "cranelift-codegen-shared"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c4aae718c336a52d90d4ebe9a2d8c3cf0906a4bee78f0e6867e777eebbe554fe"
+-
+-[[package]]
+-name = "cranelift-control"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "a18e94519070dc56cddb71906a08cea6a28a1d7c58ed501b88f273fa6b45fa07"
+-dependencies = [
+- "arbitrary",
+-]
+-
+-[[package]]
+-name = "cranelift-entity"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e0ab4e0eff1045ff2f5ddd8195bf3c97d7b5ef9b780cb044e0cce76e4d352057"
+-dependencies = [
+- "cranelift-bitset",
+- "wasmtime-internal-core",
+-]
+-
+-[[package]]
+-name = "cranelift-frontend"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e7645a236e1ec49e660f09ec9fa979a1c5d0b612c419db7610573d4d58a03b7c"
+-dependencies = [
+- "cranelift-codegen",
+- "log",
+- "smallvec",
+- "target-lexicon",
+-]
+-
+-[[package]]
+-name = "cranelift-isle"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "57e0b4a1a0ea01cc19084ff01aaeb640dfe22905d47d83037a419b81ba587ed0"
+-
+-[[package]]
+-name = "cranelift-jit"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c68c397bbf844f50828b66c315844331404d89e93592515d56837cb9b2b97cf3"
+-dependencies = [
+- "anyhow",
+- "cranelift-codegen",
+- "cranelift-control",
+- "cranelift-entity",
+- "cranelift-module",
+- "cranelift-native",
+- "libc",
+- "log",
+- "region",
+- "target-lexicon",
+- "wasmtime-internal-jit-icache-coherence",
+- "windows-sys 0.61.2",
+-]
+-
+-[[package]]
+-name = "cranelift-module"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8a58a82190e7ecd36b8d55880eadff59f045d20a491dacfaecc11aac24453092"
+-dependencies = [
+- "anyhow",
+- "cranelift-codegen",
+- "cranelift-control",
+-]
+-
+-[[package]]
+-name = "cranelift-native"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7bdec40b396eb630ecfb0e7a81766d7287f464a7631b9eb5862f7711f1020012"
+-dependencies = [
+- "cranelift-codegen",
+- "libc",
+- "target-lexicon",
+-]
+-
+-[[package]]
+-name = "cranelift-srcgen"
+-version = "0.129.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4a1a001a9dc4557d9e2be324bc932621c0aa9bf33b74dfefa2338f0bf8913329"
+-
+ [[package]]
+ name = "criterion"
+ version = "0.8.2"
+@@ -1488,7 +1307,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.61.2",
++ "windows-sys",
+ ]
+ 
+ [[package]]
+@@ -1515,7 +1334,7 @@ version = "25.12.19"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
+ dependencies = [
+- "bitflags 2.13.2",
++ "bitflags",
+  "rustc_version",
+ ]
+ 
+@@ -1528,12 +1347,6 @@ dependencies = [
+  "zlib-rs",
+ ]
+ 
+-[[package]]
+-name = "fnv"
+-version = "1.0.7"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+-
+ [[package]]
+ name = "foldhash"
+ version = "0.1.5"
+@@ -1677,18 +1490,6 @@ dependencies = [
+  "r-efi 6.0.0",
+ ]
+ 
+-[[package]]
+-name = "gimli"
+-version = "0.33.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
+-dependencies = [
+- "fnv",
+- "hashbrown 0.16.1",
+- "indexmap",
+- "stable_deref_trait",
+-]
+-
+ [[package]]
+ name = "glob"
+ version = "0.3.4"
+@@ -1722,12 +1523,6 @@ dependencies = [
+  "foldhash 0.1.5",
+ ]
+ 
+-[[package]]
+-name = "hashbrown"
+-version = "0.16.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+-
+ [[package]]
+ name = "hashbrown"
+ version = "0.17.1"
+@@ -1739,12 +1534,6 @@ dependencies = [
+  "foldhash 0.2.0",
+ ]
+ 
+-[[package]]
+-name = "heck"
+-version = "0.5.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+-
+ [[package]]
+ name = "hex"
+ version = "0.4.3"
+@@ -1905,6 +1694,30 @@ dependencies = [
+  "hashbrown 0.17.1",
+ ]
+ 
++[[package]]
++name = "inkwell"
++version = "0.7.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "39457e8611219cf690f862a470575f5c06862910d03ea3c3b187ad7abc44b4e2"
++dependencies = [
++ "inkwell_internals",
++ "libc",
++ "llvm-sys",
++ "once_cell",
++ "thiserror",
++]
++
++[[package]]
++name = "inkwell_internals"
++version = "0.12.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad9a7dd586b00f2b20e0b9ae3c6faa351fbfd56d15d63bbce35b13bece682eda"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "itertools"
+ version = "0.13.0"
+@@ -1959,6 +1772,12 @@ dependencies = [
+  "wasm-bindgen",
+ ]
+ 
++[[package]]
++name = "lazy_static"
++version = "1.5.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
++
+ [[package]]
+ name = "lexical-core"
+ version = "1.0.6"
+@@ -2040,6 +1859,20 @@ version = "0.8.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+ 
++[[package]]
++name = "llvm-sys"
++version = "191.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "50201c30aee9d8176a1b1c3431f4b610333fe78d69474804e5f1d6d00d78681e"
++dependencies = [
++ "anyhow",
++ "cc",
++ "lazy_static",
++ "libc",
++ "regex-lite",
++ "semver",
++]
++
+ [[package]]
+ name = "lock_api"
+ version = "0.4.14"
+@@ -2064,15 +1897,6 @@ dependencies = [
+  "twox-hash",
+ ]
+ 
+-[[package]]
+-name = "mach2"
+-version = "0.4.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
+-dependencies = [
+- "libc",
+-]
+-
+ [[package]]
+ name = "memchr"
+ version = "2.8.3"
+@@ -2403,21 +2227,7 @@ version = "0.5.18"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+ dependencies = [
+- "bitflags 2.13.2",
+-]
+-
+-[[package]]
+-name = "regalloc2"
+-version = "0.13.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "08effbc1fa53aaebff69521a5c05640523fab037b34a4a2c109506bc938246fa"
+-dependencies = [
+- "allocator-api2",
+- "bumpalo",
+- "hashbrown 0.15.5",
+- "log",
+- "rustc-hash",
+- "smallvec",
++ "bitflags",
+ ]
+ 
+ [[package]]
+@@ -2444,22 +2254,16 @@ dependencies = [
+ ]
+ 
+ [[package]]
+-name = "regex-syntax"
+-version = "0.8.11"
++name = "regex-lite"
++version = "0.1.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
++checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+ 
+ [[package]]
+-name = "region"
+-version = "3.0.2"
++name = "regex-syntax"
++version = "0.8.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e6b6ebd13bc009aef9cd476c1310d49ac354d36e240cf1bd753290f3dc7199a7"
+-dependencies = [
+- "bitflags 1.3.2",
+- "libc",
+- "mach2",
+- "windows-sys 0.52.0",
+-]
++checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+ 
+ [[package]]
+ name = "roc"
+@@ -2470,13 +2274,10 @@ dependencies = [
+  "arrow-buffer",
+  "arrow-schema",
+  "asyncband",
+- "cranelift-codegen",
+- "cranelift-frontend",
+- "cranelift-jit",
+- "cranelift-module",
+  "criterion",
+  "foldhash 0.2.0",
+  "futures",
++ "inkwell",
+  "rayon",
+  "thiserror",
+  "tokio",
+@@ -2497,12 +2298,6 @@ dependencies = [
+  "tokio",
+ ]
+ 
+-[[package]]
+-name = "rustc-hash"
+-version = "2.1.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+-
+ [[package]]
+ name = "rustc_version"
+ version = "0.4.1"
+@@ -2518,11 +2313,11 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+ dependencies = [
+- "bitflags 2.13.2",
++ "bitflags",
+  "errno",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.61.2",
++ "windows-sys",
+ ]
+ 
+ [[package]]
+@@ -2704,12 +2499,6 @@ dependencies = [
+  "syn 3.0.6",
+ ]
+ 
+-[[package]]
+-name = "target-lexicon"
+-version = "0.13.5"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+-
+ [[package]]
+ name = "tempfile"
+ version = "3.27.0"
+@@ -2720,7 +2509,7 @@ dependencies = [
+  "getrandom 0.4.3",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.61.2",
++ "windows-sys",
+ ]
+ 
+ [[package]]
+@@ -2990,27 +2779,6 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
+-[[package]]
+-name = "wasmtime-internal-core"
+-version = "42.0.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "be7c68311d6220c20cefdf334e0c8021e16a050383c67edc5be42e5661ddf265"
+-dependencies = [
+- "libm",
+-]
+-
+-[[package]]
+-name = "wasmtime-internal-jit-icache-coherence"
+-version = "42.0.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f52c0779e711777b915d017b3f54049e658057a77df99e0e7958406b3c5d7d07"
+-dependencies = [
+- "cfg-if",
+- "libc",
+- "wasmtime-internal-core",
+- "windows-sys 0.61.2",
+-]
+-
+ [[package]]
+ name = "web-time"
+ version = "1.1.0"
+@@ -3043,7 +2811,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys",
+ ]
+ 
+ [[package]]
+@@ -3111,15 +2879,6 @@ dependencies = [
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows-sys"
+-version = "0.52.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+-dependencies = [
+- "windows-targets",
+-]
+-
+ [[package]]
+ name = "windows-sys"
+ version = "0.61.2"
+@@ -3129,70 +2888,6 @@ dependencies = [
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows-targets"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
+-dependencies = [
+- "windows_aarch64_gnullvm",
+- "windows_aarch64_msvc",
+- "windows_i686_gnu",
+- "windows_i686_gnullvm",
+- "windows_i686_msvc",
+- "windows_x86_64_gnu",
+- "windows_x86_64_gnullvm",
+- "windows_x86_64_msvc",
+-]
+-
+-[[package]]
+-name = "windows_aarch64_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+-
+-[[package]]
+-name = "windows_aarch64_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+-
+-[[package]]
+-name = "windows_i686_gnu"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
+-
+-[[package]]
+-name = "windows_i686_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+-
+-[[package]]
+-name = "windows_i686_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+-
+-[[package]]
+-name = "windows_x86_64_gnu"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+-
+-[[package]]
+-name = "windows_x86_64_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+-
+-[[package]]
+-name = "windows_x86_64_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+-
+ [[package]]
+ name = "wit-bindgen"
+ version = "0.57.1"
+diff --git a/Cargo.toml b/Cargo.toml
+index 9238fee..7c58dfa 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -33,10 +33,7 @@ futures = "0.3"
+ foldhash = "0.2"
+ thiserror = "2"
+ rayon = "1.11"
+-cranelift-codegen = { version = "0.129.1" }
+-cranelift-frontend = { version = "0.129.1" }
+-cranelift-jit = { version = "0.129.1" }
+-cranelift-module = { version = "0.129.1" }
++inkwell = { version = "=0.7.1", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86", "target-aarch64"] }
+ 
+ [features]
+ default = ["jit"]
+diff --git a/README.md b/README.md
+index 76e7267..5cf7ba7 100644
+--- a/README.md
++++ b/README.md
+@@ -56,13 +56,13 @@ Each pipeline becomes one `Program`, in one of two execution modes chosen when
+ the pipeline graph is built:
+ 
+ - `ExecutionMode::Compile` (the default) fuses the whole graph into one generated
+-  Cranelift row loop: Filter opens a nested `if`, CASE/COALESCE emit balanced
++  LLVM row loop: Filter opens a nested `if`, CASE/COALESCE emit balanced
+   branches, Count/Sum updates are inlined and global integer reductions lower to
+   SIMD. Compilation happens during graph construction.
+ - `ExecutionMode::ZeroCompile(library)` generates no code for the pipeline. Each
+   kernel binds a precompiled function and runs over windows of 1024 rows in plan
+   order; a Filter domain is a selection vector of root rows. With
+-  `KernelLibrary::Generated`, a Call runs Cranelift code generated once per
++  `KernelLibrary::Generated`, a Call runs LLVM code generated once per
+   signature with the instruction selection of fused programs and cached for the
+   life of the process; `prewarm_kernels()` generates every signature up front, and
+   a miss generates its signature when the program is prepared. With
+@@ -94,7 +94,7 @@ cargo test --all-targets
+ ```
+ 
+ `PipelineGraph::explain()` prints each pipeline's kernel graph and
+-`Program::generated_ir()` the Cranelift IR of a compiled program. String parsing
++`Program::generated_ir()` the optimized LLVM IR of a compiled program. String parsing
+ and formatting and hash-table or aggregate state operations use scalar runtime
+ functions with bound signatures. Unsupported signatures fail when the program
+ is built; there is no interpreter fallback. Execution polls cancellation and
+@@ -119,6 +119,21 @@ Run the fixed-condition CPU benchmark (preparation and execution reported separa
+ cargo run --release --features jit --example vector_program_bench
+ ```
+ 
++This experimental branch uses Inkwell 0.7.1 with LLVM 19.1 for all generated
++code, including cached kernels and specialized reductions. Install the LLVM 19
++development tools and shared library, then set `LLVM_SYS_191_PREFIX` to the
++installation prefix if `llvm-config` is not on PATH. For example:
++
++```sh
++LLVM_SYS_191_PREFIX=/path/to/llvm19 cargo test --locked -p roc
++```
++
++Generated modules are verified, optimized with LLVM's `default<O3>` pipeline
++for the host CPU/features, verified again, and finalized with MCJIT at aggressive
++optimization. No fast-math or unchecked-overflow flags are enabled. The generated
++kernel library pays this cost once at prewarm/cache-miss time; fused programs pay
++it during each graph construction. Native Rust kernels are unchanged.
++
+ The benchmark separates compilation from execution and checks results before timing.
+ It measures compute loops, not storage, scheduling, or a DuckDB comparison.
+ JIT speedups depend on the workload; allocation, output materialization,
+diff --git a/benches/main_compare/run.py b/benches/main_compare/run.py
+index 26c6c4e..beed312 100644
+--- a/benches/main_compare/run.py
++++ b/benches/main_compare/run.py
+@@ -8,11 +8,17 @@ Preparation includes operator construction, graph lowering and JIT compilation.
+ Execution includes state initialization, scheduling, all output collection and cleanup.
+ Input generation, full correctness checking and output deallocation are excluded.
+ """
+-import argparse, hashlib, json, os, pathlib, re, shutil, statistics, subprocess, tarfile, time
++import argparse, hashlib, json, os, pathlib, platform, re, shutil, statistics, subprocess, tarfile, time
+ ROOT = pathlib.Path(__file__).resolve().parents[2]
+ MODES = ['compile', 'zero-generated', 'zero-native']
+ def command(args, **kw):
+     return subprocess.check_output(args, cwd=ROOT, **kw).decode().strip()
++def machine_info():
++    if platform.system() == 'Darwin':
++        return command(['sysctl','-n','machdep.cpu.brand_string','hw.memsize','hw.physicalcpu'])
++    if platform.system() == 'Linux':
++        return command(['uname','-a']) + '\n' + command(['lscpu']) + '\n' + pathlib.Path('/proc/meminfo').read_text()
++    return platform.platform()
+ def digest(path):
+     return hashlib.sha256(path.read_bytes()).hexdigest()
+ def snapshot_hash(path):
+@@ -33,7 +39,7 @@ def main():
+     if min(a.rows, a.samples, a.replicas) <= 0: p.error('rows, samples, replicas must be positive')
+     out = (ROOT / a.output).resolve(); out.mkdir(parents=True, exist_ok=a.resume_build)
+     if any(out.glob('*-t*-r*.json')): raise RuntimeError('refusing to overwrite measurements')
+-    metadata = {'baseline':command(['git','rev-parse',a.baseline]), 'current_head':command(['git','rev-parse','HEAD']), 'current_status':command(['git','status','--short']), 'rustc':command(['rustc','-Vv']), 'machine':command(['sysctl','-n','machdep.cpu.brand_string','hw.memsize','hw.physicalcpu']), 'args':vars(a), 'builds':{}}
++    metadata = {'baseline':command(['git','rev-parse',a.baseline]), 'current_head':command(['git','rev-parse','HEAD']), 'current_status':command(['git','status','--short']), 'rustc':command(['rustc','-Vv']), 'machine':machine_info(), 'args':vars(a), 'builds':{}}
+     (out/'current.patch').write_bytes(subprocess.check_output(['git','diff','--binary','HEAD'],cwd=ROOT))
+     binaries = {}
+     for label in ['main','current']:
+diff --git a/src/kernel/jit/cast.rs b/src/kernel/jit/cast.rs
+index 84a8095..ebc04d5 100644
+--- a/src/kernel/jit/cast.rs
++++ b/src/kernel/jit/cast.rs
+@@ -14,8 +14,8 @@
+ 
+ //! Numeric and Boolean conversions. Returns `(value, invalid)`; invalid marks
+ //! out-of-range and NaN inputs, and the value is then unspecified but total.
++use super::llvm::FloatCC;
+ use super::*;
+-use cranelift_codegen::ir::condcodes::FloatCC;
+ 
+ pub(super) fn emit(
+     c: &mut Compiler<'_, '_>,
+@@ -27,7 +27,7 @@ pub(super) fn emit(
+     if from == to {
+         return (v, ok);
+     }
+-    let target = clif_type(to);
++    let target = llvm_type(to);
+     if to == VariableType::Boolean {
+         let bit = if from.is_float() {
+             let zero = if from == VariableType::Float32 {
+diff --git a/src/kernel/jit/emit.rs b/src/kernel/jit/emit.rs
+index 9027ffe..c7aed47 100644
+--- a/src/kernel/jit/emit.rs
++++ b/src/kernel/jit/emit.rs
+@@ -112,7 +112,7 @@ impl Compiler<'_, '_> {
+                 self.word(bytes.as_ptr() as i64)
+             }
+             _ => {
+-                let t = clif_type(value.ty());
++                let t = llvm_type(value.ty());
+                 let bits = value.bits();
+                 let bits = if t.bits() < 64 {
+                     bits & ((1u64 << t.bits()) - 1)
+@@ -132,7 +132,7 @@ impl Compiler<'_, '_> {
+             VariableType::Float64 => self.b.ins().bitcast(types::I64, MemFlags::new(), v),
+             _ => v,
+         };
+-        if self.b.func.dfg.value_type(v).bits() == 64 {
++        if self.b.value_type(v).bits() == 64 {
+             v
+         } else if ty.is_signed() {
+             self.b.ins().sextend(types::I64, v)
+@@ -143,7 +143,7 @@ impl Compiler<'_, '_> {
+ 
+     /// Reverses `bits`.
+     pub(super) fn decode(&mut self, bits: Value, ty: VariableType) -> Value {
+-        let t = clif_type(ty);
++        let t = llvm_type(ty);
+         match ty {
+             VariableType::Float32 => {
+                 let v = self.b.ins().ireduce(types::I32, bits);
+@@ -179,7 +179,7 @@ impl Compiler<'_, '_> {
+                     (Multiply, true) => self.b.ins().smul_overflow(a[0], a[1]),
+                     (Multiply, false) => self.b.ins().umul_overflow(a[0], a[1]),
+                     _ => {
+-                        let zero = self.b.ins().iconst(clif_type(t), 0);
++                        let zero = self.b.ins().iconst(llvm_type(t), 0);
+                         self.b.ins().ssub_overflow(zero, a[0])
+                     }
+                 };
+@@ -193,10 +193,10 @@ impl Compiler<'_, '_> {
+                 } else {
+                     runtime::remainder_f64 as *const () as usize
+                 };
+-                self.call(helper, a, &[clif_type(t)])
++                self.call(helper, a, &[llvm_type(t)])
+             }
+             Divide | Remainder => {
+-                let ct = clif_type(t);
++                let ct = llvm_type(t);
+                 let zero = self.b.ins().icmp_imm(IntCC::Equal, a[1], 0);
+                 let one = self.b.ins().iconst(ct, 1);
+                 let divisor = self.b.ins().select(zero, one, a[1]);
+@@ -290,7 +290,7 @@ impl Compiler<'_, '_> {
+ 
+     /// Maps IEEE floats to integers ordered like `total_cmp`.
+     fn float_key(&mut self, v: Value) -> Value {
+-        let t = if self.b.func.dfg.value_type(v) == types::F32 {
++        let t = if self.b.value_type(v) == types::F32 {
+             types::I32
+         } else {
+             types::I64
+diff --git a/src/kernel/jit/kernel.rs b/src/kernel/jit/kernel.rs
+index bd412ee..e433d88 100644
+--- a/src/kernel/jit/kernel.rs
++++ b/src/kernel/jit/kernel.rs
+@@ -16,7 +16,7 @@
+ //! generated per Call signature with the instruction selection of fused
+ //! programs, and kept in a process-wide cache for the life of the process.
+ use super::*;
+-use cranelift_module::FuncId;
++
+ use std::sync::LazyLock;
+ 
+ /// `(runtime, inputs, outputs, rows, n) -> status`.
+@@ -135,39 +135,28 @@ fn generate(signatures: &[Signature]) -> Result<Vec<usize>> {
+     if signatures.is_empty() {
+         return Ok(vec![]);
+     }
+-    let mut module = JITModule::new(
+-        JITBuilder::with_flags(
+-            &[("opt_level", "speed")],
+-            cranelift_module::default_libcall_names(),
+-        )
+-        .map_err(error)?,
+-    );
+-    if module.target_config().pointer_type() != types::I64 {
+-        return Err(Error::InvalidPlan(
+-            "generated code requires a 64-bit target".into(),
+-        ));
+-    }
++    let mut module = JitModule::new()?;
+     let ids = signatures
+         .iter()
+         .enumerate()
+-        .map(|(i, (function, inputs))| define(&mut module, i, *function, inputs))
++        .map(|(i, (function, inputs))| define(&module, i, *function, inputs))
+         .collect::<Result<Vec<_>>>()?;
+-    module.finalize_definitions().map_err(error)?;
++    module.finalize()?;
+     let addresses = ids
+         .iter()
+-        .map(|id| module.get_finalized_function(*id) as usize)
+-        .collect();
++        .map(|id| module.address(*id))
++        .collect::<Result<Vec<_>>>()?;
+     // Cached functions are never freed.
+     std::mem::forget(module);
+     Ok(addresses)
+ }
+ 
+ fn define(
+-    module: &mut JITModule,
++    module: &JitModule,
+     index: usize,
+     function: ScalarFunction,
+     inputs: &[VariableType],
+-) -> Result<FuncId> {
++) -> Result<llvm::FuncId> {
+     let outputs = function.output_types(inputs)?;
+     let (n_in, n_out) = (inputs.len(), outputs.len());
+     let graph = KernelGraph {
+@@ -196,18 +185,8 @@ fn define(
+         output: None,
+     };
+     let plan = Plan::new(&graph);
+-    let mut ctx = module.make_context();
+-    ctx.func.signature.params = vec![AbiParam::new(types::I64); 5];
+-    ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
+-    let id = module
+-        .declare_function(
+-            &format!("roc_kernel_{index}"),
+-            Linkage::Local,
+-            &ctx.func.signature,
+-        )
+-        .map_err(error)?;
+-    let mut fb = FunctionBuilderContext::new();
+-    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
++    let id = module.function(&format!("roc_kernel_{index}"), 5);
++    let mut b = module.builder(id);
+     let entry = b.create_block();
+     b.append_block_params_for_function_params(entry);
+     b.switch_to_block(entry);
+@@ -243,7 +222,7 @@ fn define(
+         .brif(is_dense, dense, &[zero.into()], selected, &[zero.into()]);
+     let mut c = Compiler {
+         b,
+-        module: &mut *module,
++        module,
+         graph: &graph,
+         plan: &plan,
+         vars: vec![None; graph.variables.len()],
+@@ -298,7 +277,6 @@ fn define(
+     c.b.ins().return_(&[status]);
+     c.b.seal_all_blocks();
+     c.b.finalize();
+-    module.define_function(id, &mut ctx).map_err(error)?;
+     Ok(id)
+ }
+ 
+diff --git a/src/kernel/jit/mod.rs b/src/kernel/jit/mod.rs
+index a23f90b..f4f9614 100644
+--- a/src/kernel/jit/mod.rs
++++ b/src/kernel/jit/mod.rs
+@@ -14,7 +14,7 @@
+ 
+ //! Compiles a pipeline kernel graph into one fused row loop.
+ //!
+-//! Every variable is a Cranelift frontend variable, so values defined inside a
++//! LLVM promotes entry-allocated graph variables to SSA, so values defined inside a
+ //! Filter region and used after it is reopened are carried by SSA phis. A
+ //! Filter domain is a region guarded by its predicate; regions open lazily and
+ //! close when an item of a non-descendant domain is emitted.
+@@ -23,13 +23,8 @@ use super::runtime::{self, Runtime};
+ use super::*;
+ use crate::arrow::datatypes::DataType;
+ use crate::error::{Error, Result};
+-use cranelift_codegen::ir::{
+-    AbiParam, Block, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Type, Value,
+-    condcodes::IntCC, types,
+-};
+-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable as Var};
+-use cranelift_jit::{JITBuilder, JITModule};
+-use cranelift_module::{Linkage, Module};
++mod llvm;
++use llvm::{AbiParam, Block, FunctionBuilder, IntCC, JitModule, MemFlags, Type, Value, Var, types};
+ use std::collections::HashMap;
+ use std::sync::{Arc, Mutex};
+ 
+@@ -58,7 +53,7 @@ pub(crate) struct Compiled {
+     pub entry: Option<Entry>,
+     /// A specialized global reduction, used instead of `entry` when present.
+     pub reduction: Option<Entry>,
+-    module: Mutex<Option<JITModule>>,
++    _module: Mutex<Option<JitModule>>,
+     pub ir: String,
+     pub sites: Vec<KernelError>,
+     _constants: Vec<Arc<[u8]>>,
+@@ -72,24 +67,11 @@ impl std::fmt::Debug for Compiled {
+     }
+ }
+ 
+-impl Drop for Compiled {
+-    fn drop(&mut self) {
+-        if let Some(m) = self
+-            .module
+-            .get_mut()
+-            .unwrap_or_else(|e| e.into_inner())
+-            .take()
+-        {
+-            unsafe { m.free_memory() };
+-        }
+-    }
+-}
+-
+ fn error(e: impl std::fmt::Display) -> Error {
+-    Error::Execution(format!("Cranelift: {e}"))
++    Error::Execution(format!("LLVM: {e}"))
+ }
+ 
+-pub(super) fn clif_type(t: VariableType) -> Type {
++pub(super) fn llvm_type(t: VariableType) -> Type {
+     match t {
+         VariableType::Boolean | VariableType::Int8 | VariableType::UInt8 => types::I8,
+         VariableType::Int16 | VariableType::UInt16 => types::I16,
+@@ -110,33 +92,15 @@ impl Compiled {
+             return Ok(Self {
+                 entry: None,
+                 reduction: None,
+-                module: Mutex::new(None),
++                _module: Mutex::new(None),
+                 ir: String::new(),
+                 sites: vec![],
+                 _constants: vec![],
+             });
+         }
+-        let mut module = JITModule::new(
+-            JITBuilder::with_flags(
+-                &[("opt_level", "speed")],
+-                cranelift_module::default_libcall_names(),
+-            )
+-            .map_err(error)?,
+-        );
+-        let mut ctx = module.make_context();
+-        let ptr = module.target_config().pointer_type();
+-        if ptr != types::I64 {
+-            return Err(Error::InvalidPlan(
+-                "generated code requires a 64-bit target".into(),
+-            ));
+-        }
+-        ctx.func.signature.params = vec![AbiParam::new(ptr); 6];
+-        ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
+-        let id = module
+-            .declare_function("roc_pipeline", Linkage::Export, &ctx.func.signature)
+-            .map_err(error)?;
+-        let mut fb = FunctionBuilderContext::new();
+-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
++        let mut module = JitModule::new()?;
++        let id = module.function("roc_pipeline", 6);
++        let mut b = module.builder(id);
+         let entry = b.create_block();
+         b.append_block_params_for_function_params(entry);
+         b.switch_to_block(entry);
+@@ -159,7 +123,7 @@ impl Compiled {
+         b.switch_to_block(body);
+         let mut c = Compiler {
+             b,
+-            module: &mut module,
++            module: &module,
+             graph,
+             plan,
+             vars: vec![None; graph.variables.len()],
+@@ -213,23 +177,21 @@ impl Compiled {
+         let sites = std::mem::take(&mut c.sites);
+         let constants = std::mem::take(&mut c.constants);
+         c.b.finalize();
+-        let mut ir = ctx.func.display().to_string();
+-        module.define_function(id, &mut ctx).map_err(error)?;
+-        let reduction = reduce::compile(&mut module, graph, plan)?.map(|(id, lowered)| {
+-            ir.push_str("\n; Specialized global reduction\n");
+-            ir.push_str(&lowered);
+-            id
+-        });
+-        module.finalize_definitions().map_err(error)?;
+-        let reduction = reduction.map(|id| unsafe {
+-            std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id))
+-        });
+-        let entry =
+-            unsafe { std::mem::transmute::<*const u8, Entry>(module.get_finalized_function(id)) };
++        let reduction = reduce::compile(&module, graph, plan)?;
++        module.finalize()?;
++        let ir = module.ir();
++        let reduction = reduction
++            .map(|id| {
++                module
++                    .address(id)
++                    .map(|p| unsafe { std::mem::transmute::<usize, Entry>(p) })
++            })
++            .transpose()?;
++        let entry = unsafe { std::mem::transmute::<usize, Entry>(module.address(id)?) };
+         Ok(Self {
+             entry: Some(entry),
+             reduction,
+-            module: Mutex::new(Some(module)),
++            _module: Mutex::new(Some(module)),
+             ir,
+             sites,
+             _constants: constants,
+@@ -239,7 +201,7 @@ impl Compiled {
+ 
+ pub(super) struct Compiler<'a, 'f> {
+     pub b: FunctionBuilder<'f>,
+-    module: &'a mut JITModule,
++    module: &'a JitModule,
+     pub graph: &'a KernelGraph,
+     plan: &'a Plan,
+     vars: Vec<Option<Var>>,
+@@ -261,7 +223,7 @@ impl Compiler<'_, '_> {
+         if let Some(var) = self.vars[v.0] {
+             return var;
+         }
+-        let var = self.b.declare_var(clif_type(self.graph.variables[v.0].ty));
++        let var = self.b.declare_var(llvm_type(self.graph.variables[v.0].ty));
+         self.vars[v.0] = Some(var);
+         var
+     }
+@@ -280,18 +242,10 @@ impl Compiler<'_, '_> {
+     /// A loop-invariant load from an entry argument, hoisted to the preheader
+     /// without changing the builder's current block.
+     pub fn descriptor(&mut self, argument: usize, offset: i32) -> Value {
+-        use cranelift_codegen::cursor::{Cursor, FuncCursor};
+         if let Some(v) = self.hoisted.get(&(argument, offset)) {
+             return *v;
+         }
+-        if !self.b.func.layout.is_block_inserted(self.setup) {
+-            self.b.func.layout.append_block(self.setup);
+-        }
+-        let arg = self.args[argument];
+-        let v = FuncCursor::new(self.b.func)
+-            .at_bottom(self.setup)
+-            .ins()
+-            .load(types::I64, MemFlags::new(), arg, offset);
++        let v = self.b.hoisted_load(self.setup, self.args[argument], offset);
+         self.hoisted.insert((argument, offset), v);
+         v
+     }
+@@ -302,7 +256,7 @@ impl Compiler<'_, '_> {
+         let mut sig = self.module.make_signature();
+         sig.params = args
+             .iter()
+-            .map(|v| AbiParam::new(self.b.func.dfg.value_type(*v)))
++            .map(|v| AbiParam::new(self.b.value_type(*v)))
+             .collect();
+         sig.returns = returns.iter().map(|t| AbiParam::new(*t)).collect();
+         let sig = self.b.import_signature(sig);
+@@ -319,12 +273,7 @@ impl Compiler<'_, '_> {
+         self.b.switch_to_block(next);
+     }
+     pub fn stack(&mut self, bytes: usize) -> Value {
+-        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+-            StackSlotKind::ExplicitSlot,
+-            bytes.max(8) as u32,
+-            3,
+-        ));
+-        self.b.ins().stack_addr(types::I64, slot, 0)
++        self.b.stack(bytes)
+     }
+ 
+     fn goto(&mut self, target: DomainId) {
+@@ -391,7 +340,7 @@ impl Compiler<'_, '_> {
+                         let offset = self.descriptor(1, base + 32);
+                         self.bit(data, offset, row)
+                     } else {
+-                        let t = clif_type(self.ty(value));
++                        let t = llvm_type(self.ty(value));
+                         let at = self.b.ins().imul_imm(row, i64::from(t.bytes()));
+                         let at = self.b.ins().iadd(data, at);
+                         self.b.ins().load(t, MemFlags::new(), at, 0)
+@@ -475,7 +424,7 @@ impl Compiler<'_, '_> {
+                 _ => {
+                     let value = binding.value().unwrap();
+                     let data = self.descriptor(2, base);
+-                    let t = clif_type(self.ty(value));
++                    let t = llvm_type(self.ty(value));
+                     let at = self.b.ins().imul_imm(count, i64::from(t.bytes()));
+                     let at = self.b.ins().iadd(data, at);
+                     let v = self.get(value);
+diff --git a/src/kernel/jit/reduce.rs b/src/kernel/jit/reduce.rs
+index 2ccd325..8524bcc 100644
+--- a/src/kernel/jit/reduce.rs
++++ b/src/kernel/jit/reduce.rs
+@@ -2,13 +2,12 @@
+ //! The eligibility check is structural: only root-domain Count/Sum updates of
+ //! one global group over one Int64/UInt64 input, with no output.
+ use super::*;
+-use cranelift_module::FuncId;
+ 
+ pub(super) fn compile(
+-    module: &mut JITModule,
++    module: &JitModule,
+     graph: &KernelGraph,
+     plan: &Plan,
+-) -> Result<Option<(FuncId, String)>> {
++) -> Result<Option<llvm::FuncId>> {
+     use AggregateUpdateKind as K;
+     if graph.output.is_some() {
+         return Ok(None);
+@@ -62,14 +61,8 @@ pub(super) fn compile(
+     };
+     let base = slot * INPUT_WORDS * 8;
+     let ptr = types::I64;
+-    let mut ctx = module.make_context();
+-    ctx.func.signature.params = vec![AbiParam::new(ptr); 6];
+-    ctx.func.signature.returns = vec![AbiParam::new(types::I32)];
+-    let id = module
+-        .declare_function("roc_global_reduce", Linkage::Local, &ctx.func.signature)
+-        .map_err(error)?;
+-    let mut fb = FunctionBuilderContext::new();
+-    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
++    let id = module.function("roc_global_reduce", 6);
++    let mut b = module.builder(id);
+     let entry = b.create_block();
+     b.append_block_params_for_function_params(entry);
+     b.switch_to_block(entry);
+@@ -172,8 +165,7 @@ pub(super) fn compile(
+         let mut bytes = [0u8; 16];
+         bytes[..8].copy_from_slice(&(1u64 << (i * 2)).to_le_bytes());
+         bytes[8..].copy_from_slice(&(2u64 << (i * 2)).to_le_bytes());
+-        let constant = b.func.dfg.constants.insert(bytes.to_vec().into());
+-        let mask = b.ins().vconst(vt, constant);
++        let mask = b.ins().vconst(bytes);
+         let flag = b.ins().band(bits_vec, mask);
+         let valid = b.ins().icmp(IntCC::NotEqual, flag, vz);
+         let value = b.ins().load(vt, MemFlags::new(), at, (i * 16) as i32);
+@@ -321,9 +313,7 @@ pub(super) fn compile(
+     b.ins().return_(&[status]);
+     b.seal_all_blocks();
+     b.finalize();
+-    let ir = ctx.func.display().to_string();
+-    module.define_function(id, &mut ctx).map_err(error)?;
+-    Ok(Some((id, ir)))
++    Ok(Some(id))
+ }
+ fn validity(
+     b: &mut FunctionBuilder<'_>,
+diff --git a/src/kernel/program.rs b/src/kernel/program.rs
+index d693cd7..7d7aef6 100644
+--- a/src/kernel/program.rs
++++ b/src/kernel/program.rs
+@@ -169,7 +169,7 @@ impl Program {
+         &self.explain
+     }
+ 
+-    /// Cranelift IR of the generated functions; empty when nothing is generated.
++    /// Optimized LLVM IR of the generated functions; empty when nothing is generated.
+     pub fn generated_ir(&self) -> &str {
+         match &self.code {
+             Code::Compiled(code) => &code.ir,
+diff --git a/tests/generated_casts.rs b/tests/generated_casts.rs
+index d2d07e4..910af81 100644
+--- a/tests/generated_casts.rs
++++ b/tests/generated_casts.rs
+@@ -185,7 +185,7 @@ fn typed_float_branches_merge_and_generated_integer_cast_is_visible_in_ir() {
+     .into_ref();
+     let p = TestProgram::try_new(cast).unwrap();
+     assert!(
+-        p.program().generated_ir().contains("sextend.i64"),
++        p.program().generated_ir().contains("sext i32"),
+         "{}",
+         p.program().generated_ir()
+     );

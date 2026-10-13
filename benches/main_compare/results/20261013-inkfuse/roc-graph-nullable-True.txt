@@ -1,0 +1,70 @@
+pipeline 0 depends_on=[]
+input 0: column 0 Int64 { value: VariableId(0), validity: None }
+input 1: column 1 Int64 { value: VariableId(1), validity: None }
+input 2: column 2 Int64 { value: VariableId(3), validity: Some(VariableId(2)) }
+input 3: column 3 Int64 { value: VariableId(4), validity: None }
+d0: Constant { value: Int64(1), output: VariableId(5) }
+d0: Call { function: Add, inputs: [VariableId(3), VariableId(5)], outputs: [VariableId(6), VariableId(7)] }
+d0: Call { function: And, inputs: [VariableId(7), VariableId(2)], outputs: [VariableId(8)] }
+d0: Constant { value: Int64(2), output: VariableId(9) }
+d0: Call { function: Add, inputs: [VariableId(6), VariableId(9)], outputs: [VariableId(10), VariableId(11)] }
+d0: Call { function: And, inputs: [VariableId(11), VariableId(2)], outputs: [VariableId(12)] }
+d0: Constant { value: Int64(3), output: VariableId(13) }
+d0: Call { function: Add, inputs: [VariableId(10), VariableId(13)], outputs: [VariableId(14), VariableId(15)] }
+d0: Call { function: And, inputs: [VariableId(15), VariableId(2)], outputs: [VariableId(16)] }
+d0: Constant { value: Int64(4), output: VariableId(17) }
+d0: Call { function: Add, inputs: [VariableId(14), VariableId(17)], outputs: [VariableId(18), VariableId(19)] }
+d0: Call { function: And, inputs: [VariableId(19), VariableId(2)], outputs: [VariableId(20)] }
+d0: Constant { value: Int64(5), output: VariableId(21) }
+d0: Call { function: Add, inputs: [VariableId(18), VariableId(21)], outputs: [VariableId(22), VariableId(23)] }
+d0: Call { function: And, inputs: [VariableId(23), VariableId(2)], outputs: [VariableId(24)] }
+d0: Constant { value: Int64(6), output: VariableId(25) }
+d0: Call { function: Add, inputs: [VariableId(22), VariableId(25)], outputs: [VariableId(26), VariableId(27)] }
+d0: Call { function: And, inputs: [VariableId(27), VariableId(2)], outputs: [VariableId(28)] }
+d0: Constant { value: Int64(7), output: VariableId(29) }
+d0: Call { function: Add, inputs: [VariableId(26), VariableId(29)], outputs: [VariableId(30), VariableId(31)] }
+d0: Call { function: And, inputs: [VariableId(31), VariableId(2)], outputs: [VariableId(32)] }
+d0: Constant { value: Int64(8), output: VariableId(33) }
+d0: Call { function: Add, inputs: [VariableId(30), VariableId(33)], outputs: [VariableId(34), VariableId(35)] }
+d0: Call { function: And, inputs: [VariableId(35), VariableId(2)], outputs: [VariableId(36)] }
+d0: Constant { value: Int64(9), output: VariableId(37) }
+d0: Call { function: Add, inputs: [VariableId(34), VariableId(37)], outputs: [VariableId(38), VariableId(39)] }
+d0: Call { function: And, inputs: [VariableId(39), VariableId(2)], outputs: [VariableId(40)] }
+d0: Constant { value: Int64(10), output: VariableId(41) }
+d0: Call { function: Add, inputs: [VariableId(38), VariableId(41)], outputs: [VariableId(42), VariableId(43)] }
+d0: Call { function: And, inputs: [VariableId(43), VariableId(2)], outputs: [VariableId(44)] }
+d0: Constant { value: Int64(11), output: VariableId(45) }
+d0: Call { function: Add, inputs: [VariableId(42), VariableId(45)], outputs: [VariableId(46), VariableId(47)] }
+d0: Call { function: And, inputs: [VariableId(47), VariableId(2)], outputs: [VariableId(48)] }
+d0: Constant { value: Int64(12), output: VariableId(49) }
+d0: Call { function: Add, inputs: [VariableId(46), VariableId(49)], outputs: [VariableId(50), VariableId(51)] }
+d0: Call { function: And, inputs: [VariableId(51), VariableId(2)], outputs: [VariableId(52)] }
+d0: Constant { value: Int64(13), output: VariableId(53) }
+d0: Call { function: Add, inputs: [VariableId(50), VariableId(53)], outputs: [VariableId(54), VariableId(55)] }
+d0: Call { function: And, inputs: [VariableId(55), VariableId(2)], outputs: [VariableId(56)] }
+d0: Constant { value: Int64(14), output: VariableId(57) }
+d0: Call { function: Add, inputs: [VariableId(54), VariableId(57)], outputs: [VariableId(58), VariableId(59)] }
+d0: Call { function: And, inputs: [VariableId(59), VariableId(2)], outputs: [VariableId(60)] }
+d0: Constant { value: Int64(15), output: VariableId(61) }
+d0: Call { function: Add, inputs: [VariableId(58), VariableId(61)], outputs: [VariableId(62), VariableId(63)] }
+d0: Call { function: And, inputs: [VariableId(63), VariableId(2)], outputs: [VariableId(64)] }
+d0: Constant { value: Int64(16), output: VariableId(65) }
+d0: Call { function: Add, inputs: [VariableId(62), VariableId(65)], outputs: [VariableId(66), VariableId(67)] }
+d0: Call { function: And, inputs: [VariableId(67), VariableId(2)], outputs: [VariableId(68)] }
+d0: RaiseIf { cond: VariableId(8), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(12), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(16), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(20), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(24), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(28), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(32), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(36), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(40), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(44), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(48), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(52), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(56), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(60), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(64), error: ArithmeticOverflow, args: [] }
+d0: RaiseIf { cond: VariableId(68), error: ArithmeticOverflow, args: [] }
+output d0: [Int64 { value: VariableId(0), validity: None }, Int64 { value: VariableId(66), validity: Some(VariableId(2)) }]

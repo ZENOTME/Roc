@@ -1,0 +1,20 @@
+Environment: existing mylinux container inkfuse-bench-20261010.
+Source: /work (original upstream plus measurement hooks), build: /work/build.
+Data: /work/reproduce/data (existing TPC-H SF1 .tbl files).
+Host result directory: /home/ze/inkfuse-bench-20261010/results-20261013.
+
+Restore original runtime object files before fragment bootstrap:
+  docker exec inkfuse-bench-20261010 cmake --build /work/build --target inkfuse_install_runtime -j4
+
+Harness build inside container, working directory /work/build:
+  clang++-14 -std=gnu++20 -stdlib=libc++ -O3 -DNDEBUG -flto -Wl,--export-dynamic -rdynamic -I/work/src -I/work/thirdparty /source/baseline-20261013.cpp CMakeFiles/inkfuse_runtime.dir/src/runtime/*.o libinkfuse.a vendor/xxhash/src/xxhash_src/libxxhash.a -ldl -o /source/results-20261013/baseline
+  (Same flags for chain-20261013.cpp and confirmation/baseline.cpp.)
+
+Run sequentially, in /work/reproduce:
+  /source/results-20261013/confirmation/baseline 1 7 1 all
+  /source/results-20261013/chain 15
+
+Use a fresh output directory for reruns to preserve existing raw results.
+Roc diagnostic source is roc-diagnostic.rs, and remote orchestration is run-roc-diagnostic.py.
+Roc uses the same dependencies as ../20261013-mylinux-llvm and links to the unchanged LLVM experiment repo.
+To regenerate local summary and validate both TPCH mode outputs: python3 summarize.py

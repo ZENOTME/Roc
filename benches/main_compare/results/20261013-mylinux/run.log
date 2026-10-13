@@ -1,0 +1,43 @@
+/home/ze/benchmarks/roc-modes-20261013/repo/benches/main_compare/run.py:52: DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives and reject files or modify their metadata. Use the filter argument to control this behavior.
+  with tarfile.open(archive) as t: t.extractall(source)
+Building main
+Building current
+Measuring main-t1-r1
+Measuring compile-t1-r1
+Measuring zero-generated-t1-r1
+Measuring zero-native-t1-r1
+Measuring main-t4-r1
+Measuring compile-t4-r1
+Measuring zero-generated-t4-r1
+Measuring zero-native-t4-r1
+Measuring compile-t1-r2
+Measuring zero-generated-t1-r2
+Measuring zero-native-t1-r2
+Measuring main-t1-r2
+Measuring compile-t4-r2
+Measuring zero-generated-t4-r2
+Measuring zero-native-t4-r2
+Measuring main-t4-r2
+Measuring zero-generated-t1-r3
+Measuring zero-native-t1-r3
+Measuring main-t1-r3
+Measuring compile-t1-r3
+Measuring zero-generated-t4-r3
+Measuring zero-native-t4-r3
+Measuring main-t4-r3
+Measuring compile-t4-r3
+case               thr             main prep             main exec          compile prep          compile exec   zero-generated prep   zero-generated exec      zero-native prep      zero-native exec
+scan                 1                 0.001                 0.115                 0.005                 0.144                 0.005                 0.148                 0.004                 0.148
+filter_project       1                 0.007                14.054                 0.338                11.305                 0.028                23.110                 0.037                21.087
+arithmetic_chain     1                 0.007                60.478                 0.541                18.608                 0.074               137.170                 0.063                94.276
+integer_division     1                 0.008                62.386                 0.598                19.734                 0.078               150.619                 0.078                70.564
+global_aggregate     1                 0.005                 2.233                 1.469                 1.237                 0.026                 3.871                 0.015                 3.753
+grouped_aggregate    1                 0.006                14.718                 0.471                 9.345                 0.028                23.175                 0.028                23.375
+scan                 4                 0.001                 0.170                 0.005                 0.111                 0.005                 0.119                 0.005                 0.123
+filter_project       4                 0.006                 4.276                 0.396                 4.907                 0.023                 6.647                 0.020                 5.648
+arithmetic_chain     4                 0.007                16.122                 0.557                 6.029                 0.070                37.215                 0.070                28.585
+integer_division     4                 0.007                17.473                 0.603                 5.390                 0.079                40.875                 0.076                28.722
+global_aggregate     4                 0.003                 0.545                 1.460                 0.708                 0.017                 1.287                 0.017                 1.677
+grouped_aggregate    4                 0.003                 3.986                 0.498                 4.688                 0.025                 6.365                 0.024                 6.340
+prewarm_ms {'t1': [30.161006, 29.823124, 30.106263000000002], 't4': [30.144945, 30.117713000000002, 30.095261]}
+Results: /home/ze/benchmarks/roc-modes-20261013/repo/target/mylinux-modes

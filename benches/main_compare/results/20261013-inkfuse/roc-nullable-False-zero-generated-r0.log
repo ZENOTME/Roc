@@ -1,0 +1,2 @@
+prewarmed 264 kernels in 1411.456ms
+arithmetic_chain threads=1 prepare=0.220ms execute=70.493ms
