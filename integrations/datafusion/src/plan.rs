@@ -760,9 +760,13 @@ impl Translator<'_> {
             })
             .map_err(external)?;
         }
+        // Each node joins its own subqueries: a column joined into another
+        // node's pipeline is not visible here. Within the node, one join
+        // serves every occurrence.
+        let mut joined = std::collections::HashSet::new();
         for s in found {
             let key = s.subquery.display_indent().to_string();
-            if self.subqueries.contains_key(&key) {
+            if !joined.insert(key.clone()) {
                 continue;
             }
             if !s.outer_ref_columns.is_empty() {

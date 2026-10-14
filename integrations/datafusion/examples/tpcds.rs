@@ -16,7 +16,7 @@
 //! statement, the stage it reached and both engines' times.
 //!
 //!     cargo run --release -p roc-datafusion --example tpcds -- \
-//!         <data-dir> [--mode compile|zero] [--workers N] [--timeout SECONDS]
+//!         <data-dir> [--mode compile|zero] [--workers N] [--timeout SECONDS] [--verbose]
 //!         [--report FILE] [query...]
 use roc::kernel::ExecutionMode;
 use roc_datafusion::{
@@ -33,6 +33,7 @@ async fn main() -> datafusion::error::Result<()> {
     let mut workers = 4;
     let mut report = None;
     let mut timeout = 120;
+    let mut verbose = false;
     let mut only = vec![];
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -45,6 +46,7 @@ async fn main() -> datafusion::error::Result<()> {
             "--workers" => workers = args.next().unwrap().parse().unwrap(),
             "--report" => report = args.next(),
             "--timeout" => timeout = args.next().unwrap().parse().unwrap(),
+            "--verbose" => verbose = true,
             q => only.push(q.to_string()),
         }
     }
@@ -88,6 +90,9 @@ async fn main() -> datafusion::error::Result<()> {
                 )
             }
         };
+        if verbose && !detail.is_empty() {
+            eprintln!("{}: {detail}", s.name);
+        }
         // The first line of a diagnostic names the failure.
         let detail = detail.lines().next().unwrap_or("").replace('|', "\\|");
         let ms = |d: Option<std::time::Duration>| {
