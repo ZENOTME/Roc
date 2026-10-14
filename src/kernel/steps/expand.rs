@@ -14,9 +14,9 @@
 
 //! Expansions and table gathers.
 //!
-//! An Expand lists the `(enclosing row, table row)` pairs of the rows of its
-//! input domain below the limit, then runs its block over windows of those
-//! pairs. The block's Import steps copy the enclosing variables it reads,
+//! An Expand fills windows with the `(enclosing row, table row)` pairs of
+//! the rows of its input domain below the limit, and runs its block over
+//! each. The block's Import steps copy the enclosing variables it reads,
 //! by enclosing row; reductions OR their Booleans into the enclosing window
 //! after each window. A raise in the block stops the expansion: the
 //! enclosing window then only sees rows before the failing row's enclosing
@@ -27,141 +27,160 @@ use super::run::Frame;
 use super::*;
 use crate::kernel::table::{Probe, Table};
 
+/// The probe row whose matches fill windows, and where its scan is.
+struct Scan {
+    row: u32,
+    /// Table rows left to compare with the probe's key.
+    rows: std::ops::Range<u32>,
+    matched: bool,
+    /// The key of a table with word keys; others are in the key buffer.
+    word: u64,
+}
+
 impl Frame<'_> {
+    /// Fills windows with the matches of the input rows, in input row order,
+    /// and runs the block over each.
     pub(super) fn expand(&mut self, e: &ExpandStep) -> Result<()> {
         let read = self.tables[e.kind.state().0]
             .as_ref()
             .expect("table states are bound");
         // SAFETY: the state keeps the table alive for the run.
         let table: &Table = unsafe { &*read.table };
-        let mut pairs = self.spare.pairs.pop().unwrap_or_default();
-        pairs.clear();
         let (mask, state) = self.mask(e.input);
         let mask: [u64; WORDS] = mask.try_into().unwrap();
-        if state != BitState::AllFalse {
-            let limit = self.limit;
-            let mut key = self.spare.keys.pop().unwrap_or_default();
-            let mut cells = self.spare.cells.pop().unwrap_or_default();
-            for w in 0..bits::words(limit) {
-                let mut m = if state == BitState::AllTrue {
-                    u64::MAX
-                } else {
-                    mask[w]
-                } & bits::tail_mask(w, limit);
-                while m != 0 {
-                    let r = w * 64 + m.trailing_zeros() as usize;
-                    m &= m - 1;
-                    let before = pairs.len();
-                    match &e.kind {
-                        ExpandStepKind::Lookup {
-                            keys,
-                            nulls_equal,
-                            outer,
-                            ..
-                        } => {
-                            if table.word_keys() {
-                                let k = &keys[0];
-                                if k.validity().is_none_or(|v| self.get(v, r) != 0) {
-                                    let word = self.get(k.value().unwrap(), r);
-                                    table.find(Probe::Word(word), |t| pairs.push((r as u32, t)));
-                                }
-                            } else {
-                                cells.clear();
-                                cells.extend(keys.iter().map(|k| self.cell(k, r)));
-                                if table.encode(&cells, *nulls_equal, &mut key) {
-                                    table.find(Probe::Encoded(&key), |t| pairs.push((r as u32, t)));
-                                }
-                            }
-                            if *outer && pairs.len() == before {
-                                pairs.push((r as u32, table.rows() as u32));
-                            }
-                        }
-                        ExpandStepKind::Product { .. } => {
-                            pairs.extend((0..table.rows() as u32).map(|t| (r as u32, t)));
-                        }
-                    }
-                }
-            }
-            self.spare.keys.push(key);
-            self.spare.cells.push(cells);
-        }
         let (n, limit) = (self.n, self.limit);
-        let rows = self.spare.rows.pop().unwrap_or_default();
-        let parents = std::mem::replace(&mut self.parents, rows);
-        let rows = self.spare.rows.pop().unwrap_or_default();
-        let roots = std::mem::replace(&mut self.roots, rows);
         for r in &e.reduces {
             for (_, out) in &r.any {
                 // SAFETY: Boolean slots hold a window bitmap.
                 unsafe { *(self.home[out.0] as *mut [u64; WORDS]) = [0; WORDS] };
             }
         }
+        let mut key = self.spare.keys.pop().unwrap_or_default();
+        let mut cells = self.spare.cells.pop().unwrap_or_default();
+        let rows = self.spare.rows.pop().unwrap_or_default();
+        let enclosing = std::mem::replace(&mut self.parents, rows);
+        self.lineage.push(enclosing);
+        let word = |w: usize| {
+            if state == BitState::AllTrue {
+                u64::MAX
+            } else {
+                mask[w]
+            }
+        };
+        let (mut w, mut m) = (0, if limit == 0 { 0 } else { word(0) & bits::tail_mask(0, limit) });
+        let mut probe: Option<Scan> = None;
         let mut failed = None;
         let steps = self.steps;
-        for chunk in pairs.chunks(WINDOW) {
-            self.n = chunk.len();
-            self.limit = self.n;
-            self.parents.clear();
-            self.parents.extend(chunk.iter().map(|p| p.0));
-            self.roots.clear();
-            if roots.is_empty() {
-                self.roots.extend_from_slice(&self.parents);
-            } else {
-                self.roots
-                    .extend(self.parents.iter().map(|&p| roots[p as usize]));
-            }
-            self.window(e.block);
-            let rows = self.home[e.row.0] as *mut u64;
-            for (i, (_, t)) in chunk.iter().enumerate() {
-                // SAFETY: value slots hold a window of words.
-                unsafe { *rows.add(i) = *t as u64 };
-            }
-            self.ptrs[e.row.0] = self.home[e.row.0];
-            for step in &steps.blocks[e.block].steps {
-                self.step(step)?;
-            }
-            for r in &e.reduces {
-                let (m, s) = self.mask(r.descendant);
-                if s == BitState::AllFalse {
-                    continue;
-                }
-                let m: [u64; WORDS] = m.try_into().unwrap();
-                for &(v, out) in &r.any {
-                    let values: [u64; WORDS] = self.words(v).try_into().unwrap();
-                    let vs = self.states[v.0];
-                    if vs == BitState::AllFalse {
+        let (outer, lookup) = match &e.kind {
+            ExpandStepKind::Lookup { outer, .. } => (*outer, true),
+            ExpandStepKind::Product { .. } => (false, false),
+        };
+        let words = bits::words(limit);
+        let words_keys = table.word_keys();
+        if state != BitState::AllFalse {
+            loop {
+                let ids = self.home[e.row.0] as *mut u64;
+                let mut count = 0;
+                self.parents.clear();
+                while count < WINDOW {
+                    let Some(p) = &mut probe else {
+                        // The next input row.
+                        while m == 0 && w + 1 < words {
+                            w += 1;
+                            m = word(w) & bits::tail_mask(w, limit);
+                        }
+                        if m == 0 {
+                            break;
+                        }
+                        let r = w * 64 + m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        let mut word_key = 0;
+                        let rows = match &e.kind {
+                            ExpandStepKind::Lookup {
+                                keys, nulls_equal, ..
+                            } => {
+                                if words_keys {
+                                    let k = &keys[0];
+                                    if k.validity().is_none_or(|v| self.get(v, r) != 0) {
+                                        word_key = self.get(k.value().unwrap(), r);
+                                        table.bucket(Probe::Word(word_key))
+                                    } else {
+                                        0..0
+                                    }
+                                } else {
+                                    cells.clear();
+                                    cells.extend(keys.iter().map(|k| self.cell(k, r)));
+                                    if table.encode(&cells, *nulls_equal, &mut key) {
+                                        table.bucket(Probe::Encoded(&key))
+                                    } else {
+                                        0..0
+                                    }
+                                }
+                            }
+                            ExpandStepKind::Product { .. } => 0..table.rows() as u32,
+                        };
+                        probe = Some(Scan {
+                            row: r as u32,
+                            rows,
+                            matched: false,
+                            word: word_key,
+                        });
                         continue;
+                    };
+                    while count < WINDOW && p.rows.start < p.rows.end {
+                        let t = p.rows.start;
+                        p.rows.start += 1;
+                        let hit = match (lookup, words_keys) {
+                            (false, _) => true,
+                            (true, true) => table.equal_word(t, p.word),
+                            (true, false) => table.equal(t, &key),
+                        };
+                        if hit {
+                            self.parents.push(p.row);
+                            // SAFETY: row slots hold a window of words.
+                            unsafe { *ids.add(count) = t as u64 };
+                            count += 1;
+                            p.matched = true;
+                        }
                     }
-                    let target = self.home[out.0] as *mut u64;
-                    for w in 0..bits::words(self.limit) {
-                        let mut hit = bits::tail_mask(w, self.limit);
-                        if s != BitState::AllTrue {
-                            hit &= m[w];
-                        }
-                        if vs != BitState::AllTrue {
-                            hit &= values[w];
-                        }
-                        while hit != 0 {
-                            let p = self.parents[w * 64 + hit.trailing_zeros() as usize] as usize;
-                            hit &= hit - 1;
-                            // SAFETY: enclosing rows are below the window size.
-                            unsafe { *target.add(p / 64) |= 1 << (p % 64) };
-                        }
+                    if p.rows.start < p.rows.end {
+                        break;
                     }
+                    if outer && !p.matched {
+                        if count == WINDOW {
+                            break;
+                        }
+                        self.parents.push(p.row);
+                        // SAFETY: as above.
+                        unsafe { *ids.add(count) = table.rows() as u64 };
+                        count += 1;
+                    }
+                    probe = None;
                 }
-            }
-            if self.limit < self.n {
-                failed = Some(self.parents[self.limit] as usize);
-                break;
+                if count == 0 {
+                    break;
+                }
+                self.n = count;
+                self.limit = count;
+                self.window(e.block);
+                self.ptrs[e.row.0] = self.home[e.row.0];
+                for step in &steps.blocks[e.block].steps {
+                    self.step(step)?;
+                }
+                self.reduce(e);
+                if self.limit < self.n {
+                    failed = Some(self.parents[self.limit] as usize);
+                    break;
+                }
             }
         }
         self.n = n;
         self.limit = failed.map_or(limit, |p| p.min(limit));
-        let rows = std::mem::replace(&mut self.parents, parents);
+        let enclosing = self.lineage.pop().unwrap();
+        let rows = std::mem::replace(&mut self.parents, enclosing);
         self.spare.rows.push(rows);
-        let rows = std::mem::replace(&mut self.roots, roots);
-        self.spare.rows.push(rows);
-        self.spare.pairs.push(pairs);
+        self.spare.keys.push(key);
+        self.spare.cells.push(cells);
         for r in &e.reduces {
             for (_, out) in &r.any {
                 self.ptrs[out.0] = self.home[out.0];
@@ -170,6 +189,40 @@ impl Frame<'_> {
             self.masks[r.domain.0] = self.masks[e.input.0];
         }
         Ok(())
+    }
+
+    /// ORs the reduced Booleans of a window into its enclosing rows.
+    fn reduce(&mut self, e: &ExpandStep) {
+        for r in &e.reduces {
+            let (m, s) = self.mask(r.descendant);
+            if s == BitState::AllFalse {
+                continue;
+            }
+            let m: [u64; WORDS] = m.try_into().unwrap();
+            for &(v, out) in &r.any {
+                let values: [u64; WORDS] = self.words(v).try_into().unwrap();
+                let vs = self.states[v.0];
+                if vs == BitState::AllFalse {
+                    continue;
+                }
+                let target = self.home[out.0] as *mut u64;
+                for w in 0..bits::words(self.limit) {
+                    let mut hit = bits::tail_mask(w, self.limit);
+                    if s != BitState::AllTrue {
+                        hit &= m[w];
+                    }
+                    if vs != BitState::AllTrue {
+                        hit &= values[w];
+                    }
+                    while hit != 0 {
+                        let p = self.parents[w * 64 + hit.trailing_zeros() as usize] as usize;
+                        hit &= hit - 1;
+                        // SAFETY: enclosing rows are below the window size.
+                        unsafe { *target.add(p / 64) |= 1 << (p % 64) };
+                    }
+                }
+            }
+        }
     }
 
     /// Copies an enclosing variable to the rows of `domain` in this window.

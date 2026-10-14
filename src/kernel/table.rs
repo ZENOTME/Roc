@@ -182,35 +182,37 @@ impl Table {
         true
     }
 
-    /// Calls `f` with each table row whose key equals `probe`, in order.
+    /// The rows of the bucket of `probe`: every row whose key may equal it,
+    /// in order. Compare them with `equal`.
     #[inline]
-    pub(crate) fn find(&self, probe: Probe<'_>, mut f: impl FnMut(u32)) {
+    pub(crate) fn bucket(&self, probe: Probe<'_>) -> std::ops::Range<u32> {
         let Some(index) = &self.index else {
-            return;
+            return 0..0;
         };
         let hash = match probe {
             Probe::Word(k) => hash_word(k),
             Probe::Encoded(k) => hash_bytes(k),
         };
         let b = (hash >> index.shift) as usize;
-        let rows = index.starts[b]..index.starts[b + 1];
-        match (&index.keys, probe) {
-            (Keys::Word(words), Probe::Word(k)) => {
-                for row in rows {
-                    if words[row as usize] == k {
-                        f(row);
-                    }
-                }
-            }
-            (Keys::Encoded { data, offsets, .. }, Probe::Encoded(k)) => {
-                for row in rows {
-                    let r = row as usize;
-                    if &data[offsets[r]..offsets[r + 1]] == k {
-                        f(row);
-                    }
-                }
-            }
-            _ => {}
+        index.starts[b]..index.starts[b + 1]
+    }
+
+    /// Whether the word key of an indexed row equals `key`.
+    #[inline(always)]
+    pub(crate) fn equal_word(&self, row: u32, key: u64) -> bool {
+        match &self.index.as_ref().unwrap().keys {
+            Keys::Word(words) => words[row as usize] == key,
+            Keys::Encoded { .. } => false,
+        }
+    }
+
+    /// Whether the encoded key of an indexed row equals `key`.
+    #[inline(always)]
+    pub(crate) fn equal(&self, row: u32, key: &[u8]) -> bool {
+        let r = row as usize;
+        match &self.index.as_ref().unwrap().keys {
+            Keys::Encoded { data, offsets, .. } => &data[offsets[r]..offsets[r + 1]] == key,
+            Keys::Word(_) => false,
         }
     }
 }

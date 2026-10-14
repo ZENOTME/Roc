@@ -172,7 +172,6 @@ pub(crate) struct Buffers {
 #[derive(Default)]
 pub(super) struct Spare {
     pub rows: Vec<Vec<u32>>,
-    pub pairs: Vec<Vec<(u32, u32)>>,
     pub keys: Vec<Vec<u8>>,
     pub cells: Vec<Vec<Cell>>,
 }
@@ -216,9 +215,10 @@ pub(super) struct Frame<'a> {
     /// its columns.
     pub tables: Vec<Option<TableRead>>,
     /// In an expanded block: per window row, its row in the enclosing
-    /// window, and its row in the root window. Empty in the root block.
+    /// window. Empty in the root block.
     pub parents: Vec<u32>,
-    pub roots: Vec<u32>,
+    /// The parents of the enclosing blocks, outermost first.
+    pub lineage: Vec<Vec<u32>>,
     pub spare: Spare,
 }
 
@@ -377,7 +377,7 @@ impl Steps {
             bounds: std::mem::take(&mut b.bounds),
             tables,
             parents: vec![],
-            roots: vec![],
+            lineage: vec![],
             spare: std::mem::take(&mut b.spare),
         };
         for (v, var) in self.vars.iter().enumerate() {
@@ -447,11 +447,14 @@ impl Frame<'_> {
 
     /// The root window row of a row of the current window.
     pub(super) fn root(&self, row: usize) -> usize {
-        if self.roots.is_empty() {
-            row
-        } else {
-            self.roots[row] as usize
+        let mut row = row;
+        for parents in std::iter::once(&self.parents).chain(self.lineage.iter().rev()) {
+            if parents.is_empty() {
+                break;
+            }
+            row = parents[row] as usize;
         }
+        row
     }
 
     /// Points the variables of a block at this window's rows.
