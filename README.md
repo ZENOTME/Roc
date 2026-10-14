@@ -173,13 +173,6 @@ SUM/COUNT reductions lower to SIMD with sparse/dense null handling. Ordinary
 SUM/COUNT state updates are emitted directly; word-key grouping uses a bounded,
 collision-checked lookup cache with a hash-table slow path.
 
-For a whole-engine comparison against a pinned main commit, use
-`python3 benches/main_compare/run.py --baseline <commit>`. The shared harness
-validates every output row, builds isolated release binaries, and separates
-preparation/JIT time from execution. It covers resident scan, filter/project,
-arithmetic, division, global aggregation, and grouped aggregation with 1/4 workers,
-and measures the current engine in every execution mode.
-
 ## DataFusion Parquet integration
 
 The optional [`roc-datafusion`](integrations/datafusion/README.md) workspace crate
