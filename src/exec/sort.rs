@@ -18,8 +18,10 @@ use crate::arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
+use super::{Cpu, run_all};
 use crate::error::{Error, Result};
 use crate::kernel::scalar;
+use std::sync::Arc;
 
 /// One sort key: a column of the sorted chunks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,35 +117,88 @@ pub(crate) fn take(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch> 
     .map_err(|source| Error::internal("rows cannot be taken".into()).with_source(source))
 }
 
+/// Rows below which one job sorts them all.
+const PARALLEL_ROWS: usize = 64 * 1024;
+
 /// The rows of `chunks` ordered by `keys`; with `fetch`, only the first.
-/// Rows with equal keys keep their order.
-pub fn sort_chunks(
+/// Rows with equal keys keep their order. Ranges of rows sort in CPU jobs
+/// of their own; their runs merge at the end.
+pub async fn sort_chunks(
     schema: &SchemaRef,
     chunks: Vec<RecordBatch>,
     keys: &[SortKey],
     fetch: Option<usize>,
+    cpu: &dyn Cpu,
 ) -> Result<Vec<RecordBatch>> {
     let batch = concat_chunks(schema, &chunks)?;
     drop(chunks);
     let rows = batch.num_rows();
-    let encoded = RowKeys::new(batch.columns(), keys, rows)?;
-    let mut order = (0..rows as u32).collect::<Vec<_>>();
-    let compare = |a: &u32, b: &u32| {
-        encoded
-            .row(*a as usize)
-            .cmp(encoded.row(*b as usize))
-            .then(a.cmp(b))
-    };
-    match fetch {
-        Some(n) if n < rows => {
-            order.select_nth_unstable_by(n, compare);
-            order.truncate(n);
-            order.sort_unstable_by(compare);
-        }
-        _ => order.sort_unstable_by(compare),
-    }
-    if order.is_empty() {
+    if rows == 0 || fetch == Some(0) {
         return Ok(vec![]);
     }
+    let encoded = Arc::new(RowKeys::new(batch.columns(), keys, rows)?);
+    let runs = if rows < PARALLEL_ROWS {
+        1
+    } else {
+        (2 * cpu.parallelism()).max(1)
+    };
+    let size = rows.div_ceil(runs);
+    let jobs = (0..runs)
+        .map(|i| {
+            let encoded = encoded.clone();
+            let range = i * size..((i + 1) * size).min(rows);
+            Box::new(move || -> Result<Vec<u32>> {
+                let mut order = range.map(|r| r as u32).collect::<Vec<_>>();
+                let compare = |a: &u32, b: &u32| {
+                    encoded
+                        .row(*a as usize)
+                        .cmp(encoded.row(*b as usize))
+                        .then(a.cmp(b))
+                };
+                match fetch {
+                    Some(n) if n < order.len() => {
+                        order.select_nth_unstable_by(n, compare);
+                        order.truncate(n);
+                        order.sort_unstable_by(compare);
+                    }
+                    _ => order.sort_unstable_by(compare),
+                }
+                Ok(order)
+            }) as Box<dyn FnOnce() -> Result<Vec<u32>> + Send>
+        })
+        .collect();
+    let runs = run_all(cpu, jobs).await?;
+    let order = merge(&encoded, runs, fetch.unwrap_or(rows));
     Ok(vec![take(&batch, &order)?])
+}
+
+/// The first `limit` rows of sorted runs, merged by key and then row.
+fn merge(keys: &RowKeys, mut runs: Vec<Vec<u32>>, limit: usize) -> Vec<u32> {
+    if runs.len() == 1 {
+        let mut run = runs.pop().unwrap();
+        run.truncate(limit);
+        return run;
+    }
+    let total = runs.iter().map(Vec::len).sum::<usize>().min(limit);
+    let mut at = vec![0; runs.len()];
+    let mut out = Vec::with_capacity(total);
+    while out.len() < total {
+        let mut best: Option<(usize, u32)> = None;
+        for (i, run) in runs.iter().enumerate() {
+            let Some(&r) = run.get(at[i]) else { continue };
+            let better = best.is_none_or(|(_, b)| {
+                keys.row(r as usize)
+                    .cmp(keys.row(b as usize))
+                    .then(r.cmp(&b))
+                    .is_lt()
+            });
+            if better {
+                best = Some((i, r));
+            }
+        }
+        let (i, r) = best.expect("rows are left");
+        at[i] += 1;
+        out.push(r);
+    }
+    out
 }

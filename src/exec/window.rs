@@ -16,6 +16,7 @@
 //! its partition and order keys, computes one value per row and returns the
 //! values in the original row order.
 use super::sort::{RowKeys, SortKey};
+use super::{Cpu, run_all};
 use crate::arrow::{
     array::ArrayRef,
     datatypes::{DataType, SchemaRef},
@@ -23,6 +24,7 @@ use crate::arrow::{
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::kernel::scalar::{self, Cell};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowFunction {
@@ -59,23 +61,53 @@ pub struct Window {
     pub output: DataType,
 }
 
-/// The chunks with one more column per window, of `schema`.
-pub fn compute(
+/// Rows hash-partitioned by partition key among the jobs of one window
+/// specification: below this many, one job.
+const PARALLEL_ROWS: usize = 32 * 1024;
+
+/// The chunks with one more column per window, of `schema`. Windows with
+/// the same partition and order keys share one sort; rows split by a hash
+/// of their partition key, and each part sorts and computes in a CPU job.
+pub async fn compute(
     schema: &SchemaRef,
     chunks: Vec<RecordBatch>,
     windows: &[Window],
+    cpu: &dyn Cpu,
 ) -> Result<Vec<RecordBatch>> {
     let inputs = schema.fields().len() - windows.len();
-    let input_schema = std::sync::Arc::new(crate::arrow::datatypes::Schema::new(
+    let input_schema = Arc::new(crate::arrow::datatypes::Schema::new(
         schema.fields()[..inputs].to_vec(),
     ));
-    let batch = super::sort::concat_chunks(&input_schema, &chunks)?;
+    let batch = Arc::new(super::sort::concat_chunks(&input_schema, &chunks)?);
     drop(chunks);
     let rows = batch.num_rows();
-    let mut columns = batch.columns().to_vec();
-    for w in windows {
-        columns.push(window(&batch, rows, w)?);
+    let mut outputs: Vec<Option<ArrayRef>> = vec![None; windows.len()];
+    let mut specs: Vec<(Vec<usize>, Vec<SortKey>, Vec<usize>)> = vec![];
+    for (i, w) in windows.iter().enumerate() {
+        match specs
+            .iter_mut()
+            .find(|(p, o, _)| *p == w.partition && *o == w.order)
+        {
+            Some(spec) => spec.2.push(i),
+            None => specs.push((w.partition.clone(), w.order.clone(), vec![i])),
+        }
     }
+    let parts = if rows < PARALLEL_ROWS {
+        1
+    } else {
+        (2 * cpu.parallelism()).max(1)
+    };
+    for (partition, order, members) in specs {
+        let members = members
+            .into_iter()
+            .map(|i| (i, windows[i].clone()))
+            .collect::<Vec<_>>();
+        for (i, array) in spec(&batch, rows, &partition, &order, &members, parts, cpu).await? {
+            outputs[i] = Some(array);
+        }
+    }
+    let mut columns = batch.columns().to_vec();
+    columns.extend(outputs.into_iter().map(Option::unwrap));
     let out = RecordBatch::try_new_with_options(
         schema.clone(),
         columns,
@@ -87,9 +119,17 @@ pub fn compute(
     Ok(if rows == 0 { vec![] } else { vec![out] })
 }
 
-fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
-    let partition = w
-        .partition
+/// The output of every window of one partition and order specification.
+async fn spec(
+    batch: &Arc<RecordBatch>,
+    rows: usize,
+    partition: &[usize],
+    order: &[SortKey],
+    windows: &[(usize, Window)],
+    parts: usize,
+    cpu: &dyn Cpu,
+) -> Result<Vec<(usize, ArrayRef)>> {
+    let partition = partition
         .iter()
         .map(|&column| SortKey {
             column,
@@ -97,21 +137,91 @@ fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
             nulls_first: true,
         })
         .collect::<Vec<_>>();
-    let parts = RowKeys::new(batch.columns(), &partition, rows)?;
-    let orders = RowKeys::new(batch.columns(), &w.order, rows)?;
-    let mut sorted = (0..rows).collect::<Vec<_>>();
-    sorted.sort_by(|&a, &b| {
-        parts
-            .row(a)
-            .cmp(parts.row(b))
-            .then_with(|| orders.row(a).cmp(orders.row(b)))
-            .then(a.cmp(&b))
-    });
-    let argument = w
-        .argument
-        .map(|c| scalar::decode(batch.column(c)))
-        .transpose()?;
-    let argument_type = w.argument.map(|c| batch.column(c).data_type().clone());
+    let keys = Arc::new((
+        RowKeys::new(batch.columns(), &partition, rows)?,
+        RowKeys::new(batch.columns(), order, rows)?,
+    ));
+    // Each window's argument, decoded once.
+    let arguments = Arc::new(
+        windows
+            .iter()
+            .map(|(_, w)| w.argument.map(|c| scalar::decode(batch.column(c))).transpose())
+            .collect::<Result<Vec<_>>>()?,
+    );
+    let mut buckets = vec![vec![]; parts];
+    for r in 0..rows {
+        let b = if parts == 1 {
+            0
+        } else {
+            (hash(keys.0.row(r)) % parts as u64) as usize
+        };
+        buckets[b].push(r);
+    }
+    let windows = Arc::new(windows.to_vec());
+    let jobs = buckets
+        .into_iter()
+        .map(|rows| {
+            let (keys, arguments, windows, batch) =
+                (keys.clone(), arguments.clone(), windows.clone(), batch.clone());
+            Box::new(move || -> Result<(Vec<usize>, Vec<Vec<Cell>>)> {
+                let mut sorted = rows;
+                let (parts, orders) = (&keys.0, &keys.1);
+                sorted.sort_unstable_by(|&a, &b| {
+                    parts
+                        .row(a)
+                        .cmp(parts.row(b))
+                        .then_with(|| orders.row(a).cmp(orders.row(b)))
+                        .then(a.cmp(&b))
+                });
+                let values = windows
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|((_, w), argument)| {
+                        let t = w.argument.map(|c| batch.column(c).data_type().clone());
+                        values(&sorted, parts, orders, w, argument.as_deref(), t.as_ref())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((sorted, values))
+            }) as Box<dyn FnOnce() -> Result<(Vec<usize>, Vec<Vec<Cell>>)> + Send>
+        })
+        .collect();
+    let done = run_all(cpu, jobs).await?;
+    let mut out = vec![vec![Cell::default(); rows]; windows.len()];
+    for (sorted, values) in &done {
+        for (column, values) in out.iter_mut().zip(values) {
+            for (&r, v) in sorted.iter().zip(values) {
+                column[r] = *v;
+            }
+        }
+    }
+    // Byte cells point into the batch, alive until here.
+    let arrays = windows
+        .iter()
+        .zip(&out)
+        .map(|((i, w), cells)| Ok((*i, scalar::encode(&w.output, cells)?)))
+        .collect::<Result<Vec<_>>>()?;
+    drop(done);
+    Ok(arrays)
+}
+
+fn hash(key: &[u8]) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = foldhash::fast::FixedState::with_seed(0x1357_9bdf_2468_ace0).build_hasher();
+    h.write(key);
+    h.finish()
+}
+
+/// A window's value for every row of `sorted`, rows sorted by partition
+/// and order keys, in that order.
+fn values(
+    sorted: &[usize],
+    parts: &RowKeys,
+    orders: &RowKeys,
+    w: &Window,
+    argument: Option<&[Cell]>,
+    argument_type: Option<&DataType>,
+) -> Result<Vec<Cell>> {
+    let rows = sorted.len();
     let mut out = vec![Cell::default(); rows];
     let mut start = 0;
     while start < rows {
@@ -120,6 +230,7 @@ fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
             end += 1;
         }
         let part = &sorted[start..end];
+        let out = &mut out[start..end];
         let peers = |i: usize| {
             let mut j = i + 1;
             while j < part.len() && orders.row(part[j]) == orders.row(part[i]) {
@@ -133,35 +244,31 @@ fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
                 while i < part.len() {
                     let j = peers(i);
                     dense += 1;
-                    for (k, &r) in part.iter().enumerate().take(j).skip(i) {
+                    for (k, o) in out.iter_mut().enumerate().take(j).skip(i) {
                         let v = match w.function {
                             WindowFunction::Rank => i as u64 + 1,
                             WindowFunction::DenseRank => dense,
                             _ => k as u64 + 1,
                         };
-                        out[r] = Cell::word(v);
+                        *o = Cell::word(v);
                     }
                     i = j;
                 }
             }
             _ => {
-                let values = argument.as_deref();
-                let t = argument_type.as_ref();
-                let mut acc = Running::new(w.function, t, &w.output)?;
+                let mut acc = Running::new(w.function, argument_type, &w.output)?;
+                let value = |r: usize| argument.map(|v| v[r]);
                 match w.frame {
                     WindowFrame::Partition => {
                         for &r in part {
-                            acc.add(values.map(|v| v[r]))?;
+                            acc.add(value(r))?;
                         }
-                        let v = acc.value()?;
-                        for &r in part {
-                            out[r] = v;
-                        }
+                        out.fill(acc.value()?);
                     }
                     WindowFrame::RowsToCurrent => {
-                        for &r in part {
-                            acc.add(values.map(|v| v[r]))?;
-                            out[r] = acc.value()?;
+                        for (o, &r) in out.iter_mut().zip(part) {
+                            acc.add(value(r))?;
+                            *o = acc.value()?;
                         }
                     }
                     WindowFrame::RangeToCurrent => {
@@ -169,12 +276,9 @@ fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
                         while i < part.len() {
                             let j = peers(i);
                             for &r in &part[i..j] {
-                                acc.add(values.map(|v| v[r]))?;
+                                acc.add(value(r))?;
                             }
-                            let v = acc.value()?;
-                            for &r in &part[i..j] {
-                                out[r] = v;
-                            }
+                            out[i..j].fill(acc.value()?);
                             i = j;
                         }
                     }
@@ -183,7 +287,7 @@ fn window(batch: &RecordBatch, rows: usize, w: &Window) -> Result<ArrayRef> {
         }
         start = end;
     }
-    scalar::encode(&w.output, &out)
+    Ok(out)
 }
 
 /// A running aggregate of one partition.
@@ -197,6 +301,7 @@ struct Running {
     float: f64,
     extremum: Option<(Vec<u8>, Cell)>,
     key: scalar::KeyEncoder,
+    scratch: Vec<u8>,
 }
 
 impl Running {
@@ -229,6 +334,7 @@ impl Running {
             float: 0.0,
             extremum: None,
             key: scalar::bind_key(input.unwrap_or(&DataType::Null))?,
+            scratch: vec![],
         })
     }
 
@@ -248,7 +354,8 @@ impl Running {
                 _ => self.int = self.int.wrapping_add(v.bits as i64),
             },
             WindowFunction::Min | WindowFunction::Max => {
-                let mut key = vec![];
+                let mut key = std::mem::take(&mut self.scratch);
+                key.clear();
                 (self.key)(v, &mut key);
                 let better = self.extremum.as_ref().is_none_or(|(old, _)| {
                     if self.function == WindowFunction::Min {
@@ -260,8 +367,15 @@ impl Running {
                 // String cells borrow the materialized chunk, alive until
                 // the output is encoded.
                 if better {
-                    self.extremum = Some((key, v));
+                    match &mut self.extremum {
+                        Some((old, cell)) => {
+                            std::mem::swap(old, &mut key);
+                            *cell = v;
+                        }
+                        None => self.extremum = Some((std::mem::take(&mut key), v)),
+                    }
                 }
+                self.scratch = key;
             }
             _ => {}
         }

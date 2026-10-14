@@ -28,7 +28,7 @@ mod table;
 pub mod window;
 
 pub use aggregate::{AggregateExecuteState, AggregateSinkExec, AggregateSourceExec};
-pub use buffer::{Buffer, BufferSinkExec, BufferSourceExec, Finish};
+pub use buffer::{Buffer, BufferSinkExec, BufferSourceExec, Finish, finish};
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
 pub use scan::ScanExec;
 pub use table::TableSinkExec;

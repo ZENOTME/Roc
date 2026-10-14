@@ -140,7 +140,9 @@ impl Operator for SortOperator {
             })
             .collect::<Vec<_>>();
         let fetch = self.fetch;
-        let finish: Finish = Box::new(move |chunks| sort_chunks(&schema, chunks, &keys, fetch));
+        let finish: Finish = Box::new(move |chunks, cpu| {
+            Box::pin(async move { sort_chunks(&schema, chunks, &keys, fetch, cpu).await })
+        });
         let buffer = Arc::new(Buffer::default());
         let sink = BufferSinkExec::new(buffer.clone(), Some(finish));
         materialize(child, current, graph, &self.columns, sink)?;
@@ -186,7 +188,7 @@ impl Operator for LimitOperator {
     ) -> Result<()> {
         let child = one_child(current_node, "limit")?;
         let (skip, fetch) = (self.skip, self.fetch);
-        let finish: Finish = Box::new(move |chunks| {
+        let finish: Finish = crate::exec::finish(move |chunks| {
             let mut out = vec![];
             let (mut skip, mut left) = (skip, fetch.unwrap_or(usize::MAX));
             for chunk in chunks {
@@ -291,7 +293,7 @@ impl Operator for SingleRowOperator {
     ) -> Result<()> {
         let child = one_child(current_node, "single_row")?;
         let schema = graph.columns().schema(&self.columns)?;
-        let finish: Finish = Box::new(move |chunks| {
+        let finish: Finish = crate::exec::finish(move |chunks| {
             let rows = chunks.iter().map(RecordBatch::num_rows).sum::<usize>();
             if rows > 1 {
                 return Err(Error::new(
@@ -466,7 +468,9 @@ impl Operator for WindowOperator {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let finish: Finish = Box::new(move |chunks| window::compute(&schema, chunks, &windows));
+        let finish: Finish = Box::new(move |chunks, cpu| {
+            Box::pin(async move { window::compute(&schema, chunks, &windows, cpu).await })
+        });
         let buffer = Arc::new(Buffer::default());
         let sink = BufferSinkExec::new(buffer.clone(), Some(finish));
         materialize(child, current, graph, &self.columns, sink)?;

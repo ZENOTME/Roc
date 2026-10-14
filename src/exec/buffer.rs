@@ -14,7 +14,7 @@
 
 //! Materialized results: pipelines sink chunks into a buffer, optionally
 //! transformed once their input ends, and dependent pipelines read it.
-use super::{SinkExec, SinkStatus, SourceExec};
+use super::{Cpu, Inline, SinkExec, SinkStatus, SourceExec};
 use crate::arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -32,8 +32,19 @@ const MORSEL_ROWS: usize = 8192;
 #[derive(Default)]
 pub struct Buffer(Mutex<Vec<RecordBatch>>);
 
-/// Transforms the chunks of one producing pipeline once its input ends.
-pub type Finish = Box<dyn FnOnce(Vec<RecordBatch>) -> Result<Vec<RecordBatch>> + Send>;
+/// Transforms the chunks of one producing pipeline once its input ends,
+/// with CPU work allowed on the given `Cpu`.
+pub type Finish = Box<
+    dyn for<'a> FnOnce(Vec<RecordBatch>, &'a dyn Cpu) -> BoxFuture<'a, Result<Vec<RecordBatch>>>
+        + Send,
+>;
+
+/// A finish that runs on the coordinator.
+pub fn finish(
+    f: impl FnOnce(Vec<RecordBatch>) -> Result<Vec<RecordBatch>> + Send + 'static,
+) -> Finish {
+    Box::new(move |chunks, _| Box::pin(async move { f(chunks) }))
+}
 
 pub struct BufferSinkExec {
     buffer: Arc<Buffer>,
@@ -79,13 +90,21 @@ impl SinkExec for BufferSinkExec {
     }
 
     fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+        self.finish_on(guard, &Inline)
+    }
+
+    fn finish_on<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        cpu: &'a dyn Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
             let chunks = std::mem::take(&mut self.chunks);
             let chunks = match self.finish.take() {
-                Some(f) => f(chunks)?,
+                Some(f) => f(chunks, cpu).await?,
                 None => chunks,
             };
             self.buffer.0.lock().unwrap().extend(chunks);
