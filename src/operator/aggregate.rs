@@ -27,10 +27,16 @@ use std::sync::Arc;
 
 /// Groups rows by the group expressions and computes aggregates per group.
 /// Outputs the group columns followed by the aggregate columns.
+///
+/// With grouping sets, rows are grouped once per set of group expressions:
+/// the group columns outside a set are NULL in its rows, and a grouping ID
+/// column after the group columns has bit `n - 1 - i` set when expression
+/// `i` of `n` is outside the set.
 #[derive(Clone, Debug)]
 pub struct AggregateOperator {
     groups: Vec<ScalarExprRef>,
     aggregates: Vec<Arc<AggregateExpression>>,
+    grouping: Option<(Vec<Vec<usize>>, ColumnId)>,
 }
 
 impl AggregateOperator {
@@ -43,7 +49,38 @@ impl AggregateOperator {
                 "aggregate needs a group or function".into(),
             ));
         }
-        Ok(Self { groups, aggregates })
+        Ok(Self {
+            groups,
+            aggregates,
+            grouping: None,
+        })
+    }
+
+    /// Groups by each set of group expression indexes; `id` receives the
+    /// grouping ID, of an unsigned integer type.
+    pub fn with_grouping_sets(mut self, sets: Vec<Vec<usize>>, id: ColumnId) -> Result<Self> {
+        if sets.is_empty() || sets.iter().flatten().any(|&g| g >= self.groups.len()) {
+            return Err(Error::invalid_plan(
+                "grouping sets list group expressions".into(),
+            ));
+        }
+        if self.groups.len() > 64 {
+            return Err(Error::unsupported("at most 64 grouping expressions".into()));
+        }
+        self.grouping = Some((sets, id));
+        Ok(self)
+    }
+
+    /// The sets of group expression indexes rows are grouped by.
+    pub fn sets(&self) -> Vec<Vec<usize>> {
+        match &self.grouping {
+            Some((sets, _)) => sets.clone(),
+            None => vec![(0..self.groups.len()).collect()],
+        }
+    }
+
+    pub fn grouping_id(&self) -> Option<ColumnId> {
+        self.grouping.as_ref().map(|g| g.1)
     }
 
     pub fn groups(&self) -> &[ScalarExprRef] {
@@ -62,13 +99,11 @@ impl AggregateOperator {
     /// domain. Returns the grouping state followed by the accumulator states,
     /// in the order the sink merges them.
     pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<Vec<StateId>> {
-        let schema = builder.columns().schema(&self.group_columns())?;
-        let grouping = builder.state(StateBuilder::new(move || {
-            Ok(GroupState {
-                index: GroupIndex::new(&schema)?,
-                schema: schema.clone(),
-            })
-        }));
+        Ok(self.build_set_kernels(builder)?.remove(0))
+    }
+
+    /// The states of `build_kernels` for each grouping set.
+    pub fn build_set_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<Vec<Vec<StateId>>> {
         let mut keys = Vec::with_capacity(self.groups.len());
         for (index, group) in self.groups.iter().enumerate() {
             let key = group
@@ -78,15 +113,31 @@ impl AggregateOperator {
                 .with_context(|| ErrorContext::new("aggregate.bind_group").field("group", index))?;
             keys.push(key);
         }
-        let ids = builder.group_lookup(grouping, keys)?;
-        let mut states = vec![grouping];
-        for (index, aggregate) in self.aggregates.iter().enumerate() {
-            let state = aggregate
-                .build_kernels(builder, ids, self.groups.is_empty())
-                .with_context(|| ErrorContext::new("aggregate.bind").field("aggregate", index))?;
-            states.push(state);
+        let columns = self.group_columns();
+        let mut sets = vec![];
+        for set in self.sets() {
+            let set_columns = set.iter().map(|&g| columns[g]).collect::<Vec<_>>();
+            let schema = builder.columns().schema(&set_columns)?;
+            let grouping = builder.state(StateBuilder::new(move || {
+                Ok(GroupState {
+                    index: GroupIndex::new(&schema)?,
+                    schema: schema.clone(),
+                })
+            }));
+            let set_keys = set.iter().map(|&g| keys[g]).collect();
+            let ids = builder.group_lookup(grouping, set_keys)?;
+            let mut states = vec![grouping];
+            for (index, aggregate) in self.aggregates.iter().enumerate() {
+                let state = aggregate
+                    .build_kernels(builder, ids, set.is_empty())
+                    .with_context(|| {
+                        ErrorContext::new("aggregate.bind").field("aggregate", index)
+                    })?;
+                states.push(state);
+            }
+            sets.push(states);
         }
-        Ok(states)
+        Ok(sets)
     }
 }
 
@@ -97,6 +148,7 @@ impl Operator for AggregateOperator {
 
     fn output_columns(&self) -> Vec<ColumnId> {
         let mut columns = self.group_columns();
+        columns.extend(self.grouping_id());
         columns.extend(self.aggregates.iter().map(|a| a.output()));
         columns
     }
@@ -116,7 +168,7 @@ impl Operator for AggregateOperator {
         let input = graph.new_dependency(current)?;
         build_pipeline_on_node(child, input, graph)?;
         let state = self.new_execute_state(graph.columns())?;
-        let locals = self.build_kernels(&mut graph.pipeline_mut(input)?.kernels)?;
+        let locals = self.build_set_kernels(&mut graph.pipeline_mut(input)?.kernels)?;
         let (source, sink) = self.build_exec(state, locals);
         graph.pipeline_mut(input)?.set_sink(Box::new(sink), None)?;
         graph

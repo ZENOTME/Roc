@@ -42,6 +42,8 @@ const AGGREGATE_MORSEL_ROWS: usize = 2048;
 struct AggregateMergeState {
     index: GroupIndex,
     group_ids: Vec<usize>,
+    /// The output of an operator without grouping sets, for tests.
+    #[cfg(test)]
     output_schema: SchemaRef,
     accumulators: Vec<Accumulator>,
 }
@@ -71,8 +73,21 @@ impl PartialAggregate {
 }
 
 impl AggregateMergeState {
+    #[cfg(test)]
     fn new(operator: &AggregateOperator, columns: &ColumnContext) -> Result<Self> {
-        let schema = columns.schema(&operator.group_columns())?;
+        let all = (0..operator.groups().len()).collect::<Vec<_>>();
+        Self::for_set(operator, columns, &all)
+    }
+
+    /// The merge of one grouping set's partials.
+    fn for_set(
+        operator: &AggregateOperator,
+        columns: &ColumnContext,
+        set: &[usize],
+    ) -> Result<Self> {
+        let group_columns = operator.group_columns();
+        let set_columns = set.iter().map(|&g| group_columns[g]).collect::<Vec<_>>();
+        let schema = columns.schema(&set_columns)?;
         let mut accumulators = Vec::new();
         for (index, aggregate) in operator.aggregates().iter().enumerate() {
             let mut accumulator = aggregate
@@ -86,6 +101,7 @@ impl AggregateMergeState {
         Ok(Self {
             index: GroupIndex::new(&schema)?,
             group_ids: vec![],
+            #[cfg(test)]
             output_schema: columns.schema(&operator.output_columns())?,
             accumulators,
         })
@@ -129,16 +145,25 @@ impl AggregateMergeState {
         }
         Ok(())
     }
-    fn finish(self) -> Result<RecordBatch> {
+    /// The group columns, the aggregate columns and the row count.
+    fn finish_columns(self) -> Result<(Vec<ArrayRef>, Vec<ArrayRef>, usize)> {
         let count = self.index.len();
-        let mut columns = self.index.columns()?;
+        let groups = self.index.columns()?;
+        let mut columns = vec![];
         for (index, accumulator) in self.accumulators.into_iter().enumerate() {
             columns.push(accumulator.evaluate().with_context(|| {
                 ErrorContext::new("aggregate.evaluate").field("aggregate", index)
             })?);
         }
+        Ok((groups, columns, count))
+    }
+    #[cfg(test)]
+    fn finish(self) -> Result<RecordBatch> {
+        let schema = self.output_schema.clone();
+        let (mut columns, aggregates, count) = self.finish_columns()?;
+        columns.extend(aggregates);
         RecordBatch::try_new_with_options(
-            self.output_schema,
+            schema,
             columns,
             &RecordBatchOptions::new().with_row_count(Some(count)),
         )
@@ -156,13 +181,23 @@ struct AggregateSharedState {
 
 /// Created for one execution. Only the result cell is shared across pipelines.
 pub struct AggregateExecuteState {
-    merge: AggregateMergeState,
+    merges: Vec<AggregateMergeState>,
+    layout: Layout,
     result: Arc<AggregateSharedState>,
 }
 
+/// How grouping-set results form the output.
+struct Layout {
+    schema: SchemaRef,
+    groups: usize,
+    sets: Vec<Vec<usize>>,
+    grouping_id: bool,
+}
+
 pub struct AggregateSinkExec {
-    states: Vec<StateId>,
-    merge: Option<AggregateMergeState>,
+    states: Vec<Vec<StateId>>,
+    merges: Option<Vec<AggregateMergeState>>,
+    layout: Layout,
     result: Arc<AggregateSharedState>,
 }
 pub struct AggregateSourceExec {
@@ -171,15 +206,26 @@ pub struct AggregateSourceExec {
 }
 impl AggregateOperator {
     pub fn new_execute_state(&self, columns: &ColumnContext) -> Result<AggregateExecuteState> {
+        let sets = self.sets();
         Ok(AggregateExecuteState {
-            merge: AggregateMergeState::new(self, columns)?,
+            merges: sets
+                .iter()
+                .map(|set| AggregateMergeState::for_set(self, columns, set))
+                .collect::<Result<_>>()?,
+            layout: Layout {
+                schema: columns.schema(&self.output_columns())?,
+                groups: self.groups().len(),
+                sets,
+                grouping_id: self.grouping_id().is_some(),
+            },
             result: Arc::new(AggregateSharedState::default()),
         })
     }
+    /// `locals` are the states of each grouping set, from `build_set_kernels`.
     pub fn build_exec(
         &self,
         state: AggregateExecuteState,
-        locals: Vec<StateId>,
+        locals: Vec<Vec<StateId>>,
     ) -> (AggregateSourceExec, AggregateSinkExec) {
         let source = AggregateSourceExec {
             result: state.result.clone(),
@@ -187,10 +233,60 @@ impl AggregateOperator {
         };
         let sink = AggregateSinkExec {
             states: locals,
-            merge: Some(state.merge),
+            merges: Some(state.merges),
+            layout: state.layout,
             result: state.result,
         };
         (source, sink)
+    }
+}
+
+impl Layout {
+    /// The rows of every set, with NULL group columns outside each set.
+    fn assemble(&self, results: Vec<(Vec<ArrayRef>, Vec<ArrayRef>, usize)>) -> Result<RecordBatch> {
+        use crate::arrow::array::{UInt64Array, new_null_array};
+        let fields = self.schema.fields();
+        let mut columns: Vec<Vec<ArrayRef>> = vec![vec![]; fields.len()];
+        let mut rows = 0;
+        for (set, (groups, aggregates, count)) in self.sets.iter().zip(results) {
+            rows += count;
+            let mut groups = groups.into_iter();
+            for g in 0..self.groups {
+                columns[g].push(if set.contains(&g) {
+                    groups.next().unwrap()
+                } else {
+                    new_null_array(fields[g].data_type(), count)
+                });
+            }
+            let mut next = self.groups;
+            if self.grouping_id {
+                let id = (0..self.groups)
+                    .filter(|g| !set.contains(g))
+                    .fold(0u64, |id, g| id | 1 << (self.groups - 1 - g));
+                let ids: ArrayRef = Arc::new(UInt64Array::from(vec![id; count]));
+                let t = fields[next].data_type();
+                let cast = crate::kernel::scalar::encode(t, &crate::kernel::scalar::decode(&ids)?)?;
+                columns[next].push(cast);
+                next += 1;
+            }
+            for (i, a) in aggregates.into_iter().enumerate() {
+                columns[next + i].push(a);
+            }
+        }
+        let arrays = columns
+            .into_iter()
+            .zip(fields.iter())
+            .map(|(parts, f)| crate::kernel::table::concat(parts.iter(), f.data_type()))
+            .collect::<Result<Vec<_>>>()?;
+        RecordBatch::try_new_with_options(
+            self.schema.clone(),
+            arrays,
+            &RecordBatchOptions::new().with_row_count(Some(rows)),
+        )
+        .map_err(|source| {
+            Error::invalid_plan("aggregate output does not match its declared schema".into())
+                .with_source(source)
+        })
     }
 }
 
@@ -201,21 +297,23 @@ impl SinkExec for AggregateSinkExec {
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let (groups, states) = crate::kernel::aggregation::partial(&mut local, &self.states)?;
-            let partial = PartialAggregate { groups, states };
-            let merge = self
-                .merge
-                .as_mut()
-                .ok_or_else(|| Error::internal("aggregate already finished".into()))?;
-            for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
-                if guard.is_shutdown_requested() {
-                    return Err(Error::cancelled());
+            for (set, states) in self.states.iter().enumerate() {
+                let (groups, states) = crate::kernel::aggregation::partial(&mut local, states)?;
+                let partial = PartialAggregate { groups, states };
+                let merge = &mut self
+                    .merges
+                    .as_mut()
+                    .ok_or_else(|| Error::internal("aggregate already finished".into()))?[set];
+                for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    merge.merge(&partial.slice(
+                        offset,
+                        AGGREGATE_MORSEL_ROWS.min(partial.num_rows() - offset),
+                    ))?;
+                    crate::pipeline::yield_now().await;
                 }
-                merge.merge(&partial.slice(
-                    offset,
-                    AGGREGATE_MORSEL_ROWS.min(partial.num_rows() - offset),
-                ))?;
-                crate::pipeline::yield_now().await;
             }
             Ok(())
         })
@@ -225,11 +323,14 @@ impl SinkExec for AggregateSinkExec {
             if guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
-            let batch = self
-                .merge
+            let results = self
+                .merges
                 .take()
                 .ok_or_else(|| Error::internal("aggregate already finished".into()))?
-                .finish()?;
+                .into_iter()
+                .map(AggregateMergeState::finish_columns)
+                .collect::<Result<Vec<_>>>()?;
+            let batch = self.layout.assemble(results)?;
             self.result
                 .finalized
                 .set(batch)

@@ -78,6 +78,8 @@ pub(crate) struct Accumulator {
     float_inputs: Vec<fn(Cell) -> f64>,
     key: scalar::KeyEncoder,
     own: scalar::OwnValue,
+    /// The scale of a decimal input.
+    input_scale: i8,
     output: DataType,
     #[cfg(test)]
     update_row: fn(&mut Self, usize, &[Cell]) -> Result<()>,
@@ -114,9 +116,14 @@ impl Accumulator {
                 "unsupported aggregate argument type: {t}"
             )));
         }
+        let decimal_average = matches!(
+            (inputs.first(), output),
+            (Some(DataType::Decimal128(..)), DataType::Decimal128(..))
+        );
         let valid_output = match function {
             Count => output == &DataType::Int64,
-            Avg | CovarPop => output == &DataType::Float64,
+            Avg => output == &DataType::Float64 || decimal_average,
+            CovarPop | StddevSamp => output == &DataType::Float64,
             Min | Max => inputs.first() == Some(output),
             Sum => true,
         };
@@ -128,13 +135,17 @@ impl Accumulator {
         if function == Sum
             && !matches!(
                 output,
-                DataType::Int64 | DataType::UInt64 | DataType::Float64
+                DataType::Int64 | DataType::UInt64 | DataType::Float64 | DataType::Decimal128(..)
             )
         {
             return Err(Error::unsupported(format!(
                 "unsupported sum result type: {output}"
             )));
         }
+        let input_scale = match inputs.first() {
+            Some(DataType::Decimal128(_, s)) => *s,
+            _ => 0,
+        };
         #[cfg(test)]
         let update_row = match function {
             Count if distinct => Self::distinct_row,
@@ -148,15 +159,18 @@ impl Accumulator {
                         Self::sum_integer_row
                     }
                 }
+                DataType::Decimal128(..) => Self::sum_wide_row,
                 _ => Self::unsupported_sum_row,
             },
+            Avg if decimal_average => Self::avg_wide_row,
             Avg => Self::avg_row,
             CovarPop => Self::covar_row,
+            StddevSamp => Self::variance_row,
             Min => Self::extremum_row::<true>,
             Max => Self::extremum_row::<false>,
         };
         #[cfg(test)]
-        let float_inputs = if matches!(function, Sum | Avg | CovarPop) {
+        let float_inputs = if matches!(function, Sum | Avg | CovarPop | StddevSamp) {
             inputs
                 .iter()
                 .map(scalar::bind_float)
@@ -175,10 +189,14 @@ impl Accumulator {
             float_inputs,
             key,
             own,
+            input_scale,
             output: output.clone(),
             #[cfg(test)]
             update_row,
         })
+    }
+    fn decimal_average(&self) -> bool {
+        self.function == AggregateFunction::Avg && matches!(self.output, DataType::Decimal128(..))
     }
     pub fn resize(&mut self, count: usize) {
         if count > self.groups.len() {
@@ -272,6 +290,30 @@ impl Accumulator {
         }
         Ok(())
     }
+    fn sum_wide_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        let v = values[0];
+        if v.valid != 0 {
+            let sum = &mut self.groups[id].sum;
+            *sum = Cell::wide(sum.value128().wrapping_add(v.value128()));
+        }
+        Ok(())
+    }
+    fn avg_wide_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        let v = values[0];
+        if v.valid != 0 {
+            let g = &mut self.groups[id];
+            g.count = g.count.checked_add(1).ok_or_else(overflow)?;
+            g.sum = Cell::wide(g.sum.value128().wrapping_add(v.value128()));
+        }
+        Ok(())
+    }
+    fn variance_row(&mut self, id: usize, values: &[Cell]) -> Result<()> {
+        if values[0].valid != 0 {
+            let x = f64::from_bits(values[0].bits);
+            self.groups[id].covar.update(x, x)?;
+        }
+        Ok(())
+    }
     fn extremum_row<const MIN: bool>(&mut self, id: usize, values: &[Cell]) -> Result<()> {
         if values[0].valid == 0 {
             return Ok(());
@@ -313,8 +355,11 @@ impl Accumulator {
             )))],
             Count => vec![DataType::Int64],
             Sum | Min | Max => vec![self.output.clone()],
+            Avg if self.decimal_average() => {
+                vec![DataType::Int64, DataType::Decimal128(38, self.input_scale)]
+            }
             Avg => vec![DataType::UInt64, DataType::Float64],
-            CovarPop => vec![
+            CovarPop | StddevSamp => vec![
                 DataType::UInt64,
                 DataType::Float64,
                 DataType::Float64,
@@ -341,7 +386,10 @@ impl Accumulator {
             Sum => {
                 if !matches!(
                     self.output,
-                    DataType::Int64 | DataType::UInt64 | DataType::Float64
+                    DataType::Int64
+                        | DataType::UInt64
+                        | DataType::Float64
+                        | DataType::Decimal128(..)
                 ) {
                     return Err(Error::internal(format!(
                         "unsupported sum result type: {}",
@@ -365,6 +413,15 @@ impl Accumulator {
                     })
                     .collect::<Vec<_>>(),
             )?],
+            Avg if self.decimal_average() => vec![
+                Arc::new(Int64Array::from_iter_values(
+                    self.groups.iter().map(|g| g.count),
+                )),
+                Arc::new(
+                    Decimal128Array::from_iter_values(self.groups.iter().map(|g| g.sum.value128()))
+                        .with_data_type(DataType::Decimal128(38, self.input_scale)),
+                ),
+            ],
             Avg => vec![
                 Arc::new(UInt64Array::from_iter(
                     self.groups
@@ -377,7 +434,7 @@ impl Accumulator {
                         .map(|g| (g.avg.0 != 0).then_some(g.avg.1)),
                 )),
             ],
-            CovarPop => vec![
+            CovarPop | StddevSamp => vec![
                 Arc::new(UInt64Array::from_iter_values(
                     self.groups.iter().map(|g| g.covar.count),
                 )),
@@ -410,6 +467,7 @@ impl Accumulator {
             .iter()
             .map(scalar::decode)
             .collect::<Result<Vec<_>>>()?;
+        let decimal_average = self.decimal_average();
         for (i, &id) in ids.iter().enumerate() {
             let g = &mut self.groups[id];
             match self.function {
@@ -419,6 +477,13 @@ impl Accumulator {
                         .checked_add(cols[0][i].bits as i64)
                         .ok_or_else(overflow)?
                 }
+                Avg if decimal_average => {
+                    g.count = g
+                        .count
+                        .checked_add(cols[0][i].bits as i64)
+                        .ok_or_else(overflow)?;
+                    g.sum = Cell::wide(g.sum.value128().wrapping_add(cols[1][i].value128()));
+                }
                 Avg => {
                     if cols[0][i].valid != 0 {
                         g.avg.0 = g.avg.0.checked_add(cols[0][i].bits).ok_or_else(overflow)?;
@@ -427,7 +492,7 @@ impl Accumulator {
                         g.avg.1 += f64::from_bits(cols[1][i].bits);
                     }
                 }
-                CovarPop => g.covar.merge(Covariance {
+                CovarPop | StddevSamp => g.covar.merge(Covariance {
                     count: cols[0][i].bits,
                     mean_x: f64::from_bits(cols[1][i].bits),
                     mean_y: f64::from_bits(cols[2][i].bits),
@@ -436,7 +501,9 @@ impl Accumulator {
                 Sum => {
                     let v = cols[0][i];
                     if v.valid != 0 {
-                        if self.output == DataType::Float64 {
+                        if matches!(self.output, DataType::Decimal128(..)) {
+                            g.sum = Cell::wide(g.sum.value128().wrapping_add(v.value128()));
+                        } else if self.output == DataType::Float64 {
                             let v = f64::from_bits(v.bits);
                             g.sum.bits = if g.sum.valid == 0 {
                                 v
@@ -465,6 +532,33 @@ impl Accumulator {
                     .map(|g| i64::try_from(g.distinct.len()).map_err(|_| overflow()))
                     .collect::<Result<Vec<_>>>()?,
             )),
+            Avg if self.decimal_average() => {
+                let DataType::Decimal128(precision, scale) = self.output else {
+                    unreachable!("checked when constructed");
+                };
+                // sum * 10^(result scale - input scale) / count, truncated.
+                let shift = 10i128.pow((scale - self.input_scale).max(0) as u32);
+                let bound = 10i128.pow(precision as u32);
+                let values = self
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        if g.count == 0 {
+                            return Ok(None);
+                        }
+                        let v = g.sum.value128().checked_mul(shift).ok_or_else(overflow)?
+                            / g.count as i128;
+                        if v.unsigned_abs() >= bound as u128 {
+                            return Err(overflow());
+                        }
+                        Ok(Some(v))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Arc::new(Decimal128Array::from(values).with_data_type(self.output.clone()))
+            }
+            StddevSamp => Arc::new(Float64Array::from_iter(self.groups.iter().map(|g| {
+                (g.covar.count > 1).then(|| (g.covar.co_moment / (g.covar.count - 1) as f64).sqrt())
+            }))),
             Avg => Arc::new(Float64Array::from_iter(
                 self.groups
                     .iter()
@@ -540,6 +634,24 @@ impl RowKernel for CovarianceUpdate {
                 .update(f64::from_bits(v[0].bits), f64::from_bits(v[1].bits))?;
         }
         Ok(())
+    }
+}
+pub(crate) struct SumWide;
+impl RowKernel for SumWide {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        a.sum_wide_row(id, v)
+    }
+}
+pub(crate) struct AverageWide;
+impl RowKernel for AverageWide {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        a.avg_wide_row(id, v)
+    }
+}
+pub(crate) struct VarianceUpdate;
+impl RowKernel for VarianceUpdate {
+    fn update(a: &mut Accumulator, id: usize, v: &[Cell]) -> Result<()> {
+        a.variance_row(id, v)
     }
 }
 pub(crate) struct Minimum;

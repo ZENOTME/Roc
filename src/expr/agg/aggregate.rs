@@ -30,6 +30,8 @@ pub enum AggregateFunction {
     Min,
     Max,
     CovarPop,
+    /// The sample standard deviation of Float64 values; NULL below two.
+    StddevSamp,
 }
 
 impl AggregateFunction {
@@ -41,6 +43,7 @@ impl AggregateFunction {
             Self::Min => "min",
             Self::Max => "max",
             Self::CovarPop => "covar_pop",
+            Self::StddevSamp => "stddev_samp",
         }
     }
 }
@@ -103,12 +106,19 @@ impl AggregateExpression {
             AggregateFunction::Sum
                 if matches!(
                     output,
-                    DataType::Int64 | DataType::UInt64 | DataType::Float64
+                    DataType::Int64
+                        | DataType::UInt64
+                        | DataType::Float64
+                        | DataType::Decimal128(..)
                 ) =>
             {
                 Some(output.clone())
             }
-            AggregateFunction::Avg | AggregateFunction::CovarPop => Some(DataType::Float64),
+            // A decimal average keeps its input's scale.
+            AggregateFunction::Avg if matches!(output, DataType::Decimal128(..)) => None,
+            AggregateFunction::Avg
+            | AggregateFunction::CovarPop
+            | AggregateFunction::StddevSamp => Some(DataType::Float64),
             _ => None,
         })
     }
@@ -205,9 +215,19 @@ impl AggregateExpression {
                 DataType::Int64 => AggregateUpdateKind::SumI64,
                 DataType::UInt64 => AggregateUpdateKind::SumU64,
                 DataType::Float64 => AggregateUpdateKind::SumF64,
+                DataType::Decimal128(..) => AggregateUpdateKind::SumI128,
                 _ => return Err(Error::internal("unsupported SUM output".into())),
             },
+            AggregateFunction::Avg
+                if matches!(
+                    columns.column_type(self.output)?.data_type,
+                    DataType::Decimal128(..)
+                ) =>
+            {
+                AggregateUpdateKind::AvgI128
+            }
             AggregateFunction::Avg => AggregateUpdateKind::Avg,
+            AggregateFunction::StddevSamp => AggregateUpdateKind::Variance,
             AggregateFunction::CovarPop => AggregateUpdateKind::CovarPop,
             AggregateFunction::Min => AggregateUpdateKind::Min,
             AggregateFunction::Max => AggregateUpdateKind::Max,

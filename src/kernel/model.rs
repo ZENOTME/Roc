@@ -693,8 +693,14 @@ pub enum AggregateUpdateKind {
     SumI64,
     SumU64,
     SumF64,
+    /// A wrapping sum of 128-bit values.
+    SumI128,
     Avg,
+    /// The count and wrapping 128-bit sum of a decimal average.
+    AvgI128,
     CovarPop,
+    /// Count, mean and squared deviations of one Float64.
+    Variance,
     Min,
     Max,
 }
