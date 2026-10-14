@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::kernels::EvalFn;
-use super::{ColumnValue, ScalarExprRef};
-use super::{ExpressionResultType, kernels};
-use crate::error::{ErrorContext, Result, ResultExt};
-use arrow::{array::new_empty_array, datatypes::DataType};
+use super::{ScalarExprRef, build_input};
+use crate::arrow::datatypes::DataType;
+use crate::column::ColumnId;
+use crate::error::{Error, ErrorContext, Result, ResultExt};
+use crate::kernel::{
+    ColumnVariableBinding, KernelBuilder, KernelError, PendingErrors, ScalarFunction, VariableId,
+    scalar,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKind {
@@ -39,29 +41,21 @@ pub enum FunctionKind {
     IsNotDistinctFrom,
 }
 
-/// A unary or binary built-in call, such as an arithmetic operator, a
-/// comparison, or a NULL test.
+/// A built-in function. Binary operands must have the same type; arithmetic
+/// returns that type and every other function returns Boolean.
 #[derive(Clone, Debug)]
 pub struct FunctionExpression {
     function: FunctionKind,
     arguments: Vec<ScalarExprRef>,
-    result_type: ExpressionResultType,
+    output: ColumnId,
 }
 
 impl FunctionExpression {
-    pub fn unary(
-        function: FunctionKind,
-        argument: ScalarExprRef,
-        data_type: DataType,
-        nullable: bool,
-    ) -> Self {
+    pub fn unary(function: FunctionKind, argument: ScalarExprRef, output: ColumnId) -> Self {
         Self {
             function,
             arguments: vec![argument],
-            result_type: ExpressionResultType {
-                data_type,
-                nullable,
-            },
+            output,
         }
     }
 
@@ -69,16 +63,12 @@ impl FunctionExpression {
         function: FunctionKind,
         left: ScalarExprRef,
         right: ScalarExprRef,
-        data_type: DataType,
-        nullable: bool,
+        output: ColumnId,
     ) -> Self {
         Self {
             function,
             arguments: vec![left, right],
-            result_type: ExpressionResultType {
-                data_type,
-                nullable,
-            },
+            output,
         }
     }
 
@@ -90,208 +80,185 @@ impl FunctionExpression {
         &self.arguments
     }
 
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn output(&self) -> ColumnId {
+        self.output
     }
 
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        let result = (|| match &self.arguments[..] {
-            [argument] => Ok(UnaryFunctionExpressionEvaluation::try_new(self, argument)?.into()),
-            [left, right] => {
-                Ok(BinaryFunctionExpressionEvaluation::try_new(self, left, right)?.into())
-            }
-            _ => unreachable!("function expressions are built as unary or binary"),
-        })();
-        result.with_context(|| {
+    pub(super) fn lower(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        self.lower_function(builder).with_context(|| {
             ErrorContext::new("function.bind")
                 .field("function", format_args!("{:?}", self.function))
         })
     }
-}
 
-#[derive(Debug)]
-pub struct UnaryFunctionExpressionEvaluation {
-    data_type: DataType,
-    argument: Box<ScalarExpressionEvaluation>,
-    eval_fn: EvalFn,
-    function: FunctionKind,
-}
-impl UnaryFunctionExpressionEvaluation {
-    pub(super) fn try_new(
-        expression: &FunctionExpression,
-        argument: &ScalarExprRef,
-    ) -> Result<Self> {
-        let argument_evaluation = argument.to_evaluation()?;
-        // Kernels are keyed by the declared operand type; the result type only
-        // describes the output of e.g. a comparison.
-        let eval_fn = kernels::bind_unary(expression.function, &argument.result_type().data_type)?;
-        Ok(Self {
-            data_type: expression.result_type.data_type.clone(),
-            argument: Box::new(argument_evaluation),
-            eval_fn,
-            function: expression.function,
-        })
-    }
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
-        }
-        let argument = self.argument.evaluate(executor).with_context(|| {
-            ErrorContext::new("function.argument")
-                .field("function", format_args!("{:?}", self.function))
-                .field("argument", 0)
-        })?;
-        self.eval(executor, &[argument])
-    }
-    fn eval(
+    fn lower_function(
         &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        Ok(if executor.num_rows()? == 0 {
-            ColumnValue::Array(new_empty_array(&self.data_type))
-        } else {
-            (self.eval_fn)(input).with_context(|| {
-                ErrorContext::new("function.evaluate")
-                    .field("function", format_args!("{:?}", self.function))
-            })?
-        })
-    }
-}
-
-#[derive(Debug)]
-pub struct BinaryFunctionExpressionEvaluation {
-    data_type: DataType,
-    left: Box<ScalarExpressionEvaluation>,
-    right: Box<ScalarExpressionEvaluation>,
-    eval_fn: EvalFn,
-    function: FunctionKind,
-}
-
-impl BinaryFunctionExpressionEvaluation {
-    pub(super) fn try_new(
-        expression: &FunctionExpression,
-        left: &ScalarExprRef,
-        right: &ScalarExprRef,
-    ) -> Result<Self> {
-        let left_evaluation = left.to_evaluation()?;
-        let right_evaluation = right.to_evaluation()?;
-        // Kernels are keyed by the declared operand type, which for arithmetic
-        // is also the result type but for comparisons is not.
-        let eval_fn = kernels::bind_binary(expression.function, &left.result_type().data_type)?;
-        Ok(Self {
-            data_type: expression.result_type.data_type.clone(),
-            left: Box::new(left_evaluation),
-            right: Box::new(right_evaluation),
-            eval_fn,
-            function: expression.function,
-        })
-    }
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        if executor.num_rows()? == 0 {
-            return self.eval(executor, &[]);
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        use FunctionKind::*;
+        let mut errors = vec![];
+        let mut inputs = vec![];
+        let mut types = vec![];
+        for (index, argument) in self.arguments.iter().enumerate() {
+            let (binding, e) = build_input(builder, argument).with_context(|| {
+                ErrorContext::new("function.bind_argument").field("argument", index)
+            })?;
+            errors.extend(e);
+            inputs.push(binding);
+            types.push(builder.column_type(argument.output())?.data_type.clone());
         }
-        let left = self.left.evaluate(executor).with_context(|| {
-            ErrorContext::new("function.argument")
-                .field("function", format_args!("{:?}", self.function))
-                .field("argument", 0)
-        })?;
-        let right = self.right.evaluate(executor).with_context(|| {
-            ErrorContext::new("function.argument")
-                .field("function", format_args!("{:?}", self.function))
-                .field("argument", 1)
-        })?;
-        self.eval(executor, &[left, right])
+        let f = self.function;
+        let signature = || Error::unsupported(format!("unsupported signature: {f:?}{types:?}"));
+        let t = &types[0];
+        let unary = matches!(f, Negate | IsNull | IsNotNull);
+        if unary != (inputs.len() == 1) || (!unary && inputs.len() != 2) {
+            return Err(Error::invalid_plan("invalid function arity".into()));
+        }
+        if !unary && types[0] != types[1] {
+            return Err(Error::invalid_plan(
+                "operand types differ; insert an explicit cast".into(),
+            ));
+        }
+        let binding = match f {
+            IsNull | IsNotNull => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let value = match inputs[0].validity() {
+                    None => builder.boolean(f == IsNotNull)?,
+                    Some(v) if f == IsNull => builder.not(v)?,
+                    Some(v) => v,
+                };
+                ColumnVariableBinding::Boolean {
+                    value,
+                    validity: None,
+                }
+            }
+            Negate | Add | Subtract | Multiply | Divide | Remainder => {
+                let signed = !matches!(
+                    t,
+                    DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
+                );
+                if !scalar::numeric(t) || (f == Negate && !signed) {
+                    return Err(signature());
+                }
+                let validity = builder.strict_validity(&inputs)?;
+                let values = inputs
+                    .iter()
+                    .map(|b| b.value().unwrap())
+                    .collect::<Vec<_>>();
+                let function = match f {
+                    Negate => ScalarFunction::Negate,
+                    Add => ScalarFunction::Add,
+                    Subtract => ScalarFunction::Subtract,
+                    Multiply => ScalarFunction::Multiply,
+                    Divide => ScalarFunction::Divide,
+                    _ => ScalarFunction::Remainder,
+                };
+                let out = builder.call(function, values)?;
+                let flags: &[KernelError] = match (f, out.len()) {
+                    (_, 1) => &[],
+                    (Divide, _) => &[KernelError::DivideByZero, KernelError::ArithmeticOverflow],
+                    (Remainder, _) => &[KernelError::DivideByZero],
+                    _ => &[KernelError::ArithmeticOverflow],
+                };
+                for (flag, error) in out[1..].iter().zip(flags) {
+                    errors.push(builder.pending(*flag, validity, *error, vec![])?);
+                }
+                let ty = builder.variable_type(out[0])?;
+                ColumnVariableBinding::fixed(ty, out[0], validity)?
+            }
+            Equal | NotEqual | LessThan | LessThanOrEqual | GreaterThan | GreaterThanOrEqual => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let value = compare(builder, f, &inputs[0], &inputs[1])?;
+                let validity = if *t == DataType::Null {
+                    Some(builder.boolean(false)?)
+                } else {
+                    builder.strict_validity(&inputs)?
+                };
+                ColumnVariableBinding::Boolean { value, validity }
+            }
+            IsDistinctFrom | IsNotDistinctFrom => {
+                if !scalar::supported(t) {
+                    return Err(signature());
+                }
+                let (a, b) = (&inputs[0], &inputs[1]);
+                let ne = compare(builder, NotEqual, a, b)?;
+                let distinct = match (a.validity(), b.validity()) {
+                    (None, None) => ne,
+                    (av, bv) => {
+                        let av = builder.materialize_validity(av)?;
+                        let bv = builder.materialize_validity(bv)?;
+                        let one_null = builder.call(ScalarFunction::NotEqual, vec![av, bv])?[0];
+                        let both = builder.and(av, bv)?;
+                        let differ = builder.and(both, ne)?;
+                        builder.or(one_null, differ)?
+                    }
+                };
+                let value = if f == IsDistinctFrom {
+                    distinct
+                } else {
+                    builder.not(distinct)?
+                };
+                ColumnVariableBinding::Boolean {
+                    value,
+                    validity: None,
+                }
+            }
+        };
+        Ok((binding, errors))
     }
-    fn eval(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[ColumnValue],
-    ) -> Result<ColumnValue> {
-        Ok(if executor.num_rows()? == 0 {
-            ColumnValue::Array(new_empty_array(&self.data_type))
-        } else {
-            (self.eval_fn)(input).with_context(|| {
-                ErrorContext::new("function.evaluate")
-                    .field("function", format_args!("{:?}", self.function))
-            })?
-        })
+}
+
+/// The comparison of the values only; NULL operands are handled by callers.
+/// NULL-typed operands compare as false.
+fn compare(
+    builder: &mut KernelBuilder<'_>,
+    f: FunctionKind,
+    a: &ColumnVariableBinding,
+    b: &ColumnVariableBinding,
+) -> Result<VariableId> {
+    if a.is_null_type() {
+        return builder.boolean(false);
     }
+    let function = match f {
+        FunctionKind::Equal => ScalarFunction::Equal,
+        FunctionKind::NotEqual => ScalarFunction::NotEqual,
+        FunctionKind::LessThan => ScalarFunction::LessThan,
+        FunctionKind::LessThanOrEqual => ScalarFunction::LessThanOrEqual,
+        FunctionKind::GreaterThan => ScalarFunction::GreaterThan,
+        _ => ScalarFunction::GreaterThanOrEqual,
+    };
+    let mut inputs = a.values();
+    inputs.extend(b.values());
+    Ok(builder.call(function, inputs)?[0])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arrow::array::{
+        Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+        Int32Array, Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    };
+    use crate::expr::scalar::test_support::*;
     use crate::expr::scalar::{
         CaseExpression, CoalesceExpression, ConstantExpression, ReferenceExpression,
     };
-    use arrow::{
-        array::{
-            Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
-            Int32Array, Int64Array, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        },
-        datatypes::{Field, Schema},
-        record_batch::RecordBatch,
-    };
     use std::sync::Arc;
 
-    fn ints(value: &ColumnValue) -> Vec<i64> {
-        let len = match value {
-            ColumnValue::Array(a) => a.len(),
-            ColumnValue::Scalar(_) => 1,
-        };
-        let array = value.clone().into_array(len).unwrap();
+    fn ints(array: &ArrayRef) -> Vec<i64> {
         array
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap()
             .values()
             .to_vec()
-    }
-    #[test]
-    fn eval_consumes_supplied_arrays_without_executing_children() {
-        let batch = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)])),
-            vec![Arc::new(Int64Array::from(vec![1, 2, 0, 4]))],
-        )
-        .unwrap();
-        let input = batch.slice(0, 3);
-        let executor = ScalarExpressionExecutor::new(input.columns(), input.num_rows());
-        // This child cannot read its column. Supplied-input eval must use the
-        // two argument arrays instead of recursively touching the bound child.
-        let missing =
-            ReferenceExpression::new(99, ExpressionResultType::new(DataType::Int64, false))
-                .into_ref();
-        let ScalarExpressionEvaluation::BinaryFunction(evaluation) = FunctionExpression::binary(
-            FunctionKind::Add,
-            missing,
-            ConstantExpression::int64(Some(1000)).into_ref(),
-            DataType::Int64,
-            false,
-        )
-        .to_evaluation()
-        .unwrap() else {
-            unreachable!()
-        };
-        let left: ArrayRef = Arc::new(Int64Array::from(vec![30, 10, 30]));
-        let right: ArrayRef = Arc::new(Int64Array::from(vec![2, 2, 1]));
-        let input = [ColumnValue::Array(left), ColumnValue::Array(right)];
-        let output = evaluation.eval(&executor, &input).unwrap();
-
-        assert_eq!(ints(&output), vec![32, 12, 31]);
-        assert!(evaluation.eval(&executor, &input[..1]).is_err());
-        assert_eq!(ints(&output), vec![32, 12, 31]);
-        // Zero rows skip arguments and kernels, even with invalid children.
-        let empty = ScalarExpressionExecutor::new(&[], 0);
-        assert!(
-            evaluation
-                .eval(&empty, &[])
-                .unwrap()
-                .into_array(0)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(evaluation.evaluate(&executor).is_err());
     }
 
     fn compare_scalar_with_broadcast(
@@ -300,10 +267,9 @@ mod tests {
         functions: &[FunctionKind],
     ) {
         let data_type = array.data_type().clone();
-        let executor = ScalarExpressionExecutor::new(std::slice::from_ref(&array), array.len());
-        let broadcast = arrow::compute::take(
+        let broadcast = crate::arrow::compute::take(
             scalar.as_ref(),
-            &arrow::array::UInt64Array::from(vec![0; array.len()]),
+            &crate::arrow::array::UInt64Array::from(vec![0; array.len()]),
             None,
         )
         .unwrap();
@@ -317,47 +283,61 @@ mod tests {
                 _ => DataType::Boolean,
             };
             for left_scalar in [false, true] {
-                let reference =
-                    ReferenceExpression::new(0, ExpressionResultType::new(data_type.clone(), true))
+                let mut t = TestPlan::new(&[(data_type.clone(), true)]);
+                let reference = ReferenceExpression::new(t.input(0)).into_ref();
+                let constant =
+                    ConstantExpression::try_new(scalar.clone(), t.column(data_type.clone(), true))
+                        .unwrap()
                         .into_ref();
-                let constant = ConstantExpression::try_new(scalar.clone())
-                    .unwrap()
-                    .into_ref();
                 let (left, right) = if left_scalar {
                     (constant, reference)
                 } else {
                     (reference, constant)
                 };
-                let evaluation =
-                    FunctionExpression::binary(function, left, right, output_type.clone(), true)
-                        .to_evaluation()
-                        .unwrap();
-                let baseline = kernels::bind_binary(function, &data_type).unwrap();
-                let expected = if left_scalar {
-                    baseline(&[
-                        ColumnValue::Array(broadcast.clone()),
-                        ColumnValue::Array(array.clone()),
-                    ])
-                } else {
-                    baseline(&[
-                        ColumnValue::Array(array.clone()),
-                        ColumnValue::Array(broadcast.clone()),
-                    ])
+                let output = t.column(output_type.clone(), true);
+                let expr = FunctionExpression::binary(function, left, right, output).into_ref();
+                type Oracle = std::result::Result<ArrayRef, crate::arrow::error::ArrowError>;
+                let baseline = |left: &ArrayRef, right: &ArrayRef| -> Oracle {
+                    use ::arrow::compute::kernels::{cmp, numeric};
+                    use FunctionKind::*;
+                    Ok(match function {
+                        Add => numeric::add(left, right)?,
+                        Subtract => numeric::sub(left, right)?,
+                        Multiply => numeric::mul(left, right)?,
+                        Divide => numeric::div(left, right)?,
+                        Remainder => numeric::rem(left, right)?,
+                        Equal => Arc::new(cmp::eq(left, right)?),
+                        NotEqual => Arc::new(cmp::neq(left, right)?),
+                        LessThan => Arc::new(cmp::lt(left, right)?),
+                        LessThanOrEqual => Arc::new(cmp::lt_eq(left, right)?),
+                        GreaterThan => Arc::new(cmp::gt(left, right)?),
+                        GreaterThanOrEqual => Arc::new(cmp::gt_eq(left, right)?),
+                        IsDistinctFrom => Arc::new(cmp::distinct(left, right)?),
+                        IsNotDistinctFrom => Arc::new(cmp::not_distinct(left, right)?),
+                        _ => unreachable!(),
+                    })
                 };
-                let actual = evaluation.evaluate(&executor);
+                let expected = if left_scalar {
+                    baseline(&broadcast, &array)
+                } else {
+                    baseline(&array, &broadcast)
+                };
+                let actual = t.evaluate(&expr, std::slice::from_ref(&array), array.len());
                 let context = format!(
                     "{data_type:?} {function:?} left_scalar={left_scalar} scalar={scalar:?}"
                 );
                 match (actual, expected) {
                     (Ok(actual), Ok(expected)) => {
-                        assert_eq!(
-                            actual.into_array(array.len()).unwrap().to_data(),
-                            expected.into_array(array.len()).unwrap().to_data(),
-                            "{context}"
-                        )
+                        assert_eq!(actual.to_data(), expected.to_data(), "{context}")
                     }
                     (Err(actual), Err(expected)) => {
-                        assert_eq!(actual.to_string(), expected.to_string(), "{context}")
+                        use crate::{arrow::error::ArrowError, error::ErrorKind};
+                        let kind = match expected {
+                            ArrowError::DivideByZero => ErrorKind::DivisionByZero,
+                            ArrowError::ArithmeticOverflow(_) => ErrorKind::ArithmeticOverflow,
+                            _ => panic!("{context}: unexpected oracle error {expected:?}"),
+                        };
+                        assert_eq!(actual.kind(), kind, "{context}: {actual:?}");
                     }
                     (actual, expected) => {
                         panic!("{context}: actual={actual:?}, expected={expected:?}")
@@ -487,56 +467,43 @@ mod tests {
     }
 
     #[test]
-    fn constant_pair_execution_stays_lazy_and_repeated_outputs_remain_owned() {
-        let add = |a, b| {
+    fn failures_in_unselected_branches_are_not_raised() {
+        let mut t = TestPlan::new(&[]);
+        let add = |t: &mut TestPlan, a, b| {
+            let (l, r, o) = (
+                t.column(DataType::Int64, false),
+                t.column(DataType::Int64, false),
+                t.column(DataType::Int64, false),
+            );
             FunctionExpression::binary(
                 FunctionKind::Add,
-                ConstantExpression::int64(Some(a)).into_ref(),
-                ConstantExpression::int64(Some(b)).into_ref(),
-                DataType::Int64,
-                false,
+                ConstantExpression::int64(Some(a), l).into_ref(),
+                ConstantExpression::int64(Some(b), r).into_ref(),
+                o,
             )
             .into_ref()
         };
-        let dangerous = add(i64::MAX, 1);
-        let evaluation = dangerous.to_evaluation().unwrap();
-        let empty = ScalarExpressionExecutor::new(&[], 0);
-        assert!(
-            evaluation
-                .evaluate(&empty)
-                .unwrap()
-                .into_array(0)
-                .unwrap()
-                .is_empty()
-        );
-        let input = ScalarExpressionExecutor::new(&[], 4);
-        assert!(evaluation.evaluate(&input).is_err());
+        let dangerous = add(&mut t, i64::MAX, 1);
+        assert!(t.evaluate(&dangerous, &[], 0).unwrap().is_empty());
+        assert!(t.evaluate(&dangerous, &[], 4).is_err());
 
+        let five = add(&mut t, 2, 3);
+        let no = t.column(DataType::Boolean, false);
         let case = CaseExpression::new(
             vec![(
-                ConstantExpression::boolean(Some(false)).into_ref(),
+                ConstantExpression::boolean(Some(false), no).into_ref(),
                 dangerous.clone(),
             )],
-            add(2, 3),
-            DataType::Int64,
-            false,
+            five,
+            t.column(DataType::Int64, false),
         )
-        .to_evaluation()
-        .unwrap();
-        let coalesce = CoalesceExpression::new(vec![add(3, 4), dangerous], DataType::Int64, false)
-            .to_evaluation()
-            .unwrap();
-        let first = case.evaluate(&input).unwrap();
-        assert_eq!(ints(&first), vec![5; 4]);
-        assert_eq!(ints(&coalesce.evaluate(&input).unwrap()), vec![7; 4]);
-        assert_eq!(
-            ints(
-                &case
-                    .evaluate(&ScalarExpressionExecutor::new(&[], 2))
-                    .unwrap()
-            ),
-            vec![5; 2]
-        );
-        assert_eq!(ints(&first), vec![5; 4]);
+        .into_ref();
+        let seven = add(&mut t, 3, 4);
+        let coalesce =
+            CoalesceExpression::new(vec![seven, dangerous], t.column(DataType::Int64, false))
+                .into_ref();
+        assert_eq!(ints(&t.evaluate(&case, &[], 4).unwrap()), vec![5; 4]);
+        assert_eq!(ints(&t.evaluate(&coalesce, &[], 4).unwrap()), vec![7; 4]);
+        assert_eq!(ints(&t.evaluate(&case, &[], 2).unwrap()), vec![5; 2]);
     }
 }

@@ -13,50 +13,80 @@
 // limitations under the License.
 
 use super::Operator;
-use super::Projection;
+use crate::column::ColumnId;
+use crate::exec::aggregate::group_index::GroupIndex;
 use crate::expr::agg::AggregateExpression;
+use crate::expr::scalar::ScalarExprRef;
+use crate::kernel::{KernelBuilder, StateBuilder, StateId, aggregation::GroupState};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::{Field, Schema, SchemaRef};
 use std::sync::Arc;
 
-/// Fully specified grouping and aggregate descriptions, without execution state.
+/// Groups rows by the group expressions and computes aggregates per group.
+/// Outputs the group columns followed by the aggregate columns.
 #[derive(Clone, Debug)]
 pub struct AggregateOperator {
-    groups: Projection,
+    groups: Vec<ScalarExprRef>,
     aggregates: Vec<Arc<AggregateExpression>>,
 }
+
 impl AggregateOperator {
-    pub fn try_new(groups: Projection, aggregates: Vec<Arc<AggregateExpression>>) -> Result<Self> {
-        if aggregates.is_empty() && groups.expressions().is_empty() {
+    pub fn try_new(
+        groups: Vec<ScalarExprRef>,
+        aggregates: Vec<Arc<AggregateExpression>>,
+    ) -> Result<Self> {
+        if aggregates.is_empty() && groups.is_empty() {
             return Err(Error::invalid_plan(
                 "aggregate needs a group or function".into(),
             ));
         }
         Ok(Self { groups, aggregates })
     }
-    pub fn groups(&self) -> &Projection {
+
+    pub fn groups(&self) -> &[ScalarExprRef] {
         &self.groups
     }
+
     pub fn aggregates(&self) -> &[Arc<AggregateExpression>] {
         &self.aggregates
     }
-    /// Result types come from the descriptions; no executor is built.
-    pub fn output_schema(&self) -> SchemaRef {
-        let groups = self.groups.output_schema();
-        let mut fields = groups.fields().to_vec();
-        for aggregate in &self.aggregates {
-            let result_type = aggregate.result_type();
-            fields.push(Arc::new(Field::new(
-                aggregate.output_name(),
-                result_type.data_type().clone(),
-                result_type.is_nullable(),
-            )));
+
+    pub fn group_columns(&self) -> Vec<ColumnId> {
+        self.groups.iter().map(|g| g.output()).collect()
+    }
+
+    /// Builds the group lookup and one update per aggregate into the current
+    /// domain. Returns the grouping state followed by the accumulator states,
+    /// in the order the sink merges them.
+    pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<Vec<StateId>> {
+        let schema = builder.columns().schema(&self.group_columns())?;
+        let grouping = builder.state(StateBuilder::new(move || {
+            Ok(GroupState {
+                index: GroupIndex::new(&schema)?,
+                schema: schema.clone(),
+            })
+        }));
+        let mut keys = Vec::with_capacity(self.groups.len());
+        for (index, group) in self.groups.iter().enumerate() {
+            let key = group
+                .build_kernels(builder)
+                .and_then(|errors| builder.raise(errors))
+                .and_then(|()| builder.column_binding(group.output()))
+                .with_context(|| ErrorContext::new("aggregate.bind_group").field("group", index))?;
+            keys.push(key);
         }
-        Arc::new(Schema::new_with_metadata(fields, groups.metadata().clone()))
+        let ids = builder.group_lookup(grouping, keys)?;
+        let mut states = vec![grouping];
+        for (index, aggregate) in self.aggregates.iter().enumerate() {
+            let state = aggregate
+                .build_kernels(builder, ids, self.groups.is_empty())
+                .with_context(|| ErrorContext::new("aggregate.bind").field("aggregate", index))?;
+            states.push(state);
+        }
+        Ok(states)
     }
 }
 
@@ -65,11 +95,17 @@ impl Operator for AggregateOperator {
         "aggregate"
     }
 
+    fn output_columns(&self) -> Vec<ColumnId> {
+        let mut columns = self.group_columns();
+        columns.extend(self.aggregates.iter().map(|a| a.output()));
+        columns
+    }
+
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
             return Err(Error::invalid_plan(format!(
@@ -77,10 +113,14 @@ impl Operator for AggregateOperator {
                 current_node.children().len(),
             )));
         };
-        let (sink, source) = self.clone().into_execs();
-        graph.pipeline_mut(current)?.set_source(Box::new(source))?;
         let input = graph.new_dependency(current)?;
-        graph.pipeline_mut(input)?.set_sink(Box::new(sink))?;
-        build_pipeline_on_node(child, input, graph)
+        build_pipeline_on_node(child, input, graph)?;
+        let state = self.new_execute_state(graph.columns())?;
+        let locals = self.build_kernels(&mut graph.pipeline_mut(input)?.kernels)?;
+        let (source, sink) = self.build_exec(state, locals);
+        graph.pipeline_mut(input)?.set_sink(Box::new(sink), None)?;
+        graph
+            .pipeline_mut(current)?
+            .set_source(Box::new(source), &self.output_columns())
     }
 }

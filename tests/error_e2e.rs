@@ -12,38 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Error kinds, sources and diagnostic frames observed by a host executing
+//! complete plans. Binding errors surface while the pipeline graph is built;
+//! row errors surface from the pipeline that ran the failing program.
+
 use arrow::{
-    array::{Array, StringArray},
-    datatypes::{DataType, Field, Schema},
+    array::{ArrayRef, AsArray, Int64Array, StringArray},
+    datatypes::{DataType, Field, Int64Type, Schema},
     error::ArrowError,
     record_batch::RecordBatch,
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
+    column::{ColumnContext, ColumnId, ColumnType},
     error::{Error, ErrorKind, Result},
-    exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SinkResult},
+    exec::{SinkExec, SinkStatus},
     expr::{
-        ExpressionResultType,
         agg::{AggregateExpression, AggregateFunction},
         scalar::{
             CaseExpression, CastExpression, CastMode, CoalesceExpression, ConstantExpression,
             FunctionExpression, FunctionKind, ReferenceExpression, ScalarExprRef,
         },
     },
+    kernel::ExecutionMode,
     operator::{
-        AggregateOperator, Operator, OperatorTree, OperatorTreeNode, ProjectOperator, Projection,
-        ProjectionExpression, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
+        AggregateOperator, Operator, OperatorTree, OperatorTreeNode, ProjectOperator, ScanConsumer,
+        ScanHandle, ScanOperator, ScanRequest, ScanStorage,
     },
     pipeline::{
-        Executor, PipelineGraphBuilder, PipelineGraphExecutor, PipelineId, build_pipeline_graph,
-        build_pipeline_on_node,
+        Executor, PipelineGraphBuilder, PipelineGraphExecutor, PipelineId,
+        build_pipeline_graph_with_mode, build_pipeline_on_node,
     },
 };
 use std::{
     error::Error as _,
     sync::{Arc, Mutex},
 };
+
+const MODES: [ExecutionMode; 2] = [ExecutionMode::Compile, ExecutionMode::ZeroCompile];
 
 // Only the host adapters are test doubles. Plans use Roc's scan, expression,
 // aggregation and pipeline implementations and run through spawned Tokio tasks.
@@ -78,44 +85,33 @@ impl Operator for Collector {
     fn name(&self) -> &'static str {
         "collector"
     }
+    fn output_columns(&self) -> Vec<ColumnId> {
+        vec![]
+    }
     fn build_pipeline(
         &self,
         node: &OperatorTreeNode,
-        id: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        current: PipelineId,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
-        graph.pipeline_mut(id)?.set_sink(Box::new(self.clone()))?;
-        build_pipeline_on_node(&node.children()[0], id, graph)
+        let child = &node.children()[0];
+        build_pipeline_on_node(child, current, graph)?;
+        graph.pipeline_mut(current)?.set_sink(
+            Box::new(self.clone()),
+            Some(child.operator().output_columns()),
+        )
     }
 }
 impl SinkExec for Collector {
-    fn init_global_context(&self, _: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-    fn new_executor(&self, _: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        Ok(Box::new(self.clone()))
-    }
-    fn finalize<'a>(
-        &'a self,
-        _: GlobalExecContextRef,
-        _: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-impl SinkExecutor for Collector {
-    fn sink<'a>(
+    fn consume<'a>(
         &'a mut self,
+        chunk: RecordBatch,
         _: &'a ShutdownGuard,
-        batch: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
+    ) -> BoxFuture<'a, Result<SinkStatus>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(batch.clone());
-            Ok(SinkResult::NeedMoreInput)
+            self.0.lock().unwrap().push(chunk);
+            Ok(SinkStatus::Continue)
         })
-    }
-    fn combine(self: Box<Self>, _: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
     }
 }
 struct TestExecutor;
@@ -134,22 +130,93 @@ impl Executor for TestExecutor {
     }
 }
 
-fn scan(batch: &RecordBatch) -> OperatorTreeNode {
-    OperatorTreeNode::new(
-        ScanOperator::new((), Arc::new(MemoryStorage(batch.clone()))),
-        vec![],
-    )
+/// Columns of a plan reading one input batch.
+struct Plan {
+    columns: ColumnContext,
+    batch: RecordBatch,
+    inputs: Vec<ColumnId>,
 }
-async fn execute(plan: OperatorTreeNode) -> Result<Vec<RecordBatch>> {
+impl Plan {
+    fn new(batch: RecordBatch) -> Self {
+        let mut columns = ColumnContext::new();
+        let inputs = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| {
+                columns.allocate_named(
+                    ColumnType::new(f.data_type().clone(), f.is_nullable()),
+                    f.name(),
+                )
+            })
+            .collect();
+        Self {
+            columns,
+            batch,
+            inputs,
+        }
+    }
+    fn column(&mut self, data_type: DataType, nullable: bool) -> ColumnId {
+        self.columns.allocate(ColumnType::new(data_type, nullable))
+    }
+    fn input(&self, i: usize) -> ScalarExprRef {
+        ReferenceExpression::new(self.inputs[i]).into_ref()
+    }
+    fn int(&mut self, value: Option<i64>) -> ScalarExprRef {
+        let output = self.column(DataType::Int64, value.is_none());
+        ConstantExpression::int64(value, output).into_ref()
+    }
+    fn boolean(&mut self, value: bool) -> ScalarExprRef {
+        let output = self.column(DataType::Boolean, false);
+        ConstantExpression::boolean(Some(value), output).into_ref()
+    }
+    fn binary(
+        &mut self,
+        function: FunctionKind,
+        left: ScalarExprRef,
+        right: ScalarExprRef,
+        data_type: DataType,
+    ) -> ScalarExprRef {
+        let output = self.column(data_type, true);
+        FunctionExpression::binary(function, left, right, output).into_ref()
+    }
+    fn divide_by_zero(&mut self) -> ScalarExprRef {
+        let (one, zero) = (self.int(Some(1)), self.int(Some(0)));
+        self.binary(FunctionKind::Divide, one, zero, DataType::Int64)
+    }
+    fn scan(&self) -> OperatorTreeNode {
+        OperatorTreeNode::new(
+            ScanOperator::new(
+                (),
+                Arc::new(MemoryStorage(self.batch.clone())),
+                self.inputs.clone(),
+            ),
+            vec![],
+        )
+    }
+}
+
+/// Builds and runs `plan` under a collector. A failed query must not have
+/// published output.
+async fn execute(
+    plan: &Plan,
+    root: OperatorTreeNode,
+    mode: ExecutionMode,
+) -> Result<Vec<RecordBatch>> {
     let collector = Collector::default();
-    let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![plan]));
-    let graph = build_pipeline_graph(tree)?;
-    let executor = PipelineGraphExecutor::new(graph).with_task_executor(TestExecutor);
+    let tree = OperatorTree::new(
+        plan.columns.clone(),
+        OperatorTreeNode::new(collector.clone(), vec![root]),
+    );
+    let graph = build_pipeline_graph_with_mode(&tree, mode)?;
+    let executor = PipelineGraphExecutor::new(graph)
+        .with_task_executor(TestExecutor)
+        .with_parallelism(2);
     let shutdown = executor.shutdown();
     let result = executor.execute().await;
     if result.is_err() {
         // The host owns cancellation and must join any remaining work before
-        // inspecting the sink. These fixtures fail before producing a batch.
+        // inspecting the sink.
         shutdown.request_shutdown();
     }
     shutdown.await;
@@ -163,69 +230,59 @@ async fn execute(plan: OperatorTreeNode) -> Result<Vec<RecordBatch>> {
     result?;
     Ok(output)
 }
-async fn project(expression: ScalarExprRef, batch: &RecordBatch) -> Result<Vec<RecordBatch>> {
-    let projection = Projection::new(vec![ProjectionExpression::new(expression, "value")]);
-    execute(OperatorTreeNode::new(
-        ProjectOperator::new(projection),
-        vec![scan(batch)],
-    ))
-    .await
+async fn project(
+    plan: &Plan,
+    expression: ScalarExprRef,
+    mode: ExecutionMode,
+) -> Result<Vec<RecordBatch>> {
+    let root = OperatorTreeNode::new(ProjectOperator::new(vec![expression]), vec![plan.scan()]);
+    execute(plan, root, mode).await
 }
-fn assert_projection_execution_path(error: &Error) {
-    assert_frame(error, "projection.evaluate", Some(("column", "0")));
-    assert_frame(error, "processor.execute", Some(("processor", "0")));
-    assert_frame(error, "worker.execute", Some(("worker", "0")));
-    assert_frame(error, "pipeline.execute", Some(("pipeline", "0")));
-}
-
-#[tokio::test]
-async fn projection_binding_preserves_plan_classification() {
-    let malformed = FunctionExpression::unary(
-        FunctionKind::Add,
-        ConstantExpression::int64(Some(1)).into_ref(),
-        DataType::Int64,
-        false,
-    )
-    .into_ref();
-    let error = project(malformed, &text_batch()).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::InvalidPlan);
-    assert_frame(&error, "projection.bind", Some(("column", "0")));
-    assert_frame(
-        &error,
-        "processor.create_executor",
-        Some(("processor", "0")),
-    );
-    assert_frame(&error, "pipeline.execute", Some(("pipeline", "0")));
+fn values(output: &[RecordBatch]) -> Vec<Option<i64>> {
+    output
+        .iter()
+        .flat_map(|batch| batch.column(0).as_primitive::<Int64Type>().iter())
+        .collect()
 }
 
-#[tokio::test]
-async fn binding_retains_location_only_frames_alongside_context() {
-    let malformed = FunctionExpression::unary(
-        FunctionKind::Add,
-        ConstantExpression::int64(Some(1)).into_ref(),
-        DataType::Int64,
-        false,
-    )
-    .into_ref();
-    let case = CaseExpression::new(vec![], malformed, DataType::Int64, false).into_ref();
-    let cast = CastExpression::new(case, DataType::Int64, CastMode::Strict, false).into_ref();
-    let error = project(cast, &text_batch()).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::InvalidPlan);
-    let locations: Vec<_> = error
+fn frame<'a>(error: &'a Error, operation: &str) -> &'a [(&'static str, String)] {
+    error
         .frames()
         .iter()
-        .filter(|frame| frame.context.is_none())
-        .map(|frame| frame.location)
-        .collect();
-    assert_eq!(locations.len(), 2, "{error:?}");
-    assert!(locations[0].file().ends_with("src/expr/scalar/case.rs"));
-    assert!(locations[1].file().ends_with("src/expr/scalar/cast.rs"));
-    let report = format!("{error:?}");
-    for location in locations {
-        assert!(report.contains(&format!("  at {location}")), "{report}");
-    }
-    assert_frame(&error, "projection.bind", Some(("column", "0")));
-    assert_frame(&error, "pipeline.execute", Some(("pipeline", "0")));
+        .filter_map(|frame| frame.context.as_ref())
+        .find(|context| context.operation == operation)
+        .unwrap_or_else(|| panic!("missing {operation}: {error:?}"))
+        .fields
+        .as_slice()
+}
+fn has_frame(error: &Error, operation: &str) -> bool {
+    error
+        .frames()
+        .iter()
+        .any(|f| f.context.as_ref().is_some_and(|c| c.operation == operation))
+}
+fn field(name: &'static str, value: impl ToString) -> (&'static str, String) {
+    (name, value.to_string())
+}
+fn arrow_source(error: &Error) -> &ArrowError {
+    error
+        .source()
+        .and_then(|source| source.downcast_ref::<ArrowError>())
+        .unwrap_or_else(|| panic!("missing Arrow source: {error:?}"))
+}
+/// A row error raised by the program of pipeline 0, at `row` of its chunk.
+fn assert_row_error(error: &Error, kind: ErrorKind, row: usize) {
+    assert_eq!(error.kind(), kind, "{error:?}");
+    assert_eq!(
+        frame(error, "kernel.raise"),
+        [field("row", row)],
+        "{error:?}"
+    );
+    assert_eq!(
+        frame(error, "pipeline.execute"),
+        [field("pipeline", 0)],
+        "{error:?}"
+    );
 }
 
 fn text_batch() -> RecordBatch {
@@ -235,275 +292,207 @@ fn text_batch() -> RecordBatch {
     )
     .unwrap()
 }
-fn assert_location_frame(error: &Error, file: &str) {
-    let frame = error
-        .frames()
-        .iter()
-        .find(|frame| frame.context.is_none() && frame.location.file().ends_with(file))
-        .unwrap_or_else(|| panic!("missing location in {file}: {error:?}"));
-    assert!(format!("{error:?}").contains(&format!("  at {}", frame.location)));
-}
-
-fn assert_frame(error: &Error, operation: &str, field: Option<(&str, &str)>) {
-    let frame = error
-        .frames()
-        .iter()
-        .find(|frame| {
-            frame
-                .context
-                .as_ref()
-                .is_some_and(|context| context.operation == operation)
-        })
-        .unwrap_or_else(|| panic!("missing {operation}: {error:?}"));
-    if let Some((name, value)) = field {
-        assert!(
-            frame
-                .context
-                .as_ref()
-                .unwrap()
-                .fields
-                .iter()
-                .any(|(key, actual)| *key == name && actual == value),
-            "{error:?}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn projection_reports_cast_input_failure_and_preserves_try_cast_nulls() {
-    let batch = text_batch();
-    for input in [
-        ConstantExpression::string(Some("bad")).into_ref(),
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Utf8, false)).into_ref(),
-    ] {
-        let error = project(
-            CastExpression::new(input.clone(), DataType::Int64, CastMode::Strict, false).into_ref(),
-            &batch,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidInput);
-        assert!(matches!(
-            error.source().unwrap().downcast_ref::<ArrowError>(),
-            Some(ArrowError::CastError(_))
-        ));
-        assert_frame(&error, "cast.evaluate", Some(("from", "Utf8")));
-        assert_frame(&error, "cast.evaluate", Some(("to", "Int64")));
-        assert_projection_execution_path(&error);
-        let output = project(
-            CastExpression::new(input, DataType::Int64, CastMode::Try, true).into_ref(),
-            &batch,
-        )
-        .await
-        .unwrap();
-        assert_eq!(output.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-        let batch = output.iter().find(|batch| batch.num_rows() > 0).unwrap();
-        assert_eq!(batch.column(0).data_type(), &DataType::Int64);
-        assert!(batch.column(0).is_null(0));
-    }
-}
-
-#[tokio::test]
-async fn unsupported_cast_fails_binding_in_both_modes_even_without_rows() {
-    for mode in [CastMode::Strict, CastMode::Try] {
-        for batch in [text_batch(), text_batch().slice(0, 0)] {
-            let error = project(
-                CastExpression::new(
-                    ConstantExpression::int64(Some(1)).into_ref(),
-                    DataType::Struct(vec![Field::new("x", DataType::Int64, false)].into()),
-                    mode,
-                    true,
-                )
-                .into_ref(),
-                &batch,
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::Unsupported);
-            assert!(error.source().is_none());
-            assert_frame(&error, "cast.bind", Some(("from", "Int64")));
-            assert_frame(&error, "projection.bind", Some(("column", "0")));
-            assert_frame(
-                &error,
-                "processor.create_executor",
-                Some(("processor", "0")),
-            );
-            assert_frame(&error, "pipeline.execute", Some(("pipeline", "0")));
-            assert!(!error.frames().iter().any(|frame| {
-                frame
-                    .context
-                    .as_ref()
-                    .is_some_and(|context| context.operation == "cast.evaluate")
-            }));
-        }
-    }
-}
-
-#[tokio::test]
-async fn checked_arithmetic_preserves_failure_kinds_for_scalar_and_array_inputs() {
-    use arrow::array::Int64Array;
-    let batch = RecordBatch::try_new(
+fn int_batch(values: Vec<i64>) -> RecordBatch {
+    RecordBatch::try_new(
         Arc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             false,
         )])),
-        vec![Arc::new(Int64Array::from(vec![i64::MAX]))],
+        vec![Arc::new(Int64Array::from(values)) as ArrayRef],
     )
-    .unwrap();
-    for input in [
-        ConstantExpression::int64(Some(i64::MAX)).into_ref(),
-        ReferenceExpression::new(0, ExpressionResultType::new(DataType::Int64, false)).into_ref(),
-    ] {
-        for (function, rhs, kind) in [
-            (FunctionKind::Add, 1, ErrorKind::ArithmeticOverflow),
-            (FunctionKind::Divide, 0, ErrorKind::DivisionByZero),
+    .unwrap()
+}
+
+#[tokio::test]
+async fn malformed_functions_are_plan_errors_with_their_binding_path() {
+    for mode in MODES {
+        let mut plan = Plan::new(text_batch());
+        let one = plan.int(Some(1));
+        let output = plan.column(DataType::Int64, false);
+        let malformed = FunctionExpression::unary(FunctionKind::Add, one, output).into_ref();
+        let output = plan.column(DataType::Int64, false);
+        let cast = CastExpression::new(malformed, CastMode::Strict, output).into_ref();
+        let error = project(&plan, cast, mode).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidPlan, "{error:?}");
+        assert_eq!(frame(&error, "function.bind"), [field("function", "Add")]);
+        assert_eq!(frame(&error, "projection.bind"), [field("column", 0)]);
+        // The cast propagates its input's failure with a location only.
+        let cast = error
+            .frames()
+            .iter()
+            .find(|f| f.context.is_none() && f.location.file().ends_with("src/expr/scalar/cast.rs"))
+            .unwrap_or_else(|| panic!("missing cast location: {error:?}"));
+        assert!(format!("{error:?}").contains(&format!("  at {}", cast.location)));
+    }
+}
+
+#[tokio::test]
+async fn unsupported_casts_fail_while_binding_even_without_rows() {
+    for mode in MODES {
+        for cast_mode in [CastMode::Strict, CastMode::Try] {
+            for batch in [text_batch(), text_batch().slice(0, 0)] {
+                let mut plan = Plan::new(batch);
+                let one = plan.int(Some(1));
+                let to = DataType::Struct(vec![Field::new("x", DataType::Int64, false)].into());
+                let output = plan.column(to.clone(), true);
+                let cast = CastExpression::new(one, cast_mode, output).into_ref();
+                let error = project(&plan, cast, mode).await.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::Unsupported, "{error:?}");
+                assert!(error.source().is_none());
+                assert_eq!(
+                    frame(&error, "cast.bind"),
+                    [field("from", DataType::Int64), field("to", to)]
+                );
+                assert_eq!(frame(&error, "projection.bind"), [field("column", 0)]);
+                assert!(!has_frame(&error, "pipeline.execute"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn strict_casts_report_invalid_input_and_try_casts_produce_null() {
+    for mode in MODES {
+        for constant in [true, false] {
+            let mut plan = Plan::new(text_batch());
+            let input = if constant {
+                let output = plan.column(DataType::Utf8, false);
+                ConstantExpression::string(Some("bad"), output).into_ref()
+            } else {
+                plan.input(0)
+            };
+            let output = plan.column(DataType::Int64, false);
+            let strict = CastExpression::new(input.clone(), CastMode::Strict, output).into_ref();
+            let error = project(&plan, strict, mode).await.unwrap_err();
+            assert_row_error(&error, ErrorKind::InvalidInput, 0);
+            assert!(
+                matches!(arrow_source(&error), ArrowError::CastError(message) if message.contains("'bad'")),
+                "{error:?}"
+            );
+
+            let output = plan.column(DataType::Int64, true);
+            let try_cast = CastExpression::new(input, CastMode::Try, output).into_ref();
+            let output = project(&plan, try_cast, mode).await.unwrap();
+            assert_eq!(values(&output), [None]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn checked_arithmetic_reports_the_failure_kind_and_the_first_failing_row() {
+    for mode in MODES {
+        for constant in [true, false] {
+            // The input overflows from row 1; every row divides by zero.
+            for (function, rhs, kind, row) in [
+                (FunctionKind::Add, 1, ErrorKind::ArithmeticOverflow, 1),
+                (FunctionKind::Divide, 0, ErrorKind::DivisionByZero, 0),
+            ] {
+                let mut plan = Plan::new(int_batch(vec![1, i64::MAX, i64::MAX]));
+                let (left, row) = if constant {
+                    (plan.int(Some(i64::MAX)), 0)
+                } else {
+                    (plan.input(0), row)
+                };
+                let rhs = plan.int(Some(rhs));
+                let expression = plan.binary(function, left, rhs, DataType::Int64);
+                let error = project(&plan, expression, mode).await.unwrap_err();
+                assert_row_error(&error, kind, row);
+                assert!(
+                    matches!(
+                        (kind, arrow_source(&error)),
+                        (
+                            ErrorKind::ArithmeticOverflow,
+                            ArrowError::ArithmeticOverflow(_)
+                        ) | (ErrorKind::DivisionByZero, ArrowError::DivideByZero)
+                    ),
+                    "{error:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn case_raises_only_the_errors_of_branches_it_evaluates() {
+    for mode in MODES {
+        for broken in ["condition", "result", "else"] {
+            let mut plan = Plan::new(text_batch());
+            let (yes, no) = (plan.boolean(true), plan.boolean(false));
+            let one = plan.int(Some(1));
+            let failing = plan.divide_by_zero();
+            let condition = if broken == "condition" {
+                let one = plan.int(Some(1));
+                plan.binary(FunctionKind::Equal, failing.clone(), one, DataType::Boolean)
+            } else {
+                yes.clone()
+            };
+            let (branches, otherwise) = match broken {
+                "else" => (vec![(no.clone(), one.clone())], failing.clone()),
+                "result" => (vec![(no.clone(), one.clone()), (yes, failing.clone())], one),
+                _ => (
+                    vec![(no.clone(), one.clone()), (condition, one.clone())],
+                    one,
+                ),
+            };
+            let output = plan.column(DataType::Int64, true);
+            let case = CaseExpression::new(branches, otherwise, output).into_ref();
+            let error = project(&plan, case, mode).await.unwrap_err();
+            assert_row_error(&error, ErrorKind::DivisionByZero, 0);
+            assert!(matches!(arrow_source(&error), ArrowError::DivideByZero));
+        }
+        // A branch whose condition is FALSE is never evaluated.
+        let mut plan = Plan::new(text_batch());
+        let no = plan.boolean(false);
+        let two = plan.int(Some(2));
+        let failing = plan.divide_by_zero();
+        let output = plan.column(DataType::Int64, true);
+        let case = CaseExpression::new(vec![(no, failing)], two, output).into_ref();
+        let output = project(&plan, case, mode).await.unwrap();
+        assert_eq!(values(&output), [Some(2)]);
+    }
+}
+
+#[tokio::test]
+async fn coalesce_raises_only_the_errors_of_arguments_it_evaluates() {
+    for mode in MODES {
+        let mut plan = Plan::new(text_batch());
+        let null = plan.int(None);
+        let failing = plan.divide_by_zero();
+        let output = plan.column(DataType::Int64, true);
+        let coalesce = CoalesceExpression::new(vec![null, failing], output).into_ref();
+        let error = project(&plan, coalesce, mode).await.unwrap_err();
+        assert_row_error(&error, ErrorKind::DivisionByZero, 0);
+
+        let mut plan = Plan::new(text_batch());
+        let one = plan.int(Some(1));
+        let failing = plan.divide_by_zero();
+        let output = plan.column(DataType::Int64, true);
+        let coalesce = CoalesceExpression::new(vec![one, failing], output).into_ref();
+        let output = project(&plan, coalesce, mode).await.unwrap();
+        assert_eq!(values(&output), [Some(1)]);
+    }
+}
+
+#[tokio::test]
+async fn aggregate_binding_distinguishes_unsupported_distinct_from_invalid_plans() {
+    for mode in MODES {
+        for (distinct, arguments, expected) in [
+            (true, 1, ErrorKind::Unsupported),
+            (false, 0, ErrorKind::InvalidPlan),
         ] {
-            let error = project(
-                FunctionExpression::binary(
-                    function,
-                    input.clone(),
-                    ConstantExpression::int64(Some(rhs)).into_ref(),
-                    DataType::Int64,
-                    false,
-                )
-                .into_ref(),
-                &batch,
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(error.kind(), kind);
-            let source = error
-                .source()
-                .unwrap()
-                .downcast_ref::<ArrowError>()
-                .unwrap();
-            assert!(matches!(
-                (kind, source),
-                (
-                    ErrorKind::ArithmeticOverflow,
-                    ArrowError::ArithmeticOverflow(_)
-                ) | (ErrorKind::DivisionByZero, ArrowError::DivideByZero)
-            ));
-            assert_projection_execution_path(&error);
+            let mut plan = Plan::new(text_batch());
+            let arguments = (0..arguments).map(|_| plan.int(Some(1))).collect();
+            let output = plan.column(DataType::Int64, true);
+            let mut sum = AggregateExpression::new(AggregateFunction::Sum, arguments, output);
+            if distinct {
+                sum = sum.with_distinct();
+            }
+            let aggregate = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
+            let root = OperatorTreeNode::new(aggregate, vec![plan.scan()]);
+            let error = execute(&plan, root, mode).await.unwrap_err();
+            assert_eq!(error.kind(), expected, "{error:?}");
+            assert_eq!(frame(&error, "aggregate.bind"), [field("aggregate", 0)]);
         }
-    }
-}
-
-fn divide_by_zero() -> ScalarExprRef {
-    FunctionExpression::binary(
-        FunctionKind::Divide,
-        ConstantExpression::int64(Some(1)).into_ref(),
-        ConstantExpression::int64(Some(0)).into_ref(),
-        DataType::Int64,
-        false,
-    )
-    .into_ref()
-}
-#[tokio::test]
-async fn projection_retains_case_condition_result_and_else_paths() {
-    let yes = ConstantExpression::boolean(Some(true)).into_ref();
-    let no = ConstantExpression::boolean(Some(false)).into_ref();
-    let one = ConstantExpression::int64(Some(1)).into_ref();
-    let broken_condition = FunctionExpression::binary(
-        FunctionKind::Equal,
-        divide_by_zero(),
-        one.clone(),
-        DataType::Boolean,
-        false,
-    )
-    .into_ref();
-    for (branches, otherwise, operation, branch) in [
-        (
-            vec![(no.clone(), one.clone()), (broken_condition, one.clone())],
-            one.clone(),
-            "case.condition",
-            Some(("branch", "1")),
-        ),
-        (
-            vec![(no.clone(), one.clone()), (yes, divide_by_zero())],
-            one.clone(),
-            "case.result",
-            Some(("branch", "1")),
-        ),
-        (vec![(no, one)], divide_by_zero(), "case.else", None),
-    ] {
-        let error = project(
-            CaseExpression::new(branches, otherwise, DataType::Int64, false).into_ref(),
-            &text_batch(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DivisionByZero);
-        assert!(matches!(
-            error.source().unwrap().downcast_ref::<ArrowError>(),
-            Some(ArrowError::DivideByZero)
-        ));
-        if branch.is_some() {
-            assert_frame(&error, operation, branch);
-        } else {
-            assert_location_frame(&error, "src/expr/scalar/case.rs");
-        }
-        assert_frame(&error, "function.evaluate", Some(("function", "Divide")));
-        assert_projection_execution_path(&error);
-    }
-}
-
-#[tokio::test]
-async fn coalesce_reports_only_the_evaluated_argument() {
-    let null = ConstantExpression::int64(None).into_ref();
-    let error = project(
-        CoalesceExpression::new(vec![null, divide_by_zero()], DataType::Int64, true).into_ref(),
-        &text_batch(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::DivisionByZero);
-    assert_frame(&error, "coalesce.argument", Some(("argument", "1")));
-    assert_projection_execution_path(&error);
-    let one = ConstantExpression::int64(Some(1)).into_ref();
-    let output = project(
-        CoalesceExpression::new(vec![one, divide_by_zero()], DataType::Int64, true).into_ref(),
-        &text_batch(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(output.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
-    let batch = output.iter().find(|batch| batch.num_rows() > 0).unwrap();
-    let values = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<arrow::array::Int64Array>()
-        .unwrap();
-    assert_eq!(values.iter().collect::<Vec<_>>(), vec![Some(1)]);
-}
-
-#[tokio::test]
-async fn aggregate_binding_distinguishes_unsupported_distinct_from_invalid_plan() {
-    for (expression, expected) in [
-        (
-            AggregateExpression::new(
-                AggregateFunction::Sum,
-                Some(ConstantExpression::int64(Some(1)).into_ref()),
-                DataType::Int64,
-                true,
-            )
-            .with_distinct(),
-            ErrorKind::Unsupported,
-        ),
-        (
-            AggregateExpression::new(AggregateFunction::Sum, None, DataType::Int64, true),
-            ErrorKind::InvalidPlan,
-        ),
-    ] {
-        let aggregate =
-            AggregateOperator::try_new(Projection::new(vec![]), vec![Arc::new(expression)])
-                .unwrap();
-        let plan = OperatorTreeNode::new(aggregate, vec![scan(&text_batch())]);
-        let error = execute(plan).await.unwrap_err();
-        assert_eq!(error.kind(), expected);
-        assert_frame(&error, "aggregate.bind", Some(("aggregate", "0")));
-        assert_location_frame(&error, "src/pipeline/execution.rs");
-        assert_frame(&error, "pipeline.execute", Some(("pipeline", "0")));
     }
 }

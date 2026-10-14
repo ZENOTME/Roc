@@ -14,29 +14,38 @@
 
 //! Immutable pipeline DAG, its validation, and graph construction.
 use super::{Pipeline, PipelineBuilder};
+use crate::column::ColumnContext;
 use crate::error::{Error, Result};
+use crate::kernel::ExecutionMode;
 use std::collections::{HashSet, VecDeque};
 
 pub type PipelineId = usize;
 
-/// Owns pipeline IDs and completion dependencies. Pipeline contents are
-/// changed through the corresponding `PipelineBuilder`.
-pub struct PipelineGraphBuilder {
-    pipelines: Vec<PipelineBuilder>,
+pub struct PipelineGraphBuilder<'plan> {
+    columns: &'plan ColumnContext,
+    pipelines: Vec<PipelineBuilder<'plan>>,
     dependencies: Vec<Vec<PipelineId>>,
+    mode: ExecutionMode,
 }
-impl Default for PipelineGraphBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl PipelineGraphBuilder {
+
+impl<'plan> PipelineGraphBuilder<'plan> {
     /// Starts with result pipeline 0, to be filled from its sink upward.
-    pub fn new() -> Self {
+    pub fn new(columns: &'plan ColumnContext) -> Self {
         Self {
-            pipelines: vec![PipelineBuilder::new()],
+            columns,
+            pipelines: vec![PipelineBuilder::new(columns)],
             dependencies: vec![vec![]],
+            mode: ExecutionMode::default(),
         }
+    }
+
+    /// The mode of every pipeline program built by `finish`.
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.mode = mode;
+    }
+
+    pub fn columns(&self) -> &'plan ColumnContext {
+        self.columns
     }
 
     pub fn new_dependency(&mut self, dependent: PipelineId) -> Result<PipelineId> {
@@ -44,13 +53,13 @@ impl PipelineGraphBuilder {
             return Err(Error::invalid_plan(format!("unknown pipeline {dependent}")));
         }
         let id = self.pipelines.len();
-        self.pipelines.push(PipelineBuilder::new());
+        self.pipelines.push(PipelineBuilder::new(self.columns));
         self.dependencies.push(vec![]);
         self.dependencies[dependent].push(id);
         Ok(id)
     }
 
-    pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder> {
+    pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder<'plan>> {
         self.pipelines
             .get_mut(id)
             .ok_or_else(|| Error::invalid_plan(format!("unknown pipeline {id}")))
@@ -58,12 +67,14 @@ impl PipelineGraphBuilder {
 
     pub fn finish(self) -> Result<PipelineGraph> {
         // Dependencies are created after their consumer, so reversing IDs
+        // yields a topological order.
         let count = self.pipelines.len();
+        let mode = self.mode;
         let pipelines = self
             .pipelines
             .into_iter()
             .rev()
-            .map(PipelineBuilder::finish)
+            .map(|p| p.finish(mode))
             .collect::<Result<Vec<_>>>()?;
         let dependencies = self
             .dependencies
@@ -71,13 +82,11 @@ impl PipelineGraphBuilder {
             .rev()
             .map(|inputs| inputs.into_iter().map(|id| count - 1 - id).collect())
             .collect();
-        PipelineGraph::new(pipelines, dependencies).map_err(|error| {
-            Error::invalid_plan("invalid pipeline graph".into()).with_source(error)
-        })
+        PipelineGraph::new(pipelines, dependencies)
+            .map_err(|error| Error::invalid_plan(error.to_string()))
     }
 }
 
-/// An immutable DAG of executable pipelines.
 pub struct PipelineGraph {
     pub(super) pipelines: Vec<Pipeline>,
     pub(super) dependencies: Vec<Vec<PipelineId>>,
@@ -117,6 +126,21 @@ pub enum PipelineGraphError {
 }
 
 impl PipelineGraph {
+    pub fn explain(&self) -> String {
+        self.pipelines
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                format!(
+                    "pipeline {i} depends_on={:?}\n{}",
+                    self.dependencies[i],
+                    p.program.explain()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn new(
         pipelines: Vec<Pipeline>,
         dependencies: Vec<Vec<PipelineId>>,
@@ -215,7 +239,7 @@ mod tests {
 
     use crate::{
         error::{Error, Result},
-        exec::{GlobalExecContextRef, SinkExec, SinkExecutor, SourceExec, SourceExecutor},
+        exec::{SinkExec, SourceExec},
     };
     use asyncband::shutdown::ShutdownGuard;
     use futures::future::BoxFuture;
@@ -223,50 +247,27 @@ mod tests {
     struct UnusedExec;
 
     impl SourceExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _shutdown_guard: &ShutdownGuard,
-        ) -> Result<GlobalExecContextRef> {
-            Err(Error::internal("not run by graph tests".into()))
-        }
-        fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-            Err(Error::internal("not run by graph tests".into()))
-        }
-
-        fn finalize<'a>(
-            &'a self,
-            _global: GlobalExecContextRef,
-            _shutdown_guard: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
+        fn next_batch<'a>(
+            &'a mut self,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<Option<crate::arrow::record_batch::RecordBatch>>> {
+            Box::pin(async {
+                Err(Error::internal(
+                    "not executed in graph construction tests".into(),
+                ))
+            })
         }
     }
-    impl SinkExec for UnusedExec {
-        fn init_global_context(
-            &self,
-            _shutdown_guard: &ShutdownGuard,
-        ) -> Result<GlobalExecContextRef> {
-            Err(Error::internal("not run by graph tests".into()))
-        }
-
-        fn new_executor(&self, _global: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-            Err(Error::internal("not run by graph tests".into()))
-        }
-        fn finalize<'a>(
-            &'a self,
-            _global: GlobalExecContextRef,
-            _shutdown_guard: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
+    impl SinkExec for UnusedExec {}
 
     fn pipelines(count: usize) -> Vec<Pipeline> {
         (0..count)
-            .map(|_| Pipeline {
-                source: Box::new(UnusedExec),
-                processors: vec![],
-                sink: Box::new(UnusedExec),
+            .map(|_| {
+                Pipeline::new(
+                    Box::new(UnusedExec),
+                    crate::kernel::Program::empty(),
+                    Box::new(UnusedExec),
+                )
             })
             .collect()
     }

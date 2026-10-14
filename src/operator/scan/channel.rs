@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::record_batch::RecordBatch;
+use crate::arrow::record_batch::RecordBatch;
 
 /// The fixed data-plane boundary between a custom storage implementation and
 /// the execution engine. Storage-specific descriptors remain generic; decoded
@@ -71,7 +71,7 @@ impl<E> Clone for ScanReceiver<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::Schema;
+    use crate::arrow::datatypes::Schema;
     use std::sync::Arc;
 
     #[test]

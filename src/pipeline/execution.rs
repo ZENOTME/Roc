@@ -14,18 +14,16 @@
 
 //! Pipeline task execution and pipeline-graph scheduling.
 use super::{Pipeline, PipelineGraph};
+use crate::arrow::record_batch::RecordBatch;
+use crate::exec::{SinkExec, SinkStatus};
+use crate::kernel::{LocalState, Program};
 use crate::{
     Shutdown,
     error::{Error, ErrorContext, ErrorKind, Result, ResultExt},
-    exec::{
-        GlobalExecContextRef, ProcessExecutor, ProcessResult, SinkExecutor, SinkResult,
-        SourceExecutor,
-    },
 };
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::{
-    StreamExt,
+    FutureExt, StreamExt,
     future::{Either, select},
     stream::FuturesUnordered,
 };
@@ -48,7 +46,7 @@ pub trait Executor: Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct PipelineExecutionConfig {
     pub batch_rows: usize,
-    /// Maximum execute/finish/sink calls between yields, including empty outputs.
+    /// Maximum completed batches before explicitly yielding the coordinator.
     pub yield_batches: usize,
 }
 
@@ -125,20 +123,15 @@ impl<E> PipelineGraphExecutor<E> {
     }
 }
 
-/// Per-role global contexts shared by all tasks in this pipeline.
-struct PipelineGlobalContext {
-    source: GlobalExecContextRef,
-    processors: Vec<GlobalExecContextRef>,
-    sink: GlobalExecContextRef,
-}
-
 impl Pipeline {
-    /// Initializes this pipeline, runs its workers, then finalizes it.
-    /// On failure, returns immediately without requesting shutdown. The caller
-    /// owns shutdown and must stop remaining work if execution cannot continue.
+    /// One async coordinator owns the source and a bounded pool of local state.
+    /// Program calls run as tasks of `executor`, the one pool of the caller's
+    /// threads: a job is a bounded run of chunks with no locks or shared
+    /// state, so it returns its thread soon and async tasks run between jobs.
+    /// No worker owns an async source cursor or an executor object.
     pub async fn execute<E: Executor>(
-        self,
-        task_executor: Arc<E>,
+        mut self,
+        executor: Arc<E>,
         shutdown_guard: ShutdownGuard,
         config: PipelineExecutionConfig,
         parallelism: usize,
@@ -152,214 +145,308 @@ impl Pipeline {
         if shutdown_guard.is_shutdown_requested() {
             return Err(Error::cancelled());
         }
-        let global = self.init_global_context(&shutdown_guard)?;
-        let executors = (0..parallelism)
-            .map(|_| self.new_executor(&global))
-            .collect::<Result<Vec<_>>>()?;
-        let mut tasks = FuturesUnordered::new();
-        for (worker, executor) in executors.into_iter().enumerate() {
-            let task = task_executor.spawn(executor.execute(shutdown_guard.clone(), config));
-            tasks.push(async move {
-                task.await
-                    .map_err(|source| {
-                        Error::new(ErrorKind::TaskFailed, "worker task failed").with_source(source)
-                    })
-                    .and_then(|result| result)
-                    .with_context(|| ErrorContext::new("worker.execute").field("worker", worker))
-            });
+        self.sink.start(&shutdown_guard).with_location()?;
+        self.source.start(&shutdown_guard).with_location()?;
+        // A single worker has no CPU parallelism to schedule, so run inline
+        // and yield after bounded work instead of dispatching each batch.
+        if parallelism == 1 {
+            let mut local = self.program.new_local()?;
+            let mut completed = 0;
+            let mut stop = false;
+            while let Some(batch) = self
+                .source
+                .next_batch(&shutdown_guard)
+                .await
+                .with_location()?
+            {
+                if shutdown_guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                for offset in (0..batch.num_rows()).step_by(config.batch_rows) {
+                    let rows = config.batch_rows.min(batch.num_rows() - offset);
+                    let chunk = if offset == 0 && rows == batch.num_rows() {
+                        run_inline(&self.program, &batch, &mut local, &shutdown_guard)?
+                    } else {
+                        run_inline(
+                            &self.program,
+                            &batch.slice(offset, rows),
+                            &mut local,
+                            &shutdown_guard,
+                        )?
+                    };
+                    stop = consume(self.sink.as_mut(), chunk, &shutdown_guard).await?;
+                    if stop {
+                        break;
+                    }
+                    completed += 1;
+                    if completed % config.yield_batches == 0 {
+                        yield_now().await;
+                    }
+                }
+                if stop {
+                    break;
+                }
+                if batch.num_rows() == 0 {
+                    yield_now().await;
+                }
+            }
+            if shutdown_guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            self.sink
+                .combine(local, &shutdown_guard)
+                .await
+                .with_location()?;
+            self.source.finish(&shutdown_guard).await.with_location()?;
+            return self.sink.finish(&shutdown_guard).await.with_location();
         }
-
-        while let Some(result) = tasks.next().await {
-            result?;
+        let source_guard = &shutdown_guard;
+        let mut source = Box::pin(futures::stream::try_unfold(
+            self.source.as_mut(),
+            |source| async move {
+                Ok::<_, Error>(
+                    source
+                        .next_batch(source_guard)
+                        .await
+                        .with_location()?
+                        .map(|batch| (batch, source)),
+                )
+            },
+        ));
+        let program = Arc::new(self.program);
+        let mut idle = Vec::with_capacity(parallelism);
+        for _ in 0..parallelism {
+            idle.push(program.new_local()?);
         }
-        if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::cancelled());
-        }
-        self.finalize(&global, &shutdown_guard).await
-    }
-
-    fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<PipelineGlobalContext> {
-        let sink = self
-            .sink
-            .init_global_context(shutdown_guard)
-            .with_location()?;
-        let processors = self
-            .processors
-            .iter()
-            .enumerate()
-            .map(|(index, process)| {
-                process
-                    .init_global_context(shutdown_guard)
-                    .with_context(|| ErrorContext::new("processor.init").field("processor", index))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let source = self
-            .source
-            .init_global_context(shutdown_guard)
-            .with_location()?;
-        Ok(PipelineGlobalContext {
-            source,
-            processors,
-            sink,
-        })
-    }
-
-    fn new_executor(&self, global: &PipelineGlobalContext) -> Result<PipelineExecutor> {
-        let source = self
-            .source
-            .new_executor(global.source.clone())
-            .with_location()?;
-        let processors = self
-            .processors
-            .iter()
-            .zip(&global.processors)
-            .enumerate()
-            .map(|(index, (operator, global))| {
-                operator.new_executor(global.clone()).with_context(|| {
-                    ErrorContext::new("processor.create_executor").field("processor", index)
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let sink = self
-            .sink
-            .new_executor(global.sink.clone())
-            .with_location()?;
-        Ok(PipelineExecutor {
-            source,
-            processors,
-            sink,
-        })
-    }
-
-    async fn finalize(
-        &self,
-        global: &PipelineGlobalContext,
-        shutdown_guard: &ShutdownGuard,
-    ) -> Result<()> {
-        self.source
-            .finalize(global.source.clone(), shutdown_guard)
-            .await
-            .with_location()?;
-        self.sink
-            .finalize(global.sink.clone(), shutdown_guard)
-            .await
-            .with_location()
-    }
-}
-
-/// Task-local execution state. Every task gets a fully initialized executor.
-struct PipelineExecutor {
-    source: Box<dyn SourceExecutor>,
-    processors: Vec<Box<dyn ProcessExecutor>>,
-    sink: Box<dyn SinkExecutor>,
-}
-impl PipelineExecutor {
-    async fn execute(
-        mut self,
-        shutdown_guard: ShutdownGuard,
-        config: PipelineExecutionConfig,
-    ) -> Result<()> {
-        let mut work_since_yield = 0;
-        // Pending calls form a depth-first stack. A MoreResult continuation stays
-        // below its output so downstream drains before the input is reused.
-        let mut pending: Vec<(usize, RecordBatch)> = Vec::with_capacity(self.processors.len() + 1);
+        let mut jobs = FuturesUnordered::new();
         let mut morsel: Option<RecordBatch> = None;
         let mut offset = 0;
-        // Once input ends, finish processors in order. Their outputs must drain
-        // through the remaining pipeline before finishing the next processor.
-        let mut finishing = None;
+        let mut eof = false;
+        let mut stop = false;
+        let mut completed = 0;
         loop {
             if shutdown_guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
-            if let Some((index, input)) = pending.pop() {
-                if index == self.processors.len() {
-                    if self
-                        .sink
-                        .sink(&shutdown_guard, &input)
-                        .await
-                        .with_location()?
-                        == SinkResult::Finished
-                    {
-                        break;
-                    }
-                } else {
-                    let output =
-                        match self.processors[index].execute(&input).with_context(|| {
-                            ErrorContext::new("processor.execute").field("processor", index)
-                        })? {
-                            ProcessResult::NeedMoreInput(output) => output,
-                            ProcessResult::MoreResult(output) => {
-                                pending.push((index, input));
-                                output
-                            }
-                            ProcessResult::Finished(output) => {
-                                pending.clear();
-                                morsel = None;
-                                finishing = Some(index + 1);
-                                output
-                            }
-                        };
-                    if output.num_rows() > 0 {
-                        pending.push((index + 1, output));
-                    }
-                }
-            } else if let Some(index) = finishing {
-                if index == self.processors.len() {
-                    break;
-                }
-                match self.processors[index].finish().with_context(|| {
-                    ErrorContext::new("processor.finish").field("processor", index)
-                })? {
-                    Some(output) => {
-                        if output.num_rows() > 0 {
-                            pending.push((index + 1, output));
-                        }
-                    }
-                    None => finishing = Some(index + 1),
-                }
-            } else {
-                if morsel.is_none() {
-                    morsel = self
-                        .source
-                        .next_batch(&shutdown_guard)
-                        .await
-                        .with_location()?;
-                    offset = 0;
-                }
-                let Some(input) = &morsel else {
-                    finishing = Some(0);
-                    continue;
-                };
-                if input.num_rows() == 0 {
-                    morsel = None;
-                    yield_now().await;
-                    continue;
-                }
+            if !stop
+                && let Some(input) = &morsel
+                && !idle.is_empty()
+            {
                 let rows = config.batch_rows.min(input.num_rows() - offset);
-                if offset == 0 && rows == input.num_rows() {
-                    // The whole morsel already has the required shape. Moving
-                    // it preserves the existing array wrappers and ownership.
-                    pending.push((0, morsel.take().unwrap()));
+                let batch = if offset == 0 && rows == input.num_rows() {
+                    morsel.take().unwrap()
                 } else {
-                    pending.push((0, input.slice(offset, rows)));
+                    let batch = input.slice(offset, rows);
                     offset += rows;
                     if offset == input.num_rows() {
                         morsel = None;
                     }
+                    batch
+                };
+                // Amortize dispatch over immediately available input only. Unfold
+                // retains a pending source read, so feedback/async I/O is never
+                // cancelled or blocked waiting for a full work chunk.
+                let mut batches = vec![batch];
+                if morsel.is_none() {
+                    while batches.len() < 128 && !eof {
+                        match source.next().now_or_never() {
+                            Some(Some(Ok(batch))) if batch.num_rows() > config.batch_rows => {
+                                morsel = Some(batch);
+                                offset = 0;
+                                break;
+                            }
+                            Some(Some(Ok(batch))) if batch.num_rows() != 0 => batches.push(batch),
+                            Some(Some(Ok(_))) => break,
+                            Some(Some(Err(e))) => return Err(e),
+                            Some(None) => eof = true,
+                            None => break,
+                        }
+                    }
                 }
+                let mut local = idle.pop().unwrap();
+                let code = program.clone();
+                let guard = shutdown_guard.clone();
+                jobs.push(on_cpu(executor.as_ref(), move || {
+                    let mut chunks = Vec::new();
+                    for batch in batches {
+                        if let Some(chunk) = code.run(&batch, &mut local, &guard)?
+                            && chunk.num_rows() != 0
+                        {
+                            chunks.push(chunk);
+                        }
+                    }
+                    Ok((local, chunks))
+                }));
                 continue;
             }
-            // Include empty continuations and finish outputs so draining cannot
-            // prevent cancellation or cooperative yield.
-            work_since_yield += 1;
-            if work_since_yield >= config.yield_batches {
-                work_since_yield = 0;
-                yield_now().await;
+            if (eof || stop) && jobs.is_empty() {
+                break;
+            }
+            if !stop && !eof && morsel.is_none() && !idle.is_empty() {
+                // This borrow stays alive while CPU completions are drained.
+                // Early stop drops only the read future; the source remains
+                // owned by the Pipeline and can still finish its resources.
+                let mut next = Box::pin(async { source.next().await.transpose() });
+                loop {
+                    enum Event {
+                        Input(Result<Option<RecordBatch>>),
+                        Done(Result<Completed>),
+                    }
+                    let event = async {
+                        if jobs.is_empty() {
+                            Event::Input(next.as_mut().await)
+                        } else {
+                            match select(next.as_mut(), jobs.next()).await {
+                                Either::Left((batch, _)) => Event::Input(batch),
+                                Either::Right((local, _)) => Event::Done(local.unwrap()),
+                            }
+                        }
+                    };
+                    let event = match select(
+                        Box::pin(shutdown_guard.shutdown_requested()),
+                        Box::pin(event),
+                    )
+                    .await
+                    {
+                        Either::Left(_) => return Err(Error::cancelled()),
+                        Either::Right((event, _)) => event,
+                    };
+                    match event {
+                        Event::Input(batch) => {
+                            match batch? {
+                                Some(batch) if batch.num_rows() != 0 => {
+                                    morsel = Some(batch);
+                                    offset = 0;
+                                }
+                                Some(_) => yield_now().await,
+                                None => eof = true,
+                            }
+                            break;
+                        }
+                        Event::Done(completed_job) => {
+                            stop = return_local(
+                                self.sink.as_mut(),
+                                completed_job?,
+                                &mut idle,
+                                stop,
+                                &shutdown_guard,
+                            )
+                            .await?;
+                            completed += 1;
+                            if completed % config.yield_batches == 0 {
+                                yield_now().await;
+                            }
+                            if stop {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                let local = match select(Box::pin(shutdown_guard.shutdown_requested()), jobs.next())
+                    .await
+                {
+                    Either::Left(_) => return Err(Error::cancelled()),
+                    Either::Right((local, _)) => local.expect("pending CPU work")?,
+                };
+                stop = return_local(self.sink.as_mut(), local, &mut idle, stop, &shutdown_guard)
+                    .await?;
+                completed += 1;
+                if completed % config.yield_batches == 0 {
+                    yield_now().await;
+                }
+            }
+            if stop {
+                morsel = None;
             }
         }
-        pending.clear();
-        self.sink.combine(&shutdown_guard).await.with_location()
+        // Combine only after every CPU job succeeds. Empty input still combines
+        // fresh local states, which is required for a global COUNT = 0.
+        for local in idle {
+            self.sink
+                .combine(local, &shutdown_guard)
+                .await
+                .with_location()?;
+        }
+        if shutdown_guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        drop(source);
+        self.source.finish(&shutdown_guard).await.with_location()?;
+        self.sink.finish(&shutdown_guard).await.with_location()
+    }
+}
+
+/// A finished CPU job: its local state and its non-empty output chunks.
+type Completed = (LocalState, Vec<RecordBatch>);
+
+fn run_inline(
+    program: &Program,
+    batch: &RecordBatch,
+    local: &mut LocalState,
+    guard: &ShutdownGuard,
+) -> Result<Option<RecordBatch>> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        program.run(batch, local, guard)
+    }))
+    .unwrap_or_else(|_| Err(panicked()))
+}
+
+#[cold]
+fn panicked() -> Error {
+    Error::new(ErrorKind::TaskFailed, "CPU task panicked")
+}
+
+/// Passes a non-empty chunk to the sink. Returns whether the sink finished.
+async fn consume(
+    sink: &mut dyn SinkExec,
+    chunk: Option<RecordBatch>,
+    guard: &ShutdownGuard,
+) -> Result<bool> {
+    match chunk {
+        Some(chunk) if chunk.num_rows() != 0 => {
+            Ok(sink.consume(chunk, guard).await.with_location()? == SinkStatus::Finished)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Returns a job's local state to the pool and consumes its chunks unless the
+/// sink has already finished. Returns whether the sink is finished.
+async fn return_local(
+    sink: &mut dyn SinkExec,
+    (local, chunks): Completed,
+    idle: &mut Vec<LocalState>,
+    mut stop: bool,
+    guard: &ShutdownGuard,
+) -> Result<bool> {
+    idle.push(local);
+    for chunk in chunks {
+        if stop {
+            break;
+        }
+        stop = consume(sink, Some(chunk), guard).await?;
+    }
+    Ok(stop)
+}
+
+/// Runs CPU work as a task of `executor`. Worker panics are caught and
+/// returned as errors rather than unwinding across the async runtime.
+fn on_cpu<E: Executor, T: Send + 'static, W: FnOnce() -> Result<T> + Send + 'static>(
+    executor: &E,
+    work: W,
+) -> impl Future<Output = Result<T>> + use<E, T, W> {
+    let task = executor.spawn(async move {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .unwrap_or_else(|_| Err(panicked()))
+    });
+    async move {
+        task.await
+            .map_err(|source| {
+                Error::new(ErrorKind::TaskFailed, "CPU task did not return its state")
+                    .with_source(source)
+            })
+            .and_then(|result| result)
     }
 }
 
@@ -459,23 +546,51 @@ impl<E: Executor> PipelineGraphExecutor<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::{
+    use crate::arrow::{
         array::Int64Array,
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
+    use crate::column::{ColumnContext, ColumnId, ColumnType};
+    use crate::exec::{SinkExec, SinkStatus, SourceExec};
+    use crate::kernel::KernelBuilder;
     use futures::{executor::block_on, future::BoxFuture};
+
+    /// Runs each task on a thread of its own.
+    struct ThreadTaskExecutor;
+
+    impl Executor for ThreadTaskExecutor {
+        type JoinError = futures::channel::oneshot::Canceled;
+        type Handle<T>
+            = futures::channel::oneshot::Receiver<T>
+        where
+            T: Send + 'static;
+
+        fn spawn<F>(&self, task: F) -> Self::Handle<F::Output>
+        where
+            F: Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            let (send, receive) = futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = send.send(block_on(task));
+            });
+            receive
+        }
+    }
     use std::sync::{
         Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     #[derive(Default)]
     struct Observed {
         source_calls: AtomicUsize,
+        cursors: AtomicUsize,
         combined: AtomicUsize,
         values: Mutex<Vec<i64>>,
         batch_sizes: Mutex<Vec<usize>>,
+        batches: Mutex<Vec<RecordBatch>>,
     }
 
     struct Source {
@@ -483,7 +598,11 @@ mod tests {
         observed: Arc<Observed>,
     }
 
-    impl SourceExecutor for Source {
+    impl SourceExec for Source {
+        fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
+            self.observed.cursors.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
         fn next_batch<'a>(
             &'a mut self,
             _shutdown_guard: &'a ShutdownGuard,
@@ -495,93 +614,50 @@ mod tests {
         }
     }
 
-    struct Sink {
+    /// Records consumed chunks and finishes after `stop_after` values.
+    struct RecordingSink {
         observed: Arc<Observed>,
         stop_after: Option<usize>,
     }
 
-    impl SinkExecutor for Sink {
-        fn sink<'a>(
+    impl SinkExec for RecordingSink {
+        fn consume<'a>(
             &'a mut self,
-            _shutdown_guard: &'a ShutdownGuard,
-            input: &'a RecordBatch,
-        ) -> BoxFuture<'a, Result<SinkResult>> {
+            chunk: RecordBatch,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
             Box::pin(async move {
-                assert!(input.num_rows() > 0);
+                assert!(chunk.num_rows() > 0);
                 self.observed
                     .batch_sizes
                     .lock()
                     .unwrap()
-                    .push(input.num_rows());
+                    .push(chunk.num_rows());
                 let mut collected = self.observed.values.lock().unwrap();
-                collected.extend(values(input));
+                collected.extend(values(&chunk));
+                self.observed.batches.lock().unwrap().push(chunk);
                 Ok(
                     if self
                         .stop_after
                         .is_some_and(|limit| collected.len() >= limit)
                     {
-                        SinkResult::Finished
+                        SinkStatus::Finished
                     } else {
-                        SinkResult::NeedMoreInput
+                        SinkStatus::Continue
                     },
                 )
             })
         }
-
-        fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
+        fn combine<'a>(
+            &'a mut self,
+            _: LocalState,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<()>> {
             Box::pin(async move {
                 self.observed.combined.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
         }
-    }
-
-    struct Processor<F, G>(F, G);
-
-    impl<F, G> ProcessExecutor for Processor<F, G>
-    where
-        F: FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-        G: FnMut() -> Result<Option<RecordBatch>> + Send + 'static,
-    {
-        fn execute(&mut self, input: &RecordBatch) -> Result<ProcessResult> {
-            (self.0)(input)
-        }
-
-        fn finish(&mut self) -> Result<Option<RecordBatch>> {
-            (self.1)()
-        }
-    }
-
-    fn processor(
-        f: impl FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-    ) -> Box<dyn ProcessExecutor> {
-        processor_with_finish(f, || Ok(None))
-    }
-
-    fn processor_with_finish(
-        execute: impl FnMut(&RecordBatch) -> Result<ProcessResult> + Send + 'static,
-        finish: impl FnMut() -> Result<Option<RecordBatch>> + Send + 'static,
-    ) -> Box<dyn ProcessExecutor> {
-        Box::new(Processor(execute, finish))
-    }
-
-    fn buffering(finish_rows: usize) -> Box<dyn ProcessExecutor> {
-        let buffered = Arc::new(Mutex::new(VecDeque::new()));
-        let input_buffer = buffered.clone();
-        processor_with_finish(
-            move |input| {
-                input_buffer.lock().unwrap().extend(values(input));
-                Ok(ProcessResult::NeedMoreInput(input.slice(0, 0)))
-            },
-            move || {
-                let mut buffered = buffered.lock().unwrap();
-                if buffered.is_empty() {
-                    return Ok(None);
-                }
-                let rows = finish_rows.min(buffered.len());
-                Ok(Some(batch(&buffered.drain(..rows).collect::<Vec<_>>())))
-            },
-        )
     }
 
     fn batch(values: &[i64]) -> RecordBatch {
@@ -595,7 +671,6 @@ mod tests {
         )
         .unwrap()
     }
-
     fn values(batch: &RecordBatch) -> Vec<i64> {
         batch
             .column(0)
@@ -605,367 +680,294 @@ mod tests {
             .values()
             .to_vec()
     }
-
-    fn executor(
-        batches: Vec<RecordBatch>,
-        processors: Vec<Box<dyn ProcessExecutor>>,
-        stop_after: Option<usize>,
-    ) -> (PipelineExecutor, Arc<Observed>) {
-        let observed = Arc::new(Observed::default());
-        (
-            PipelineExecutor {
-                source: Box::new(Source {
-                    batches: batches.into(),
-                    observed: observed.clone(),
-                }),
-                processors,
-                sink: Box::new(Sink {
-                    observed: observed.clone(),
-                    stop_after,
-                }),
-            },
-            observed,
-        )
-    }
-
     fn config() -> PipelineExecutionConfig {
         PipelineExecutionConfig {
             batch_rows: 2,
-            yield_batches: 2,
+            yield_batches: 1,
         }
     }
-
-    #[test]
-    fn drains_nested_continuations_before_advancing_input() {
-        let mut position = 0;
-        let inputs = Arc::new(Mutex::new(Vec::new()));
-        let calls = inputs.clone();
-        let split = processor(move |input| {
-            calls.lock().unwrap().push(values(input));
-            let output = input.slice(position, 1);
-            position += 1;
-            if position == input.num_rows() {
-                position = 0;
-                Ok(ProcessResult::NeedMoreInput(output))
-            } else {
-                Ok(ProcessResult::MoreResult(output))
-            }
-        });
-        let mut repeat = false;
-        let twice = processor(move |input| {
-            repeat = !repeat;
-            Ok(if repeat {
-                ProcessResult::MoreResult(input.clone())
-            } else {
-                ProcessResult::NeedMoreInput(input.clone())
-            })
-        });
-        let (exec, observed) = executor(
-            vec![batch(&[1, 2, 3]), batch(&[4])],
-            vec![split, twice],
-            None,
+    /// A program over one non-nullable Int64 column producing `build`'s output.
+    fn program(
+        build: impl FnOnce(&mut ColumnContext, ColumnId) -> crate::expr::scalar::ScalarExprRef,
+    ) -> Program {
+        let mut columns = ColumnContext::new();
+        let input = columns.allocate(ColumnType::new(DataType::Int64, false));
+        let expression = build(&mut columns, input);
+        let mut builder = KernelBuilder::new(&columns);
+        builder.bind_inputs(&[input]).unwrap();
+        let errors = expression.build_kernels(&mut builder).unwrap();
+        builder.raise(errors).unwrap();
+        Program::compile(builder.finish(Some(&[expression.output()])).unwrap()).unwrap()
+    }
+    fn passthrough() -> Program {
+        program(|_, input| crate::expr::scalar::ReferenceExpression::new(input).into_ref())
+    }
+    fn executor(
+        batches: Vec<RecordBatch>,
+        program: Program,
+        stop_after: Option<usize>,
+    ) -> (Pipeline, Arc<Observed>) {
+        let observed = Arc::new(Observed::default());
+        let pipeline = Pipeline::new(
+            Box::new(Source {
+                batches: batches.into(),
+                observed: observed.clone(),
+            }),
+            program,
+            Box::new(RecordingSink {
+                observed: observed.clone(),
+                stop_after,
+            }),
         );
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1, 1, 2, 2, 3, 3, 4, 4]);
-        assert_eq!(
-            *inputs.lock().unwrap(),
-            [vec![1, 2], vec![1, 2], vec![3], vec![4]]
-        );
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
+        (pipeline, observed)
     }
-
     #[test]
-    fn empty_output_skips_downstream_without_losing_continuations_or_new_inputs() {
-        let mut empty = false;
-        let produce = processor(move |input| {
-            empty = !empty;
-            Ok(if empty {
-                ProcessResult::MoreResult(input.slice(0, 0))
-            } else {
-                ProcessResult::NeedMoreInput(input.clone())
-            })
-        });
-        let filter = processor(|input| {
-            assert!(input.num_rows() > 0);
-            Ok(ProcessResult::NeedMoreInput(if values(input)[0] == 1 {
-                input.slice(0, 0)
-            } else {
-                input.clone()
-            }))
-        });
-        let (exec, observed) =
-            executor(vec![batch(&[1]), batch(&[2])], vec![produce, filter], None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [2]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn processor_finished_discards_upstream_continuations_and_combines_successfully() {
-        let upstream_calls = Arc::new(AtomicUsize::new(0));
-        let calls = upstream_calls.clone();
-        let expand = processor(move |input| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(ProcessResult::MoreResult(input.clone()))
-        });
-        let limit = processor_with_finish(
-            |input| Ok(ProcessResult::Finished(input.slice(0, 1))),
-            || panic!("an already finished processor must not be finished again"),
-        );
-        let (exec, observed) =
-            executor(vec![batch(&[1, 2]), batch(&[3])], vec![expand, limit], None);
-        let (_shutdown, shutdown_guard) = asyncband::shutdown::new();
-        block_on(exec.execute(shutdown_guard.clone(), config())).unwrap();
-        assert!(!shutdown_guard.is_shutdown_requested());
-        assert_eq!(*observed.values.lock().unwrap(), [1]);
-        assert_eq!(upstream_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn sink_finished_stops_pending_outputs() {
-        let expand = processor(|input| Ok(ProcessResult::MoreResult(input.slice(0, 1))));
-        let (exec, observed) = executor(vec![batch(&[1, 2]), batch(&[3])], vec![expand], Some(1));
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn continuation_error_does_not_combine() {
-        let mut first = true;
-        let fail = processor(move |input| {
-            if first {
-                first = false;
-                Ok(ProcessResult::MoreResult(input.clone()))
-            } else {
-                Err(Error::internal("continuation failed".into()))
-            }
-        });
-        let (exec, observed) = executor(vec![batch(&[1]), batch(&[2])], vec![fail], None);
-        assert!(
-            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(ref error) if error.kind() == crate::error::ErrorKind::Internal && error.message() == "continuation failed")
-        );
-        assert_eq!(*observed.values.lock().unwrap(), [1]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn empty_continuations_yield_and_can_be_cancelled_without_a_runtime() {
-        let infinite = processor(|input| Ok(ProcessResult::MoreResult(input.slice(0, 0))));
-        let (exec, observed) = executor(vec![batch(&[1])], vec![infinite], None);
-        let (shutdown, shutdown_guard) = asyncband::shutdown::new();
-        let (result, ()) = block_on(async {
-            futures::join!(exec.execute(shutdown_guard.clone(), config()), async {
-                yield_now().await;
-                shutdown.request_shutdown();
-            })
-        });
-        assert!(
-            matches!(result, Err(ref error) if error.kind() == crate::error::ErrorKind::Cancelled)
-        );
-        assert!(observed.values.lock().unwrap().is_empty());
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn whole_morsels_preserve_array_identity() {
-        let inputs = vec![batch(&[1]), batch(&[2, 3])];
-        let mut arrays = inputs
-            .iter()
-            .map(|input| input.column(0).clone())
-            .collect::<VecDeque<_>>();
-        let check_identity = processor(move |input| {
-            assert!(Arc::ptr_eq(input.column(0), &arrays.pop_front().unwrap()));
-            Ok(ProcessResult::NeedMoreInput(input.clone()))
-        });
-        let (exec, observed) = executor(inputs, vec![check_identity], None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
-        assert_eq!(*observed.batch_sizes.lock().unwrap(), [1, 2]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn pipeline_without_processors_still_splits_source_morsels() {
-        let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], vec![], None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
+    fn source_morsels_split_and_empty_batches_are_skipped() {
+        let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], passthrough(), None);
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
         assert_eq!(*observed.batch_sizes.lock().unwrap(), [2, 1]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
-
     #[test]
-    fn finishes_buffers_in_order_and_drains_tail_continuations() {
-        let mut repeat = false;
-        let twice = processor(move |input| {
-            repeat = !repeat;
-            Ok(if repeat {
-                ProcessResult::MoreResult(input.clone())
-            } else {
-                ProcessResult::NeedMoreInput(input.clone())
-            })
-        });
-        let (exec, observed) = executor(
-            vec![batch(&[1, 2, 3]), batch(&[4])],
-            vec![buffering(1), twice, buffering(3)],
-            None,
-        );
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1, 1, 2, 2, 3, 3, 4, 4]);
-        assert_eq!(*observed.batch_sizes.lock().unwrap(), [3, 3, 2]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
+    fn whole_batches_keep_their_arrow_owners() {
+        let input = batch(&[1, 2]);
+        let owner = input.column(0).clone();
+        let (exec, observed) = executor(vec![input], passthrough(), None);
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        assert!(Arc::ptr_eq(
+            &owner,
+            observed.batches.lock().unwrap()[0].column(0)
+        ));
     }
-
     #[test]
-    fn empty_source_still_finishes_and_empty_tail_batches_do_not_end_finishing() {
-        let mut tail = VecDeque::from([batch(&[]), batch(&[1]), batch(&[]), batch(&[2])]);
-        let generate = processor_with_finish(
-            |_| panic!("empty source must not execute"),
-            move || Ok(tail.pop_front()),
-        );
-        let (exec, observed) = executor(vec![], vec![generate, buffering(2)], None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1, 2]);
-        assert_eq!(*observed.batch_sizes.lock().unwrap(), [2]);
-        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn early_process_stop_finishes_downstream_but_not_upstream() {
-        let expand = processor_with_finish(
-            |input| Ok(ProcessResult::MoreResult(input.clone())),
-            || panic!("stopped upstream must not finish"),
-        );
-        let mut calls = 0;
-        let limit = processor_with_finish(
-            move |input| {
-                calls += 1;
-                Ok(if calls == 1 {
-                    ProcessResult::NeedMoreInput(input.clone())
-                } else {
-                    ProcessResult::Finished(input.slice(0, 0))
-                })
-            },
-            || panic!("finished processor must not finish"),
-        );
-        let (exec, observed) = executor(
-            vec![batch(&[1, 2, 3]), batch(&[4])],
-            vec![expand, limit, buffering(1)],
-            None,
-        );
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
+    fn sink_finish_does_not_read_more_input_and_combines_once() {
+        let (exec, observed) =
+            executor(vec![batch(&[1, 2, 3]), batch(&[4])], passthrough(), Some(1));
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
-
     #[test]
-    fn process_stop_during_finishing_discards_upstream_tail_and_drains_final_output() {
-        let finish_calls = Arc::new(AtomicUsize::new(0));
-        let calls = finish_calls.clone();
-        let generate = processor_with_finish(
-            |_| panic!("empty source must not execute"),
-            move || {
-                assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
-                Ok(Some(batch(&[1, 2])))
-            },
-        );
-        let limit = processor_with_finish(
-            |input| Ok(ProcessResult::Finished(input.slice(0, 1))),
-            || panic!("finished processor must not finish"),
-        );
-        let mut repeat = false;
-        let twice = processor(move |input| {
-            repeat = !repeat;
-            Ok(if repeat {
-                ProcessResult::MoreResult(input.clone())
-            } else {
-                ProcessResult::NeedMoreInput(input.clone())
-            })
+    fn program_errors_do_not_publish_partial_results() {
+        use crate::expr::scalar::*;
+        let division = program(|columns, input| {
+            let zero = columns.allocate(ColumnType::new(DataType::Int64, false));
+            let output = columns.allocate(ColumnType::new(DataType::Int64, false));
+            FunctionExpression::binary(
+                FunctionKind::Divide,
+                ReferenceExpression::new(input).into_ref(),
+                ConstantExpression::int64(Some(0), zero).into_ref(),
+                output,
+            )
+            .into_ref()
         });
-        let (exec, observed) = executor(vec![], vec![generate, limit, twice, buffering(1)], None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1, 1]);
-        assert_eq!(finish_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn sink_stop_during_finishing_skips_remaining_tail_and_downstream_finish() {
-        let mut first = true;
-        let generate = processor_with_finish(
-            |_| panic!("empty source must not execute"),
-            move || {
-                assert!(first, "sink stopped accepting input");
-                first = false;
-                Ok(Some(batch(&[1])))
-            },
-        );
-        let expand = processor_with_finish(
-            |input| Ok(ProcessResult::MoreResult(input.clone())),
-            || panic!("finished sink must stop finishing"),
-        );
-        let (exec, observed) = executor(vec![], vec![generate, expand], Some(1));
-        block_on(exec.execute(asyncband::shutdown::new().1, config())).unwrap();
-        assert_eq!(*observed.values.lock().unwrap(), [1]);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn finish_error_does_not_combine_or_finish_downstream() {
-        let mut first = true;
-        let fail = processor_with_finish(
-            |_| panic!("empty source must not execute"),
-            move || {
-                if first {
-                    first = false;
-                    Ok(Some(batch(&[1])))
-                } else {
-                    Err(Error::internal("finish failed".into()))
-                }
-            },
-        );
-        let downstream = processor_with_finish(
-            |input| Ok(ProcessResult::NeedMoreInput(input.clone())),
-            || panic!("failed pipeline must not finish downstream"),
-        );
-        let (exec, observed) = executor(vec![], vec![fail, downstream], None);
-        assert!(
-            matches!(block_on(exec.execute(asyncband::shutdown::new().1, config())), Err(ref error) if error.kind() == crate::error::ErrorKind::Internal && error.message() == "finish failed")
-        );
-        assert_eq!(*observed.values.lock().unwrap(), [1]);
-        assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn empty_finish_outputs_yield_and_can_be_cancelled_without_a_runtime() {
-        let infinite = processor_with_finish(
-            |_| panic!("empty source must not execute"),
-            || Ok(Some(batch(&[]))),
-        );
-        let (exec, observed) = executor(vec![], vec![infinite], None);
-        let (shutdown, shutdown_guard) = asyncband::shutdown::new();
-        let (result, ()) = block_on(async {
-            futures::join!(exec.execute(shutdown_guard.clone(), config()), async {
-                yield_now().await;
-                shutdown.request_shutdown();
-            })
-        });
-        assert!(
-            matches!(result, Err(ref error) if error.kind() == crate::error::ErrorKind::Cancelled)
-        );
+        let (exec, observed) = executor(vec![batch(&[1])], division, None);
+        assert!(block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).is_err());
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn one_source_and_bounded_reused_locals_for_many_batches() {
+        let (exec, observed) = executor(
+            vec![batch(&(0..100).collect::<Vec<_>>())],
+            passthrough(),
+            None,
+        );
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 3)).unwrap();
+        assert_eq!(observed.cursors.load(Ordering::SeqCst), 1);
+        assert_eq!(observed.combined.load(Ordering::SeqCst), 3);
+        let mut values = observed.values.lock().unwrap().clone();
+        values.sort();
+        assert_eq!(values, (0..100).collect::<Vec<_>>());
+    }
+    #[test]
+    fn cancellation_does_not_read_or_combine() {
+        let (exec, observed) = executor(vec![batch(&[1, 2])], passthrough(), None);
+        let (shutdown, guard) = asyncband::shutdown::new();
+        shutdown.request_shutdown();
+        assert!(matches!(
+            block_on(exec.execute(Arc::new(ThreadTaskExecutor), guard, config(), 1)),
+            Err(ref error) if error.kind() == ErrorKind::Cancelled
+        ));
+        assert_eq!(observed.source_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn empty_source_still_returns_local_state_for_combine() {
+        let (exec, observed) = executor(vec![], passthrough(), None);
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
+    }
+    // The second source read cannot finish until the first chunk is consumed.
+    // This catches coordinators that await source input while neglecting CPU
+    // completions, and accidental cancellation/recreation of pending reads.
+    struct FeedbackCursor {
+        read: usize,
+        ready: Option<futures::channel::oneshot::Receiver<()>>,
+    }
+    impl SourceExec for FeedbackCursor {
+        fn next_batch<'a>(
+            &'a mut self,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+            Box::pin(async move {
+                let read = self.read;
+                self.read += 1;
+                match read {
+                    0 => Ok(Some(batch(&[1]))),
+                    1 => {
+                        self.ready
+                            .take()
+                            .expect("one persistent read")
+                            .await
+                            .map_err(|_| Error::internal("lost consume notification".into()))?;
+                        Ok(Some(batch(&[2])))
+                    }
+                    _ => Ok(None),
+                }
+            })
+        }
+    }
+    struct FeedbackSink {
+        send: Option<futures::channel::oneshot::Sender<()>>,
+        consumed: usize,
+    }
+    impl SinkExec for FeedbackSink {
+        fn consume<'a>(
+            &'a mut self,
+            _: RecordBatch,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
+            Box::pin(async move {
+                self.consumed += 1;
+                if let Some(send) = self.send.take() {
+                    let _ = send.send(());
+                }
+                Ok(SinkStatus::Continue)
+            })
+        }
+        fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                assert_eq!(self.consumed, 2);
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn pending_source_read_keeps_progress_while_completed_chunks_are_consumed() {
+        let (send, receive) = futures::channel::oneshot::channel();
+        let pipeline = Pipeline::new(
+            Box::new(FeedbackCursor {
+                read: 0,
+                ready: Some(receive),
+            }),
+            passthrough(),
+            Box::new(FeedbackSink {
+                send: Some(send),
+                consumed: 0,
+            }),
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
+        )
+        .await
+        .expect("source and consume deadlocked")
+        .unwrap();
+    }
+    // A source whose second read never completes must still be finalized after
+    // the sink finishes. Keep the source owned by the coordinator, not the read.
+    struct PendingStopSource {
+        first: bool,
+        pending: Arc<AtomicBool>,
+        finished: Arc<AtomicUsize>,
+    }
+    impl SourceExec for PendingStopSource {
+        fn next_batch<'a>(
+            &'a mut self,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+            Box::pin(async move {
+                if self.first {
+                    self.first = false;
+                    return Ok(Some(batch(&[1])));
+                }
+                self.pending.store(true, Ordering::SeqCst);
+                std::future::pending().await
+            })
+        }
+        fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.finished.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+    /// Finishes on the first chunk, once the second source read is pending.
+    struct StopSink {
+        pending: Arc<AtomicBool>,
+        combined: Arc<AtomicUsize>,
+    }
+    impl SinkExec for StopSink {
+        fn consume<'a>(
+            &'a mut self,
+            _: RecordBatch,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<SinkStatus>> {
+            Box::pin(async move {
+                assert!(
+                    self.pending.load(Ordering::SeqCst),
+                    "second read never polled"
+                );
+                Ok(SinkStatus::Finished)
+            })
+        }
+        fn combine<'a>(
+            &'a mut self,
+            _: LocalState,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.combined.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn early_stop_drops_pending_read_but_finishes_owned_source() {
+        let pending = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let combined = Arc::new(AtomicUsize::new(0));
+        let pipeline = Pipeline::new(
+            Box::new(PendingStopSource {
+                first: true,
+                pending: pending.clone(),
+                finished: finished.clone(),
+            }),
+            passthrough(),
+            Box::new(StopSink {
+                pending,
+                combined: combined.clone(),
+            }),
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
+        )
+        .await
+        .expect("finish must interrupt pending source read")
+        .unwrap();
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+        assert_eq!(combined.load(Ordering::SeqCst), 2);
+    }
+    #[test]
+    fn cpu_panics_are_returned_as_errors() {
+        let result = block_on(on_cpu(&ThreadTaskExecutor, || -> Result<()> {
+            panic!("intentional worker panic")
+        }));
+        assert!(matches!(result, Err(ref error) if error.kind() == ErrorKind::TaskFailed));
     }
 }

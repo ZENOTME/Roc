@@ -12,35 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Filter operator descriptor.
 use super::Operator;
+use crate::arrow::datatypes::DataType;
+use crate::column::ColumnId;
 use crate::expr::scalar::ScalarExprRef;
+use crate::kernel::KernelBuilder;
 use crate::{
-    error::{Error, Result},
-    exec::FilterExec,
+    error::{Error, Result, ResultExt},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
 
+/// Keeps rows whose predicate is TRUE. Downstream kernels of the pipeline run
+/// in the row domain of the kept rows.
 #[derive(Clone, Debug)]
 pub struct FilterOperator {
-    /// Bound against the full input, before optional output column selection.
     predicate: ScalarExprRef,
-    output_projection: Option<Vec<usize>>,
+    outputs: Vec<ColumnId>,
 }
 
 impl FilterOperator {
-    pub fn new(predicate: ScalarExprRef) -> Self {
-        Self {
-            predicate,
-            output_projection: None,
-        }
+    /// `outputs` lists the child columns visible to the parent.
+    pub fn new(predicate: ScalarExprRef, outputs: Vec<ColumnId>) -> Self {
+        Self { predicate, outputs }
     }
-    /// Retain these columns after evaluating the predicate. Hosts must bind
-    /// downstream expressions against the resulting column order.
-    pub fn with_output_projection(mut self, indices: Vec<usize>) -> Self {
-        self.output_projection = Some(indices);
-        self
+
+    pub fn predicate(&self) -> &ScalarExprRef {
+        &self.predicate
+    }
+
+    pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<()> {
+        let column = self.predicate.output();
+        let ty = builder.columns().column_type(column)?;
+        if ty.data_type != DataType::Boolean {
+            return Err(Error::invalid_plan(format!(
+                "filter predicate must be Boolean, got {}",
+                ty.data_type
+            )));
+        }
+        self.predicate
+            .build_kernels(builder)
+            .and_then(|errors| builder.raise(errors))
+            .with_location()?;
+        let binding = builder.column_binding(column)?;
+        let predicate = builder.predicate(&binding)?;
+        let domain = builder.filter(predicate)?;
+        builder.set_current_domain(domain)
     }
 }
 
@@ -49,11 +66,15 @@ impl Operator for FilterOperator {
         "filter"
     }
 
+    fn output_columns(&self) -> Vec<ColumnId> {
+        self.outputs.clone()
+    }
+
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
             return Err(Error::invalid_plan(format!(
@@ -61,13 +82,7 @@ impl Operator for FilterOperator {
                 current_node.children().len(),
             )));
         };
-        let mut executor = FilterExec::new(self.predicate.clone());
-        if let Some(indices) = &self.output_projection {
-            executor = executor.with_output_projection(indices.clone());
-        }
-        graph
-            .pipeline_mut(current)?
-            .add_processor(Box::new(executor));
-        build_pipeline_on_node(child, current, graph)
+        build_pipeline_on_node(child, current, graph)?;
+        self.build_kernels(&mut graph.pipeline_mut(current)?.kernels)
     }
 }

@@ -12,23 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{GlobalExecContextRef, SourceExec, SourceExecutor};
+use super::SourceExec;
+use crate::arrow::record_batch::RecordBatch;
 use crate::{
     error::{Error, Result, ResultExt},
     operator::{ScanConsumer, ScanHandle, ScanOperator, ScanRequest},
 };
-use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
-use futures::{FutureExt, future::BoxFuture};
-use std::sync::Arc;
+use futures::future::BoxFuture;
+use std::{future::Future, sync::Arc, task::Poll};
 
 pub struct ScanExec<StorageTaskDesc> {
     operator: ScanOperator<StorageTaskDesc>,
+    handle: Option<Arc<dyn ScanHandle>>,
+    consumer: Option<Box<dyn ScanConsumer>>,
 }
 
 impl<StorageTaskDesc> ScanExec<StorageTaskDesc> {
     pub fn new(operator: ScanOperator<StorageTaskDesc>) -> Self {
-        Self { operator }
+        Self {
+            operator,
+            handle: None,
+            consumer: None,
+        }
     }
 }
 
@@ -36,65 +42,154 @@ impl<StorageTaskDesc> SourceExec for ScanExec<StorageTaskDesc>
 where
     StorageTaskDesc: Clone + Send + Sync + 'static,
 {
-    fn init_global_context(&self, shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
+    fn start(&mut self, guard: &ShutdownGuard) -> Result<()> {
+        if self.handle.is_some() {
+            return Err(Error::internal("scan already started".into()));
+        }
         let handle = self
             .operator
             .storage()
             .start_scan(ScanRequest::new(
                 self.operator.source().clone(),
-                shutdown_guard.clone(),
+                guard.clone(),
             ))
             .with_location()?;
-        Ok(Arc::new(ScanGlobalContext { handle }))
+        self.consumer = Some(handle.consumer());
+        self.handle = Some(handle);
+        Ok(())
     }
-    fn new_executor(&self, global: GlobalExecContextRef) -> Result<Box<dyn SourceExecutor>> {
-        let global = global.downcast::<ScanGlobalContext>().map_err(|_| {
-            Error::internal("scan source received an invalid global context".into())
-        })?;
-        Ok(Box::new(ScanExecutor {
-            consumer: global.handle.consumer(),
-            _global: global,
-        }))
-    }
-
-    fn finalize<'a>(
-        &'a self,
-        global: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
+    fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            let global = global.downcast::<ScanGlobalContext>().map_err(|_| {
-                Error::internal("scan source received an invalid global context".into())
-            })?;
-            global.handle.finish().await.with_location()
+            self.consumer.take();
+            if let Some(handle) = self.handle.take() {
+                handle.finish().await.with_location()?;
+            }
+            Ok(())
         })
     }
-}
-
-struct ScanGlobalContext {
-    handle: Arc<dyn ScanHandle>,
-}
-
-struct ScanExecutor {
-    consumer: Box<dyn ScanConsumer>,
-    _global: Arc<ScanGlobalContext>,
-}
-
-impl SourceExecutor for ScanExecutor {
     fn next_batch<'a>(
         &'a mut self,
         shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            let cancelled = shutdown_guard.shutdown_requested().fuse();
-            let next = self.consumer.next().fuse();
+            let cancelled = shutdown_guard.shutdown_requested();
+            let next = self
+                .consumer
+                .as_mut()
+                .ok_or_else(|| Error::internal("scan is not started".into()))?
+                .next();
             futures::pin_mut!(cancelled, next);
-            futures::select_biased! {
-                _ = cancelled => {
-                    Err(Error::cancelled())
-                },
-                batch = next => batch.with_location(),
-            }
+            futures::future::poll_fn(|cx| {
+                // Preserve cancellation priority on every poll, including when
+                // both the previously pending read and shutdown become ready.
+                if shutdown_guard.is_shutdown_requested() {
+                    return Poll::Ready(Err(Error::cancelled()));
+                }
+                match next.as_mut().poll(cx) {
+                    Poll::Ready(result) => Poll::Ready(result.with_location()),
+                    Poll::Pending => {
+                        // Register only when the read blocks. Polling the wait
+                        // also rechecks shutdown, closing the registration race.
+                        match cancelled.as_mut().poll(cx) {
+                            Poll::Ready(()) => Poll::Ready(Err(Error::cancelled())),
+                            Poll::Pending => Poll::Pending,
+                        }
+                    }
+                }
+            })
+            .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asyncband::shutdown::Shutdown;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        task::Context,
+    };
+
+    struct TestHandle;
+    impl ScanHandle for TestHandle {
+        fn consumer(&self) -> Box<dyn ScanConsumer> {
+            unreachable!("the test constructs its consumer directly")
+        }
+        fn finish(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct PendingThenReady {
+        polls: Arc<AtomicUsize>,
+        shutdown_during_poll: Option<Shutdown>,
+    }
+    impl ScanConsumer for PendingThenReady {
+        fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
+            Box::pin(futures::future::poll_fn(|_| {
+                if self.polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    if let Some(shutdown) = &self.shutdown_during_poll {
+                        shutdown.request_shutdown();
+                    }
+                    Poll::Pending
+                } else {
+                    Poll::Ready(Ok(None))
+                }
+            }))
+        }
+    }
+
+    struct TestStorage;
+    impl crate::operator::ScanStorage for TestStorage {
+        type StorageTaskDesc = ();
+        fn start_scan(&self, _: ScanRequest<()>) -> Result<Arc<dyn ScanHandle>> {
+            unreachable!()
+        }
+    }
+    fn executor(consumer: PendingThenReady) -> ScanExec<()> {
+        ScanExec {
+            operator: ScanOperator::new((), Arc::new(TestStorage), vec![]),
+            consumer: Some(Box::new(consumer)),
+            handle: Some(Arc::new(TestHandle)),
+        }
+    }
+
+    #[test]
+    fn shutdown_keeps_priority_when_a_pending_read_becomes_ready() {
+        let (shutdown, guard) = asyncband::shutdown::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut executor = executor(PendingThenReady {
+            polls: polls.clone(),
+            shutdown_during_poll: None,
+        });
+        let mut next = executor.next_batch(&guard);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(next.as_mut().poll(&mut cx).is_pending());
+        shutdown.request_shutdown();
+        assert!(matches!(
+            next.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ref error)) if error.kind() == crate::error::ErrorKind::Cancelled
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn shutdown_during_data_poll_is_seen_before_returning_pending() {
+        let (shutdown, guard) = asyncband::shutdown::new();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut executor = executor(PendingThenReady {
+            polls: polls.clone(),
+            shutdown_during_poll: Some(shutdown),
+        });
+        let mut next = executor.next_batch(&guard);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            next.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ref error)) if error.kind() == crate::error::ErrorKind::Cancelled
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
 }

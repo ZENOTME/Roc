@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use asyncband::shutdown::ShutdownGuard;
+use asyncband::shutdown::{Shutdown, ShutdownGuard};
 use std::sync::{Arc, Mutex};
 
 use arrow::{
@@ -22,75 +22,114 @@ use arrow::{
 };
 use futures::future::BoxFuture;
 use roc::{
-    error::Result,
-    exec::{
-        FilterExec, GlobalExecContextRef, ProcessExec, ProcessExecutor, ProcessResult, ProjectExec,
-        ScanExec, SinkExec, SinkExecutor, SinkResult, SourceExec,
+    column::{ColumnContext, ColumnId, ColumnType},
+    error::{Error, ErrorKind, Result},
+    exec::{ScanExec, SinkExec, SinkStatus, SourceExec},
+    expr::{
+        agg::{AggregateExpression, AggregateFunction},
+        scalar::{
+            ConstantExpression, FunctionExpression, FunctionKind as ExprOp, ReferenceExpression,
+            ScalarExprRef,
+        },
     },
-    expr::scalar::ScalarExprRef,
+    kernel::{ExecutionMode, KernelBuilder, LocalState, Program},
     operator::{
         AggregateOperator, FilterOperator, Operator, OperatorTree, OperatorTreeNode,
         ProjectOperator, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
     },
     pipeline::{
         Executor, PipelineGraphBuilder, PipelineGraphExecutor, PipelineId, build_pipeline_graph,
-        build_pipeline_on_node,
+        build_pipeline_graph_with_mode, build_pipeline_on_node,
     },
-};
-use roc::{
-    expr::{
-        ExpressionResultType,
-        agg::{AggregateExpression, AggregateFunction},
-        scalar::{
-            ConstantExpression, FunctionExpression, FunctionKind as ExprOp, ReferenceExpression,
-        },
-    },
-    operator::{Projection, ProjectionExpression as ProjectionExpr},
 };
 
-fn reference(index: usize, data_type: DataType, nullable: bool) -> ScalarExprRef {
-    ReferenceExpression::new(index, ExpressionResultType::new(data_type, nullable)).into_ref()
+fn column(
+    columns: &mut ColumnContext,
+    name: &str,
+    data_type: DataType,
+    nullable: bool,
+) -> ColumnId {
+    columns.allocate_named(ColumnType::new(data_type, nullable), name)
 }
-/// Input columns in this file are Int64 and nullable unless a test needs an
-/// explicitly non-nullable batch.
-fn column(index: usize) -> ScalarExprRef {
-    reference(index, DataType::Int64, true)
+fn reference(column: ColumnId) -> ScalarExprRef {
+    ReferenceExpression::new(column).into_ref()
+}
+fn int(columns: &mut ColumnContext, value: Option<i64>) -> ScalarExprRef {
+    let output = columns.allocate(ColumnType::new(DataType::Int64, value.is_none()));
+    ConstantExpression::int64(value, output).into_ref()
 }
 /// Comparisons yield Boolean; arithmetic yields the left operand's type. The
-/// result is nullable whenever either operand is.
-fn binary(left: ScalarExprRef, op: ExprOp, right: i64) -> ScalarExprRef {
-    let right = ConstantExpression::int64(Some(right)).into_ref();
-    let nullable = left.result_type().is_nullable() || right.result_type().is_nullable();
+/// result is nullable whenever the left operand is (the constant is not).
+fn binary(
+    columns: &mut ColumnContext,
+    left: ScalarExprRef,
+    op: ExprOp,
+    right: i64,
+) -> ScalarExprRef {
+    let right = int(columns, Some(right));
+    let left_type = columns.column_type(left.output()).unwrap().clone();
     let data_type = match op {
         ExprOp::Add | ExprOp::Subtract | ExprOp::Multiply | ExprOp::Divide | ExprOp::Remainder => {
-            left.result_type().data_type().clone()
+            left_type.data_type
         }
         _ => DataType::Boolean,
     };
-    FunctionExpression::binary(op, left, right, data_type, nullable).into_ref()
+    let output = columns.allocate(ColumnType::new(data_type, left_type.nullable));
+    FunctionExpression::binary(op, left, right, output).into_ref()
 }
-fn filter_executor(predicate: ScalarExprRef) -> Box<dyn ProcessExecutor> {
-    let exec = FilterExec::new(predicate);
-    exec.new_executor(
-        exec.init_global_context(&asyncband::shutdown::new().1)
-            .unwrap(),
-    )
-    .unwrap()
+/// A standalone program over `inputs`, producing `outputs`.
+struct BatchProgram {
+    program: Program,
+    local: LocalState,
+    _shutdown: Shutdown,
+    guard: ShutdownGuard,
 }
-
-fn project_executor(projector: Projection) -> Box<dyn ProcessExecutor> {
-    let exec = ProjectExec::new(projector);
-    let global = exec
-        .init_global_context(&asyncband::shutdown::new().1)
-        .unwrap();
-    exec.new_executor(global).unwrap()
-}
-
-fn completed_batch(result: ProcessResult) -> RecordBatch {
-    match result {
-        ProcessResult::NeedMoreInput(batch) => batch,
-        other => panic!("expected a completed input, got {other:?}"),
+impl BatchProgram {
+    fn new(
+        columns: &ColumnContext,
+        inputs: &[ColumnId],
+        build: impl FnOnce(&mut KernelBuilder<'_>) -> Result<Vec<ColumnId>>,
+    ) -> Result<Self> {
+        let mut builder = KernelBuilder::new(columns);
+        builder.bind_inputs(inputs)?;
+        let outputs = build(&mut builder)?;
+        let program = Program::compile(builder.finish(Some(&outputs))?)?;
+        let local = program.new_local()?;
+        let (shutdown, guard) = asyncband::shutdown::new();
+        Ok(Self {
+            program,
+            local,
+            _shutdown: shutdown,
+            guard,
+        })
     }
+    fn execute(&mut self, input: &RecordBatch) -> Result<RecordBatch> {
+        Ok(self
+            .program
+            .run(input, &mut self.local, &self.guard)?
+            .unwrap())
+    }
+}
+fn filter_program(
+    columns: &ColumnContext,
+    inputs: &[ColumnId],
+    predicate: ScalarExprRef,
+) -> Result<BatchProgram> {
+    BatchProgram::new(columns, inputs, |builder| {
+        FilterOperator::new(predicate, inputs.to_vec()).build_kernels(builder)?;
+        Ok(inputs.to_vec())
+    })
+}
+fn project_program(
+    columns: &ColumnContext,
+    inputs: &[ColumnId],
+    expressions: Vec<ScalarExprRef>,
+) -> Result<BatchProgram> {
+    BatchProgram::new(columns, inputs, |builder| {
+        let project = ProjectOperator::new(expressions);
+        project.build_kernels(builder)?;
+        Ok(project.output_columns())
+    })
 }
 
 struct MemoryStorage(RecordBatch);
@@ -105,7 +144,7 @@ impl ScanStorage for MemoryStorage {
     ) -> Result<Arc<dyn ScanHandle>> {
         assert_eq!(request.source(), &[2, 0]);
         let batch = self.0.project(request.source()).map_err(|source| {
-            roc::error::Error::invalid_plan("invalid scan projection".into()).with_source(source)
+            Error::invalid_input("invalid scan columns".into()).with_source(source)
         })?;
         Ok(Arc::new(MemoryScan(Arc::new(Mutex::new(Some(batch))))))
     }
@@ -124,52 +163,45 @@ impl ScanConsumer for MemoryScan {
     }
 }
 
+/// Root operator collecting the output chunks of its child's pipeline.
 #[derive(Clone, Debug, Default)]
 struct Collector(Arc<Mutex<Vec<RecordBatch>>>);
+struct CollectorExec {
+    output: Arc<Mutex<Vec<RecordBatch>>>,
+}
 impl Operator for Collector {
     fn name(&self) -> &'static str {
         "collector"
     }
+    fn output_columns(&self) -> Vec<ColumnId> {
+        vec![]
+    }
     fn build_pipeline(
         &self,
-        current_node: &OperatorTreeNode,
+        node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
-        graph
-            .pipeline_mut(current)?
-            .set_sink(Box::new(self.clone()))?;
-        build_pipeline_on_node(&current_node.children()[0], current, graph)
+        let child = &node.children()[0];
+        build_pipeline_on_node(child, current, graph)?;
+        graph.pipeline_mut(current)?.set_sink(
+            Box::new(CollectorExec {
+                output: self.0.clone(),
+            }),
+            Some(child.operator().output_columns()),
+        )
     }
 }
-impl SinkExec for Collector {
-    fn init_global_context(&self, _shutdown_guard: &ShutdownGuard) -> Result<GlobalExecContextRef> {
-        Ok(Arc::new(()))
-    }
-    fn new_executor(&self, _: GlobalExecContextRef) -> Result<Box<dyn SinkExecutor>> {
-        Ok(Box::new(self.clone()))
-    }
-    fn finalize<'a>(
-        &'a self,
-        _: GlobalExecContextRef,
-        _shutdown_guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-impl SinkExecutor for Collector {
-    fn sink<'a>(
+impl SinkExec for CollectorExec {
+    fn consume<'a>(
         &'a mut self,
-        _shutdown_guard: &'a ShutdownGuard,
-        batch: &'a RecordBatch,
-    ) -> BoxFuture<'a, Result<SinkResult>> {
+        chunk: RecordBatch,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<SinkStatus>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(batch.clone());
-            Ok(SinkResult::NeedMoreInput)
+            self.output.lock().unwrap().push(chunk);
+            Ok(SinkStatus::Continue)
         })
-    }
-    fn combine(self: Box<Self>, _shutdown_guard: &ShutdownGuard) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
     }
 }
 struct TestExecutor;
@@ -190,16 +222,19 @@ impl Executor for TestExecutor {
 
 #[tokio::test]
 async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions() {
-    let storage_schema = Arc::new(
-        Schema::new(vec![
-            Field::new("group", DataType::Utf8, false),
-            Field::new("unused", DataType::Int64, false),
-            Field::new("value", DataType::Int64, true),
-        ])
-        .with_metadata([("owner".to_owned(), "host".to_owned())].into()),
-    );
+    for mode in [ExecutionMode::Compile, ExecutionMode::ZeroCompile] {
+        execute_fully_bound_tree(mode).await;
+    }
+}
+
+async fn execute_fully_bound_tree(mode: ExecutionMode) {
+    let storage_schema = Arc::new(Schema::new(vec![
+        Field::new("group", DataType::Utf8, false),
+        Field::new("unused", DataType::Int64, false),
+        Field::new("value", DataType::Int64, true),
+    ]));
     let batch = RecordBatch::try_new(
-        storage_schema.clone(),
+        storage_schema,
         vec![
             Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c"])),
             Arc::new(Int64Array::from(vec![99; 5])),
@@ -213,84 +248,83 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
         ],
     )
     .unwrap();
-    let scan_input = Arc::new(storage_schema.project(&[2, 0]).unwrap());
-    let scan_output = Arc::new(storage_schema.project(&[0, 2]).unwrap());
+    let mut columns = ColumnContext::new();
+    let group = column(&mut columns, "group", DataType::Utf8, false);
+    let value = column(&mut columns, "value", DataType::Int64, true);
+    // The storage task reads columns 2 and 0, in that order.
     let scan = OperatorTreeNode::new(
-        ScanOperator::new(vec![2, 0], Arc::new(MemoryStorage(batch))),
+        ScanOperator::new(
+            vec![2, 0],
+            Arc::new(MemoryStorage(batch)),
+            vec![value, group],
+        ),
         vec![],
     );
     let filtered = OperatorTreeNode::new(
-        FilterOperator::new(binary(column(0), ExprOp::GreaterThan, 1)),
+        FilterOperator::new(
+            binary(&mut columns, reference(value), ExprOp::GreaterThan, 1),
+            vec![value, group],
+        ),
         vec![scan],
     );
     let reordered = OperatorTreeNode::new(
-        ProjectOperator::new(Projection::from_indices(scan_input.clone(), &[1, 0]).unwrap()),
+        ProjectOperator::new(vec![reference(group), reference(value)]),
         vec![filtered],
     );
     let filter = OperatorTreeNode::new(
-        FilterOperator::new(binary(column(1), ExprOp::LessThan, 5)),
+        FilterOperator::new(
+            binary(&mut columns, reference(value), ExprOp::LessThan, 5),
+            vec![group, value],
+        ),
         vec![reordered],
     );
-    let projector = Projection::new(vec![
-        ProjectionExpr::new(
-            ConstantExpression::string(Some("constant")).into_ref(),
-            "label",
-        ),
-        ProjectionExpr::new(binary(column(1), ExprOp::Multiply, 2), "doubled"),
-    ])
-    .with_metadata(scan_output.metadata().clone());
-    let projected_schema = projector.output_schema();
-    let project = OperatorTreeNode::new(ProjectOperator::new(projector), vec![filter]);
-    let output_schema = Arc::new(
-        Schema::new(vec![
-            Field::new("category", DataType::Utf8, false),
-            Field::new("total", DataType::Int64, true),
-            Field::new("rows", DataType::Int64, false),
-            Field::new("null_count", DataType::Int64, false),
-        ])
-        .with_metadata([("owner".to_owned(), "host".to_owned())].into()),
+    let label = column(&mut columns, "label", DataType::Utf8, false);
+    let doubled = binary(&mut columns, reference(value), ExprOp::Multiply, 2);
+    let project = OperatorTreeNode::new(
+        ProjectOperator::new(vec![
+            ConstantExpression::string(Some("constant"), label).into_ref(),
+            doubled.clone(),
+        ]),
+        vec![filter],
     );
-    let groups = Projection::new(vec![ProjectionExpr::new(
-        ConstantExpression::string(Some("all")).into_ref(),
-        "category",
-    )])
-    .with_metadata(projected_schema.metadata().clone());
+    let category = column(&mut columns, "category", DataType::Utf8, false);
+    let total = column(&mut columns, "total", DataType::Int64, true);
+    let rows = column(&mut columns, "rows", DataType::Int64, false);
+    let null_count = column(&mut columns, "null_count", DataType::Int64, false);
+    let incremented = binary(&mut columns, doubled, ExprOp::Add, 1);
+    let one = int(&mut columns, Some(1));
+    let null = int(&mut columns, None);
     let aggregates = vec![
-        Arc::new(
-            AggregateExpression::new(
-                AggregateFunction::Sum,
-                Some(binary(column(1), ExprOp::Add, 1)),
-                DataType::Int64,
-                true,
-            )
-            .with_alias("total"),
-        ),
-        Arc::new(
-            AggregateExpression::new(
-                AggregateFunction::Count,
-                Some(ConstantExpression::int64(Some(1)).into_ref()),
-                DataType::Int64,
-                false,
-            )
-            .with_alias("rows"),
-        ),
-        Arc::new(
-            AggregateExpression::new(
-                AggregateFunction::Count,
-                Some(ConstantExpression::int64(None).into_ref()),
-                DataType::Int64,
-                false,
-            )
-            .with_alias("null_count"),
-        ),
+        Arc::new(AggregateExpression::new(
+            AggregateFunction::Sum,
+            vec![incremented],
+            total,
+        )),
+        Arc::new(AggregateExpression::new(
+            AggregateFunction::Count,
+            vec![one],
+            rows,
+        )),
+        Arc::new(AggregateExpression::new(
+            AggregateFunction::Count,
+            vec![null],
+            null_count,
+        )),
     ];
     let aggregate = OperatorTreeNode::new(
-        AggregateOperator::try_new(groups, aggregates).unwrap(),
+        AggregateOperator::try_new(
+            vec![ConstantExpression::string(Some("all"), category).into_ref()],
+            aggregates,
+        )
+        .unwrap(),
         vec![project],
     );
     let collector = Collector::default();
-    let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![aggregate]));
-    let graph = build_pipeline_graph(tree).unwrap();
+    let tree = OperatorTree::new(
+        columns,
+        OperatorTreeNode::new(collector.clone(), vec![aggregate]),
+    );
+    let graph = build_pipeline_graph_with_mode(&tree, mode).unwrap();
     PipelineGraphExecutor::new(graph)
         .with_task_executor(TestExecutor)
         .with_parallelism(2)
@@ -300,6 +334,12 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
     let batches = collector.0.lock().unwrap();
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
     let result = batches.iter().find(|b| b.num_rows() > 0).unwrap();
+    let output_schema = Arc::new(Schema::new(vec![
+        Field::new("category", DataType::Utf8, false),
+        Field::new("total", DataType::Int64, true),
+        Field::new("rows", DataType::Int64, false),
+        Field::new("null_count", DataType::Int64, false),
+    ]));
     assert_eq!(result.schema(), output_schema);
     assert_eq!(
         result
@@ -325,32 +365,38 @@ async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expression
 
 #[test]
 fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
-    let input = Arc::new(Schema::new(vec![Field::new("a", DataType::Int64, true)]));
+    let mut columns = ColumnContext::new();
+    let a = column(&mut columns, "a", DataType::Int64, true);
+    let input = columns.schema(&[a]).unwrap();
     let batch = RecordBatch::try_new(
         input.clone(),
         vec![Arc::new(Int64Array::from(vec![Some(1), None, Some(3)]))],
     )
     .unwrap();
     for (value, rows) in [(Some(true), 3), (Some(false), 0), (None, 0)] {
-        let result = filter_executor(ConstantExpression::boolean(value).into_ref())
+        let predicate = columns.allocate(ColumnType::new(DataType::Boolean, value.is_none()));
+        let predicate = ConstantExpression::boolean(value, predicate).into_ref();
+        let result = filter_program(&columns, &[a], predicate)
+            .unwrap()
             .execute(&batch)
             .unwrap();
-        let result = completed_batch(result);
         assert_eq!(result.num_rows(), rows);
         assert_eq!(result.schema(), input);
     }
-    let projector = Projection::new(vec![
-        ProjectionExpr::new(column(0), "renamed"),
-        ProjectionExpr::new(ConstantExpression::int64(Some(7)).into_ref(), "constant"),
-        ProjectionExpr::new(ConstantExpression::int64(None).into_ref(), "null"),
-    ]);
+    let constant = column(&mut columns, "constant", DataType::Int64, false);
+    let null = column(&mut columns, "null", DataType::Int64, true);
+    let expressions = vec![
+        reference(a),
+        ConstantExpression::int64(Some(7), constant).into_ref(),
+        ConstantExpression::int64(None, null).into_ref(),
+    ];
     let output = Arc::new(Schema::new(vec![
-        Field::new("renamed", DataType::Int64, true),
+        Field::new("a", DataType::Int64, true),
         Field::new("constant", DataType::Int64, false),
         Field::new("null", DataType::Int64, true),
     ]));
-    let mut executor = project_executor(projector);
-    let result = completed_batch(executor.execute(&batch).unwrap());
+    let mut executor = project_program(&columns, &[a], expressions).unwrap();
+    let result = executor.execute(&batch).unwrap();
     assert_eq!(result.schema(), output);
     assert_eq!(result.column(0).null_count(), 1);
     assert_eq!(
@@ -364,12 +410,11 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
         &[7, 7, 7]
     );
     assert_eq!(result.column(2).null_count(), 3);
-    assert_eq!(
-        completed_batch(executor.execute(&batch.slice(0, 0)).unwrap()).num_rows(),
-        0
-    );
-    let empty = Projection::new(Vec::<ProjectionExpr>::new());
-    let zero_columns = completed_batch(project_executor(empty).execute(&batch).unwrap());
+    assert_eq!(executor.execute(&batch.slice(0, 0)).unwrap().num_rows(), 0);
+    let zero_columns = project_program(&columns, &[a], vec![])
+        .unwrap()
+        .execute(&batch)
+        .unwrap();
     assert_eq!(
         (zero_columns.num_rows(), zero_columns.num_columns()),
         (3, 0)
@@ -378,15 +423,19 @@ fn scalar_predicates_and_constant_projections_preserve_batch_shape() {
 
 #[test]
 fn preserves_arrow_kernel_errors() {
-    let input = Schema::new(vec![Field::new("a", DataType::Int64, true)]);
-    let batch =
-        RecordBatch::try_new(Arc::new(input), vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    let projector = Projection::new(vec![ProjectionExpr::new(
-        binary(column(0), ExprOp::Divide, 0),
-        "x",
-    )]);
-    let error = project_executor(projector).execute(&batch).unwrap_err();
-    assert_eq!(error.kind(), roc::error::ErrorKind::DivisionByZero);
+    let mut columns = ColumnContext::new();
+    let a = column(&mut columns, "a", DataType::Int64, true);
+    let batch = RecordBatch::try_new(
+        columns.schema(&[a]).unwrap(),
+        vec![Arc::new(Int64Array::from(vec![1]))],
+    )
+    .unwrap();
+    let division = binary(&mut columns, reference(a), ExprOp::Divide, 0);
+    let error = project_program(&columns, &[a], vec![division])
+        .unwrap()
+        .execute(&batch)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DivisionByZero);
     assert!(matches!(
         std::error::Error::source(&error)
             .unwrap()
@@ -396,16 +445,13 @@ fn preserves_arrow_kernel_errors() {
 }
 
 #[test]
-fn filter_rejects_non_boolean_results_without_an_input_schema() {
-    let input = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
-    let batch = RecordBatch::try_new(input, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
-    for predicate in [
-        reference(0, DataType::Int64, false),
-        ConstantExpression::int64(Some(1)).into_ref(),
-    ] {
+fn filter_rejects_non_boolean_results() {
+    let mut columns = ColumnContext::new();
+    let v = column(&mut columns, "v", DataType::Int64, false);
+    for predicate in [reference(v), int(&mut columns, Some(1))] {
         assert!(matches!(
-            filter_executor(predicate).execute(&batch),
-            Err(ref error) if error.kind() == roc::error::ErrorKind::InvalidInput
+            filter_program(&columns, &[v], predicate),
+            Err(ref error) if error.kind() == ErrorKind::InvalidPlan
         ));
     }
 }
@@ -430,28 +476,28 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
     )
     .unwrap();
     let expected = batch.project(&[2, 0]).unwrap();
-    let exec = ScanExec::new(ScanOperator::new(
+    let mut exec = ScanExec::new(ScanOperator::new(
         vec![2, 0],
         Arc::new(MemoryStorage(batch)),
+        vec![],
     ));
     let (shutdown, shutdown_guard) = asyncband::shutdown::new();
-    let global = exec.init_global_context(&shutdown_guard).unwrap();
-    let mut worker = exec.new_executor(global.clone()).unwrap();
+    exec.start(&shutdown_guard).unwrap();
     assert_eq!(
-        worker.next_batch(&shutdown_guard).await.unwrap().unwrap(),
+        exec.next_batch(&shutdown_guard).await.unwrap().unwrap(),
         expected
     );
-    assert!(worker.next_batch(&shutdown_guard).await.unwrap().is_none());
+    assert!(exec.next_batch(&shutdown_guard).await.unwrap().is_none());
     shutdown.request_shutdown();
     assert!(matches!(
-        worker.next_batch(&shutdown_guard).await,
-        Err(ref error) if error.kind() == roc::error::ErrorKind::Cancelled
+        exec.next_batch(&shutdown_guard).await,
+        Err(ref error) if error.kind() == ErrorKind::Cancelled
     ));
-    exec.finalize(global, &shutdown_guard).await.unwrap();
+    exec.finish(&shutdown_guard).await.unwrap();
 }
 
 struct MemoryExchange {
-    input: Arc<Mutex<Result<Option<RecordBatch>>>>,
+    input: Mutex<Result<Option<RecordBatch>>>,
     output: Collector,
     schema: arrow::datatypes::SchemaRef,
     created_sinks: std::sync::atomic::AtomicUsize,
@@ -464,7 +510,8 @@ impl roc::operator::ExchangeService for MemoryExchange {
         _shutdown_guard: &ShutdownGuard,
     ) -> Result<Arc<dyn roc::operator::ExchangeHandle>> {
         assert_eq!(exchange, 7);
-        Ok(Arc::new(MemoryExchangeInput(self.input.clone())))
+        let input = std::mem::replace(&mut *self.input.lock().unwrap(), Ok(None));
+        Ok(Arc::new(MemoryExchangeInput(Arc::new(Mutex::new(input)))))
     }
 
     fn create_sink(
@@ -511,25 +558,37 @@ impl roc::operator::ExchangeSink for Collector {
 }
 
 #[tokio::test]
-async fn exchange_relays_batches_and_initializes_sinks_for_empty_input() {
+async fn exchange_relays_batches_and_opens_sinks_once_even_for_empty_input() {
     use roc::operator::{ExchangeSinkOperator, ExchangeSourceOperator};
-    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+    let mut columns = ColumnContext::new();
+    let v = column(&mut columns, "v", DataType::Int64, false);
+    let schema = columns.schema(&[v]).unwrap();
     let batch =
         RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
-    for input in [Some(batch), None] {
+    for (input, parallelism) in [(Some(batch.clone()), 1), (Some(batch), 3), (None, 3)] {
         let service = Arc::new(MemoryExchange {
-            input: Arc::new(Mutex::new(Ok(input.clone()))),
+            input: Mutex::new(Ok(input.clone())),
             output: Collector::default(),
             schema: schema.clone(),
             created_sinks: std::sync::atomic::AtomicUsize::new(0),
         });
-        let source = OperatorTreeNode::new(ExchangeSourceOperator::new(7, service.clone()), vec![]);
+        let source = OperatorTreeNode::new(
+            ExchangeSourceOperator::new(7, service.clone(), vec![v]),
+            vec![],
+        );
         let sink = OperatorTreeNode::new(
-            ExchangeSinkOperator::new(vec![8], schema.clone(), service.clone()),
+            ExchangeSinkOperator::new(vec![8], service.clone()),
             vec![source],
         );
-        let graph = build_pipeline_graph(OperatorTree::new(sink)).unwrap();
+        let graph = build_pipeline_graph(&OperatorTree::new(columns.clone(), sink)).unwrap();
+        assert_eq!(
+            service
+                .created_sinks
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         PipelineGraphExecutor::new(graph)
+            .with_parallelism(parallelism)
             .with_task_executor(TestExecutor)
             .execute()
             .await
@@ -555,48 +614,49 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
     ));
     let collector = Collector::default();
     let service = Arc::new(MemoryExchange {
-        input: Arc::new(Mutex::new(Err(roc::error::Error::new(
-            roc::error::ErrorKind::Unavailable,
+        input: Mutex::new(Err(Error::new(
+            ErrorKind::Unavailable,
             "exchange read failed",
         )
-        .with_source(read_error.clone())))),
+        .with_source(read_error.clone()))),
         output: collector.clone(),
         schema: Arc::new(Schema::empty()),
         created_sinks: std::sync::atomic::AtomicUsize::new(0),
     });
     let source = OperatorTreeNode::new(
-        roc::operator::ExchangeSourceOperator::new(7, service),
+        roc::operator::ExchangeSourceOperator::new(7, service, vec![]),
         vec![],
     );
-    let tree = OperatorTree::new(OperatorTreeNode::new(collector.clone(), vec![source]));
-    let error = PipelineGraphExecutor::new(build_pipeline_graph(tree).unwrap())
+    let tree = OperatorTree::new(
+        ColumnContext::new(),
+        OperatorTreeNode::new(collector.clone(), vec![source]),
+    );
+    let error = PipelineGraphExecutor::new(build_pipeline_graph(&tree).unwrap())
         .with_task_executor(TestExecutor)
         .execute()
         .await
         .unwrap_err();
-    assert_eq!(error.kind(), roc::error::ErrorKind::Unavailable);
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
     let actual = std::error::Error::source(&error)
         .unwrap()
         .downcast_ref::<Arc<std::io::Error>>()
         .unwrap();
     assert!(Arc::ptr_eq(actual, &read_error));
-    let frames = error.frames();
+    let contexts = error
+        .frames()
+        .iter()
+        .filter_map(|frame| frame.context.as_ref())
+        .collect::<Vec<_>>();
     assert!(
-        frames
+        contexts
             .iter()
-            .filter_map(|f| f.context.as_ref())
             .any(|context| context.operation == "exchange.next"
                 && context.fields.contains(&("exchange", "7".into())))
     );
-    assert!(frames.iter().any(|f| {
-        f.context
-            .as_ref()
-            .is_some_and(|context| context.operation == "worker.execute")
-    }));
-    assert!(frames.iter().any(|f| {
-        f.context
-            .as_ref()
-            .is_some_and(|context| context.operation == "pipeline.execute")
-    }));
+    assert!(
+        contexts
+            .iter()
+            .any(|context| context.operation == "pipeline.execute")
+    );
     assert!(collector.0.lock().unwrap().is_empty());
 }

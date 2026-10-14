@@ -20,14 +20,29 @@ rust-version = "1.95"
 description = "High-performance runtime for executing physical relational IR"
 license = "Apache-2.0"
 
+[workspace]
+members = ["integrations/datafusion"]
+resolver = "3"
+
 [dependencies]
-arrow = { version = "59.2.0", default-features = false }
+arrow-array = "59.2.0"
+arrow-buffer = "59.2.0"
+arrow-schema = "59.2.0"
 asyncband = { version = "0.7.3", default-features = false, features = ["shutdown", "mpmc"] }
 futures = "0.3"
 foldhash = "0.2"
 thiserror = "2"
+inkwell = { version = "=0.7.1", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86", "target-aarch64"] }
+
+[build-dependencies]
+inkwell = { version = "=0.7.1", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86", "target-aarch64"] }
+
+[features]
+default = ["jit"]
+jit = [] # Compatibility feature; code generation is always enabled.
 
 [dev-dependencies]
+arrow = { version = "59.2.0", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
@@ -38,3 +53,7 @@ harness = false
 [[bench]]
 name = "add_nullable"
 harness = false
+
+[[example]]
+name = "execution_architecture"
+path = "design/execution_architecture.rs"

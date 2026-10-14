@@ -13,9 +13,14 @@
 // limitations under the License.
 
 //! Typed, stateless descriptions of scalar expressions.
+//!
+//! Every value-producing node declares the column that receives its result;
+//! the column's type in the ColumnContext is the result type. A node lowers
+//! itself into kernels and binds its output column. Building a node whose
+//! output is already bound reuses that binding.
+use crate::column::ColumnId;
 use crate::error::Result;
-use crate::expr::ExpressionResultType;
-pub use executor::ScalarExpressionEvaluation;
+use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
 use std::sync::Arc;
 
 mod case;
@@ -23,27 +28,18 @@ mod cast;
 mod coalesce;
 mod conjunction;
 mod constant;
-pub mod executor;
 mod function;
-mod kernels;
 mod not;
 mod reference;
-mod value;
-pub use value::{ColumnValue, ScalarValue};
 
-pub use case::{CaseExpression, CaseExpressionEvaluation};
-pub use cast::{CastExpression, CastExpressionEvaluation, CastMode};
-pub use coalesce::{CoalesceExpression, CoalesceExpressionEvaluation};
-pub use conjunction::{
-    AndExpressionEvaluation, Conjunction, ConjunctionExpression, OrExpressionEvaluation,
-};
-pub use constant::{ConstantExpression, ConstantExpressionEvaluation};
-pub use function::{
-    BinaryFunctionExpressionEvaluation, FunctionExpression, FunctionKind,
-    UnaryFunctionExpressionEvaluation,
-};
-pub use not::{NotExpression, NotExpressionEvaluation};
-pub use reference::{ReferenceExpression, ReferenceExpressionEvaluation};
+pub use case::CaseExpression;
+pub use cast::{CastExpression, CastMode};
+pub use coalesce::CoalesceExpression;
+pub use conjunction::{Conjunction, ConjunctionExpression};
+pub use constant::ConstantExpression;
+pub use function::{FunctionExpression, FunctionKind};
+pub use not::NotExpression;
+pub use reference::ReferenceExpression;
 
 pub type ScalarExprRef = Arc<ScalarExpression>;
 
@@ -60,32 +56,68 @@ pub enum ScalarExpression {
 }
 
 impl ScalarExpression {
-    pub fn result_type(&self) -> &ExpressionResultType {
+    /// The column holding the result; a Reference returns the referenced one.
+    pub fn output(&self) -> ColumnId {
         match self {
-            Self::Reference(e) => e.result_type(),
-            Self::Constant(e) => e.result_type(),
-            Self::Function(e) => e.result_type(),
-            Self::Cast(e) => e.result_type(),
-            Self::Conjunction(e) => e.result_type(),
-            Self::Not(e) => e.result_type(),
-            Self::Case(e) => e.result_type(),
-            Self::Coalesce(e) => e.result_type(),
+            Self::Reference(e) => e.column(),
+            Self::Constant(e) => e.output(),
+            Self::Function(e) => e.output(),
+            Self::Cast(e) => e.output(),
+            Self::Conjunction(e) => e.output(),
+            Self::Not(e) => e.output(),
+            Self::Case(e) => e.output(),
+            Self::Coalesce(e) => e.output(),
         }
     }
 
-    /// Bind kernels and build an immutable evaluation for this expression.
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
+    /// Direct operands, in evaluation order.
+    pub fn children(&self) -> Vec<&ScalarExprRef> {
         match self {
-            Self::Reference(e) => e.to_evaluation(),
-            Self::Constant(e) => e.to_evaluation(),
-            Self::Function(e) => e.to_evaluation(),
-            Self::Cast(e) => e.to_evaluation(),
-            Self::Conjunction(e) => e.to_evaluation(),
-            Self::Not(e) => e.to_evaluation(),
-            Self::Case(e) => e.to_evaluation(),
-            Self::Coalesce(e) => e.to_evaluation(),
+            Self::Reference(_) | Self::Constant(_) => vec![],
+            Self::Function(e) => e.arguments().iter().collect(),
+            Self::Cast(e) => vec![e.input()],
+            Self::Conjunction(e) => e.arguments().iter().collect(),
+            Self::Not(e) => vec![e.input()],
+            Self::Case(e) => e
+                .branches()
+                .iter()
+                .flat_map(|(when, then)| [when, then])
+                .chain([e.else_expr()])
+                .collect(),
+            Self::Coalesce(e) => e.arguments().iter().collect(),
         }
     }
+
+    /// Lowers the expression in the current domain and binds its output.
+    /// Returns the errors that have not been raised; the consumer of the root
+    /// expression raises them (`KernelBuilder::raise`).
+    pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<PendingErrors> {
+        let output = self.output();
+        if builder.is_bound(output) || matches!(self, Self::Reference(_)) {
+            return builder.column_errors(output);
+        }
+        let (binding, errors) = match self {
+            Self::Reference(_) => unreachable!(),
+            Self::Constant(e) => e.lower(builder)?,
+            Self::Function(e) => e.lower(builder)?,
+            Self::Cast(e) => e.lower(builder)?,
+            Self::Conjunction(e) => e.lower(builder)?,
+            Self::Not(e) => e.lower(builder)?,
+            Self::Case(e) => e.lower(builder)?,
+            Self::Coalesce(e) => e.lower(builder)?,
+        };
+        builder.bind_column(output, binding, errors.clone())?;
+        Ok(errors)
+    }
+}
+
+/// A built child: its binding and unraised errors.
+pub(crate) fn build_input(
+    builder: &mut KernelBuilder<'_>,
+    expr: &ScalarExpression,
+) -> Result<(ColumnVariableBinding, PendingErrors)> {
+    let errors = expr.build_kernels(builder)?;
+    Ok((builder.column_binding(expr.output())?, errors))
 }
 
 macro_rules! scalar_node {
@@ -107,22 +139,92 @@ scalar_node! {
     Case(CaseExpression), Coalesce(CoalesceExpression),
 }
 
-macro_rules! scalar_evaluation {
-    ($($variant:ident($evaluation:ty)),* $(,)?) => {$(
-        impl From<$evaluation> for ScalarExpressionEvaluation {
-            fn from(evaluation: $evaluation) -> Self { Self::$variant(evaluation) }
+#[cfg(test)]
+pub(crate) mod test_support {
+    //! Evaluates root expressions through a one-pipeline program.
+    use super::ScalarExprRef;
+    use crate::arrow::{
+        array::ArrayRef,
+        datatypes::DataType,
+        record_batch::{RecordBatch, RecordBatchOptions},
+    };
+    use crate::column::{ColumnContext, ColumnId, ColumnType};
+    use crate::error::Result;
+    use crate::kernel::{ExecutionMode, KernelBuilder, MODES, Program, agree};
+
+    #[derive(Clone)]
+    pub(crate) struct TestPlan {
+        pub columns: ColumnContext,
+        pub inputs: Vec<ColumnId>,
+    }
+
+    impl TestPlan {
+        pub fn new(inputs: &[(DataType, bool)]) -> Self {
+            let mut columns = ColumnContext::new();
+            let inputs = inputs
+                .iter()
+                .map(|(t, nullable)| columns.allocate(ColumnType::new(t.clone(), *nullable)))
+                .collect();
+            Self { columns, inputs }
         }
-    )*};
-}
-scalar_evaluation! {
-    Reference(ReferenceExpressionEvaluation),
-    Constant(ConstantExpressionEvaluation),
-    UnaryFunction(UnaryFunctionExpressionEvaluation),
-    BinaryFunction(BinaryFunctionExpressionEvaluation),
-    Cast(CastExpressionEvaluation),
-    And(AndExpressionEvaluation),
-    Or(OrExpressionEvaluation),
-    Not(NotExpressionEvaluation),
-    Case(CaseExpressionEvaluation),
-    Coalesce(CoalesceExpressionEvaluation),
+
+        pub fn input(&self, i: usize) -> ColumnId {
+            self.inputs[i]
+        }
+
+        pub fn column(&mut self, data_type: DataType, nullable: bool) -> ColumnId {
+            self.columns.allocate(ColumnType::new(data_type, nullable))
+        }
+
+        pub fn program_with(
+            &self,
+            exprs: &[ScalarExprRef],
+            mode: ExecutionMode,
+        ) -> Result<Program> {
+            let mut builder = KernelBuilder::new(&self.columns);
+            builder.bind_inputs(&self.inputs)?;
+            for expr in exprs {
+                let errors = expr.build_kernels(&mut builder)?;
+                builder.raise(errors)?;
+            }
+            let outputs = exprs.iter().map(|e| e.output()).collect::<Vec<_>>();
+            Program::new(builder.finish(Some(&outputs))?, mode)
+        }
+
+        pub fn evaluate_all(
+            &self,
+            exprs: &[ScalarExprRef],
+            input: &[ArrayRef],
+            rows: usize,
+        ) -> Result<Vec<ArrayRef>> {
+            let batch = RecordBatch::try_new_with_options(
+                self.columns.schema(&self.inputs)?,
+                input.to_vec(),
+                &RecordBatchOptions::new().with_row_count(Some(rows)),
+            )
+            .map_err(|source| {
+                crate::error::Error::invalid_input("test input does not match its columns".into())
+                    .with_source(source)
+            })?;
+            let (_shutdown, guard) = asyncband::shutdown::new();
+            let run = |mode| {
+                let program = self.program_with(exprs, mode)?;
+                let mut local = program.new_local()?;
+                let output = program.run(&batch, &mut local, &guard)?.unwrap();
+                Ok(output.columns().to_vec())
+            };
+            agree(MODES.map(|m| (m, run(m))).into(), |a, b| a == b)
+        }
+
+        pub fn evaluate(
+            &self,
+            expr: &ScalarExprRef,
+            input: &[ArrayRef],
+            rows: usize,
+        ) -> Result<ArrayRef> {
+            Ok(self
+                .evaluate_all(std::slice::from_ref(expr), input, rows)?
+                .remove(0))
+        }
+    }
 }

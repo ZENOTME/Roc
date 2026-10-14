@@ -1,225 +1,190 @@
-// Copyright 2026 The Roc Contributors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     https://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-use crate::error::{Error, Result};
-use arrow::{
-    array::{Array, ArrayRef, PrimitiveArray},
-    buffer::NullBuffer,
-    datatypes::*,
-    row::{RowConverter, SortField},
+//! Query-owned hash table; keys are scalar values supplied by generated code.
+use crate::{
+    arrow::{array::ArrayRef, datatypes::*},
+    error::{Error, Result},
+    kernel::scalar::{self, Cell, OwnedCell},
 };
-use std::{collections::HashMap, hash::Hash, sync::Arc};
-
-type NativeMap<K> = HashMap<K, usize, foldhash::fast::RandomState>;
-
-/// Integer keys already have an equality-preserving representation. Keep it
-/// instead of encoding every input row and decoding the output through Rows.
-/// NULL has a separate group so every possible integer remains a usable key.
-pub(super) struct IntegerIndex<T: ArrowPrimitiveType>
-where
-    T::Native: Eq + Hash,
-{
-    index: NativeMap<T::Native>,
-    values: Vec<T::Native>,
-    null_group: Option<usize>,
+use std::collections::HashMap;
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub(crate) struct WordEntry {
+    pub key: u64,
+    pub id: u64,
+    pub tag: u64,
 }
-
-impl<T: ArrowPrimitiveType> IntegerIndex<T>
-where
-    T::Native: Eq + Hash,
-{
-    fn new() -> Self {
-        Self {
-            index: NativeMap::default(),
-            values: vec![],
-            null_group: None,
+#[repr(C)]
+pub(crate) struct GroupIndex {
+    pub cache: Option<Box<[WordEntry; 1024]>>,
+    types: Vec<DataType>,
+    encoders: Vec<scalar::KeyEncoder>,
+    owners: Vec<scalar::OwnValue>,
+    index: HashMap<Vec<u8>, usize, foldhash::fast::RandomState>,
+    rows: Vec<Vec<OwnedCell>>,
+    words: HashMap<(u64, bool), usize, foldhash::fast::RandomState>,
+    scratch: Vec<u8>,
+    word_key: bool,
+}
+impl GroupIndex {
+    pub fn new(schema: &Schema) -> Result<Self> {
+        let types = schema
+            .fields()
+            .iter()
+            .map(|f| f.data_type().clone())
+            .collect::<Vec<_>>();
+        if types.iter().any(|t| !scalar::supported(t)) {
+            return Err(Error::unsupported("unsupported group key type".into()));
+        }
+        let encoders = types.iter().map(scalar::bind_key).collect::<Result<_>>()?;
+        let owners = types.iter().map(scalar::bind_owner).collect();
+        let word_key = schema.fields().len() == 1
+            && matches!(
+                schema.field(0).data_type(),
+                DataType::Boolean
+                    | DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::UInt64
+                    | DataType::Date32
+                    | DataType::Date64
+                    | DataType::Timestamp(..)
+            );
+        Ok(Self {
+            cache: word_key.then(|| Box::new([WordEntry::default(); 1024])),
+            types,
+            encoders,
+            owners,
+            index: HashMap::default(),
+            rows: vec![],
+            words: HashMap::default(),
+            scratch: vec![],
+            word_key,
+        })
+    }
+    pub fn len(&self) -> usize {
+        if self.types.is_empty() {
+            1
+        } else {
+            self.rows.len()
         }
     }
-
-    fn intern(&mut self, array: &ArrayRef, ids: &mut Vec<usize>) -> Result<()> {
-        let array = array
-            .as_any()
-            .downcast_ref::<PrimitiveArray<T>>()
-            .ok_or_else(|| {
-                Error::invalid_input("group key type changed during execution".into())
-            })?;
-        ids.clear();
-        ids.reserve(array.len());
-        if array.null_count() == 0 {
-            for &value in array.values() {
-                ids.push(self.intern_value(value));
-            }
+    pub fn intern_row(&mut self, values: &[Cell]) -> usize {
+        if self.types.is_empty() {
+            return 0;
+        }
+        if self.word_key {
+            return self.intern_word(values[0]);
+        }
+        self.scratch.clear();
+        let mut key = std::mem::take(&mut self.scratch);
+        for (v, encode) in values.iter().zip(&self.encoders) {
+            encode(*v, &mut key);
+        }
+        if let Some(&id) = self.index.get(&key) {
+            self.scratch = key;
+            return id;
+        }
+        let id = self.rows.len();
+        self.rows.push(
+            values
+                .iter()
+                .zip(&self.owners)
+                .map(|(v, own)| own(*v))
+                .collect(),
+        );
+        self.index.insert(key, id);
+        id
+    }
+    pub fn intern_word(&mut self, value: Cell) -> usize {
+        let key = (
+            if value.valid == 0 { 0 } else { value.bits },
+            value.valid != 0,
+        );
+        let slot = key.0 as usize & 1023;
+        let tag = if key.1 { 2 } else { 1 };
+        let cached = self.cache.as_ref().unwrap()[slot];
+        if cached.tag == tag && cached.key == key.0 {
+            return cached.id as usize;
+        }
+        let id = if let Some(&id) = self.words.get(&key) {
+            id
         } else {
-            for value in array {
-                ids.push(match value {
-                    Some(value) => self.intern_value(value),
-                    None => *self.null_group.get_or_insert_with(|| {
-                        let id = self.values.len();
-                        self.values.push(T::Native::default());
-                        id
-                    }),
-                });
-            }
+            let id = self.rows.len();
+            self.rows.push(vec![(self.owners[0])(value)]);
+            self.words.insert(key, id);
+            id
+        };
+        self.cache.as_mut().unwrap()[slot] = WordEntry {
+            key: key.0,
+            id: id as u64,
+            tag,
+        };
+        id
+    }
+    pub fn intern(
+        &mut self,
+        columns: &[ArrayRef],
+        rows: usize,
+        ids: &mut Vec<usize>,
+    ) -> Result<()> {
+        let columns = columns
+            .iter()
+            .map(scalar::decode)
+            .collect::<Result<Vec<_>>>()?;
+        ids.clear();
+        for row in 0..rows {
+            let values = columns.iter().map(|c| c[row]).collect::<Vec<_>>();
+            ids.push(self.intern_row(&values));
         }
         Ok(())
     }
-
-    #[inline]
-    fn intern_value(&mut self, value: T::Native) -> usize {
-        *self.index.entry(value).or_insert_with(|| {
-            let id = self.values.len();
-            self.values.push(value);
-            id
-        })
-    }
-
-    fn column(&self) -> ArrayRef {
-        let nulls = self.null_group.map(|null| {
-            NullBuffer::from(
-                (0..self.values.len())
-                    .map(|i| i != null)
-                    .collect::<Vec<_>>(),
-            )
-        });
-        Arc::new(PrimitiveArray::<T>::new(self.values.clone().into(), nulls))
+    pub fn columns(&self) -> Result<Vec<ArrayRef>> {
+        self.types
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                scalar::encode(t, &self.rows.iter().map(|r| r[i].get()).collect::<Vec<_>>())
+            })
+            .collect()
     }
 }
-
-/// The row format remains the fallback for compound keys and other Arrow types,
-/// preserving their established equality/NULL semantics.
-pub(super) struct RowIndex {
-    converter: RowConverter,
-    index: HashMap<Vec<u8>, usize>,
-    keys: Vec<Vec<u8>>,
-}
-
-macro_rules! group_index {
-    ($($variant:ident => $ty:ty),* $(,)?) => {
-        pub(super) enum GroupIndex {
-            Global,
-            $($variant(IntegerIndex<$ty>),)*
-            Rows(RowIndex),
-        }
-
-        impl GroupIndex {
-            pub(super) fn new(schema: &Schema) -> Result<Self> {
-                if schema.fields().is_empty() {
-                    return Ok(Self::Global);
-                }
-                if schema.fields().len() == 1 {
-                    match schema.field(0).data_type() {
-                        $(DataType::$variant => return Ok(Self::$variant(IntegerIndex::new())),)*
-                        _ => {}
-                    }
-                }
-                Ok(Self::Rows(RowIndex {
-                    converter: RowConverter::new(schema.fields().iter()
-                        .map(|f| SortField::new(f.data_type().clone())).collect())
-                        .map_err(|source| {
-                            Error::unsupported("unsupported group key types".into())
-                                .with_source(source)
-                        })?,
-                    index: HashMap::new(),
-                    keys: vec![],
-                }))
-            }
-
-            pub(super) fn len(&self) -> usize {
-                match self {
-                    Self::Global => 1,
-                    $(Self::$variant(index) => index.values.len(),)*
-                    Self::Rows(index) => index.keys.len(),
-                }
-            }
-
-            pub(super) fn intern(&mut self, columns: &[ArrayRef], rows: usize, ids: &mut Vec<usize>) -> Result<()> {
-                match self {
-                    Self::Global => {
-                        // AggregateState owns this ID buffer for a fixed index.
-                        // Its existing entries are already zero; initialize only growth.
-                        debug_assert!(ids.iter().all(|&id| id == 0));
-                        ids.resize(rows, 0);
-                        Ok(())
-                    }
-                    $(Self::$variant(index) => index.intern(&columns[0], ids),)*
-                    Self::Rows(index) => {
-                        let rows = index.converter.convert_columns(columns).map_err(|source| {
-                            Error::invalid_input("failed to encode group keys".into())
-                                .with_source(source)
-                        })?;
-                        ids.clear();
-                        ids.reserve(rows.num_rows());
-                        for row in rows.iter() {
-                            let id = match index.index.get(row.as_ref()) {
-                                Some(id) => *id,
-                                None => {
-                                    let id = index.keys.len();
-                                    let key = row.as_ref().to_vec();
-                                    index.index.insert(key.clone(), id);
-                                    index.keys.push(key);
-                                    id
-                                }
-                            };
-                            ids.push(id);
-                        }
-                        Ok(())
-                    }
-                }
-            }
-
-            pub(super) fn columns(&self) -> Result<Vec<ArrayRef>> {
-                match self {
-                    Self::Global => Ok(vec![]),
-                    $(Self::$variant(index) => Ok(vec![index.column()]),)*
-                    Self::Rows(index) => {
-                        let parser = index.converter.parser();
-                        index.converter.convert_rows(index.keys.iter().map(|key| parser.parse(key)))
-                            .map_err(|source| {
-                                Error::internal("failed to decode stored group keys".into())
-                                    .with_source(source)
-                            })
-                    }
-                }
-            }
-        }
-    }
-}
-
-group_index! {
-    Int8 => Int8Type,
-    Int16 => Int16Type,
-    Int32 => Int32Type,
-    Int64 => Int64Type,
-    UInt8 => UInt8Type,
-    UInt16 => UInt16Type,
-    UInt32 => UInt32Type,
-    UInt64 => UInt64Type,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, StringArray, UInt64Array};
+    use crate::arrow::array::Array;
+    use crate::arrow::array::{Int64Array, StringArray, UInt64Array};
+    use std::sync::Arc;
 
     #[test]
-    fn global_ids_remain_zero_across_input_and_merge_batch_sizes() {
-        let mut index = GroupIndex::new(&Schema::empty()).unwrap();
-        let mut ids = vec![];
-        for rows in [8192, 8192, 0, 1, 65536, 3, 8192] {
-            index.intern(&[], rows, &mut ids).unwrap();
-            assert_eq!(ids, vec![0; rows]);
+    fn word_cache_collisions_keep_full_keys_and_stable_ids() {
+        let schema = Schema::new(vec![Field::new("key", DataType::UInt64, true)]);
+        let mut index = GroupIndex::new(&schema).unwrap();
+        let values = [
+            Cell::word(0),
+            Cell::word(1024),
+            Cell::word(u64::MAX),
+            Cell::default(),
+            Cell::word(2048),
+        ];
+        for _ in 0..3 {
+            for (expected, value) in values.iter().enumerate() {
+                assert_eq!(index.intern_word(*value), expected);
+            }
         }
+        assert_eq!(index.len(), values.len());
+        let column = index.columns().unwrap().remove(0);
+        assert_eq!(
+            column
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            [Some(0), Some(1024), Some(u64::MAX), None, Some(2048)]
+        );
     }
 
     #[test]

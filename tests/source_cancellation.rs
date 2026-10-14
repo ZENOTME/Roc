@@ -16,11 +16,11 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use asyncband::shutdown::ShutdownGuard;
 use futures::{executor::block_on, future::BoxFuture, poll};
 use roc::{
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     exec::{ExchangeSourceExec, ScanExec, SourceExec},
     operator::{
-        ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink, ExchangeSourceOperator,
-        ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
+        ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink, ScanConsumer, ScanHandle,
+        ScanOperator, ScanRequest, ScanStorage,
     },
 };
 use std::{
@@ -42,7 +42,7 @@ impl Service {
     fn start(&self, shutdown_guard: ShutdownGuard) -> Result<Arc<Handle>> {
         self.guards.lock().unwrap().push(shutdown_guard.clone());
         if self.fail_start {
-            return Err(Error::internal("start failed".into()));
+            return Err(Error::new(ErrorKind::Unavailable, "start failed"));
         }
         Ok(Arc::new(Handle {
             _shutdown_guard: shutdown_guard,
@@ -125,11 +125,9 @@ impl ExchangeConsumer for Consumer {
 
 fn source(exchange: bool, service: Arc<Service>) -> Box<dyn SourceExec> {
     if exchange {
-        Box::new(ExchangeSourceExec::new(ExchangeSourceOperator::new(
-            0, service,
-        )))
+        Box::new(ExchangeSourceExec::new(0, service))
     } else {
-        Box::new(ScanExec::new(ScanOperator::new((), service)))
+        Box::new(ScanExec::new(ScanOperator::new((), service, vec![])))
     }
 }
 
@@ -139,11 +137,12 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
         let (shutdown, guard) = asyncband::shutdown::new();
         let (_other_shutdown, other_guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        let same_execution = source.init_global_context(&guard).unwrap();
-        let other_execution = source.init_global_context(&other_guard).unwrap();
-        let mut worker = source.new_executor(global.clone()).unwrap();
+        let mut worker = source(exchange, service.clone());
+        let mut same_execution = source(exchange, service.clone());
+        let mut other_execution = source(exchange, service.clone());
+        worker.start(&guard).unwrap();
+        same_execution.start(&guard).unwrap();
+        other_execution.start(&other_guard).unwrap();
         block_on(async {
             let mut next = pin!(worker.next_batch(&guard));
             assert!(poll!(&mut next).is_pending());
@@ -154,11 +153,11 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
             assert!(!service.guard(2).is_shutdown_requested());
             assert!(matches!(
                 poll!(&mut next),
-                std::task::Poll::Ready(Err(ref error)) if error.kind() == roc::error::ErrorKind::Cancelled
+                std::task::Poll::Ready(Err(ref error)) if error.kind() == ErrorKind::Cancelled
             ));
         });
         service.guards.lock().unwrap().clear();
-        drop((worker, global, same_execution, guard));
+        drop((worker, same_execution, guard));
         block_on(shutdown);
         drop(other_execution);
         assert!(!other_guard.is_shutdown_requested());
@@ -170,11 +169,11 @@ fn shutdown_waits_for_the_last_source_owner_to_release_its_guard() {
     for exchange in [false, true] {
         let (shutdown, guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        let first = source.new_executor(global.clone()).unwrap();
-        let second = source.new_executor(global.clone()).unwrap();
-        drop((global, guard));
+        let mut first = source(exchange, service.clone());
+        let mut second = source(exchange, service.clone());
+        first.start(&guard).unwrap();
+        second.start(&guard).unwrap();
+        drop(guard);
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();
         block_on(async {
@@ -194,9 +193,9 @@ fn normal_finalization_and_drop_do_not_request_shutdown() {
     for exchange in [false, true] {
         let (_shutdown, guard) = asyncband::shutdown::new();
         let service = Arc::new(Service::default());
-        let source = source(exchange, service.clone());
-        let global = source.init_global_context(&guard).unwrap();
-        block_on(source.finalize(global, &guard)).unwrap();
+        let mut source = source(exchange, service.clone());
+        source.start(&guard).unwrap();
+        block_on(source.finish(&guard)).unwrap();
         assert!(!guard.is_shutdown_requested());
         assert!(!service.guard(0).is_shutdown_requested());
         assert_eq!(service.finished.load(Ordering::SeqCst), 1);
@@ -211,9 +210,9 @@ fn failed_source_initialization_does_not_request_shutdown_or_leak_guards() {
             fail_start: true,
             ..Default::default()
         });
-        let source = source(exchange, service.clone());
+        let mut source = source(exchange, service.clone());
         assert!(
-            matches!(source.init_global_context(&guard), Err(ref error) if error.kind() == roc::error::ErrorKind::Internal && error.message() == "start failed")
+            matches!(source.start(&guard), Err(ref error) if error.kind() == ErrorKind::Unavailable && error.message() == "start failed")
         );
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();

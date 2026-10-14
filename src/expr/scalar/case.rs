@@ -12,46 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::ScalarExprRef;
-use super::executor::{ScalarExpressionEvaluation, ScalarExpressionExecutor};
-use super::{ColumnValue, ExpressionResultType};
+use super::{ScalarExprRef, build_input};
+use crate::column::ColumnId;
 use crate::error::{Error, ErrorContext, Result, ResultExt};
-use crate::expr::predicate::select_true;
-use arrow::{
-    array::{ArrayRef, UInt64Array, new_empty_array},
-    compute::{kernels::interleave::interleave, take},
-    datatypes::DataType,
-};
-/// A searched CASE: the value of the first branch whose condition is true,
-/// otherwise the ELSE expression.
+use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
+
+/// Searched CASE. Branch values and ELSE have the output type. A condition is
+/// evaluated only when no earlier branch matched, a value only when its branch
+/// is selected: errors of other rows are not raised.
 #[derive(Clone, Debug)]
 pub struct CaseExpression {
     branches: Vec<(ScalarExprRef, ScalarExprRef)>,
     else_expr: ScalarExprRef,
-    result_type: ExpressionResultType,
-}
-
-#[derive(Debug)]
-pub struct CaseExpressionEvaluation {
-    data_type: DataType,
-    branches: Vec<(ScalarExpressionEvaluation, ScalarExpressionEvaluation)>,
-    otherwise: Box<ScalarExpressionEvaluation>,
+    output: ColumnId,
 }
 
 impl CaseExpression {
     pub fn new(
         branches: Vec<(ScalarExprRef, ScalarExprRef)>,
         else_expr: ScalarExprRef,
-        data_type: DataType,
-        nullable: bool,
+        output: ColumnId,
     ) -> Self {
         Self {
             branches,
             else_expr,
-            result_type: ExpressionResultType {
-                data_type,
-                nullable,
-            },
+            output,
         }
     }
     pub fn branches(&self) -> &[(ScalarExprRef, ScalarExprRef)] {
@@ -60,171 +45,50 @@ impl CaseExpression {
     pub fn else_expr(&self) -> &ScalarExprRef {
         &self.else_expr
     }
-    pub fn result_type(&self) -> &ExpressionResultType {
-        &self.result_type
+    pub fn output(&self) -> ColumnId {
+        self.output
     }
 
-    pub fn to_evaluation(&self) -> Result<ScalarExpressionEvaluation> {
-        Ok(ScalarExpressionEvaluation::Case(self.bind()?))
-    }
-
-    pub(super) fn bind(&self) -> Result<CaseExpressionEvaluation> {
-        let mut branches = Vec::with_capacity(self.branches.len());
-        for (index, (condition, value)) in self.branches.iter().enumerate() {
-            branches.push((
-                condition.to_evaluation().with_context(|| {
-                    ErrorContext::new("case.bind_condition").field("branch", index)
-                })?,
-                value.to_evaluation().with_context(|| {
-                    ErrorContext::new("case.bind_result").field("branch", index)
-                })?,
-            ));
-        }
-        Ok(CaseExpressionEvaluation {
-            data_type: self.result_type.data_type.clone(),
-            branches,
-            otherwise: Box::new(self.else_expr.to_evaluation().with_location()?),
-        })
-    }
-}
-
-impl CaseExpressionEvaluation {
-    /// Evaluate required rows and combine branch outputs in input order.
-    pub fn evaluate(&self, executor: &ScalarExpressionExecutor) -> Result<ColumnValue> {
-        let num_rows = executor.num_rows()?;
-        if num_rows == 0 {
-            return self.eval(executor, &[], &[]);
-        }
-        let mut buffers = CaseBuffers::new(num_rows);
-        self.eval_branches(executor, &mut buffers)?;
-        self.eval(
-            executor,
-            &buffers.pieces.iter().collect::<Vec<_>>(),
-            &buffers.mapping,
-        )
-    }
-    fn eval(
+    pub(super) fn lower(
         &self,
-        executor: &ScalarExpressionExecutor,
-        input: &[&ArrayRef],
-        mapping: &[(usize, usize)],
-    ) -> Result<ColumnValue> {
-        Ok(ColumnValue::Array(if executor.num_rows()? == 0 {
-            new_empty_array(&self.data_type)
-        } else {
-            interleave(
-                &input.iter().map(|value| value.as_ref()).collect::<Vec<_>>(),
-                mapping,
-            )
-            .map_err(|source| {
-                Error::invalid_input("incompatible CASE result arrays".into()).with_source(source)
-            })
-            .with_location()?
-        }))
-    }
-
-    fn eval_branches(
-        &self,
-        executor: &ScalarExpressionExecutor,
-        buffers: &mut CaseBuffers,
-    ) -> Result<()> {
-        for (index, (condition, branch)) in self.branches.iter().enumerate() {
-            if buffers.remaining.is_empty() {
-                break;
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        let ty = builder.column_type(self.output)?.data_type.clone();
+        let check = |builder: &KernelBuilder<'_>, e: &ScalarExprRef| {
+            if builder.column_type(e.output())?.data_type != ty {
+                return Err(Error::invalid_plan("CASE branch types differ".into()));
             }
-            let input = branch_columns(
-                executor.columns()?,
-                executor.num_rows()?,
-                &buffers.remaining,
-            )?;
-            let candidates = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
-            let mut selected = condition
-                .evaluate(&candidates)
-                .and_then(|value| value.into_array(candidates.num_rows()?))
-                .and_then(select_true)
-                .with_context(|| ErrorContext::new("case.condition").field("branch", index))?
-                .into_iter()
-                .peekable();
-            buffers.matched.clear();
-            buffers.next.clear();
-            for (i, position) in buffers.remaining.drain(..).enumerate() {
-                if selected.peek() == Some(&i) {
-                    selected.next();
-                    buffers.matched.push(position);
-                } else {
-                    buffers.next.push(position);
-                }
+            Ok(())
+        };
+        let mut errors = vec![];
+        // True on rows where no earlier condition matched; None is true.
+        let mut none_before = None;
+        let mut arms = vec![];
+        for (branch, (cond, value)) in self.branches.iter().enumerate() {
+            let (c, e) = build_input(builder, cond).with_context(|| {
+                ErrorContext::new("case.bind_condition").field("branch", branch)
+            })?;
+            if !matches!(c, ColumnVariableBinding::Boolean { .. }) {
+                return Err(Error::invalid_plan("CASE condition must be Boolean".into()));
             }
-            std::mem::swap(&mut buffers.remaining, &mut buffers.next);
-            if !buffers.matched.is_empty() {
-                let input =
-                    branch_columns(executor.columns()?, executor.num_rows()?, &buffers.matched)?;
-                let matched = ScalarExpressionExecutor::new(&input, buffers.matched.len());
-                let value = branch
-                    .evaluate(&matched)
-                    .and_then(|value| value.into_array(matched.num_rows()?))
-                    .with_context(|| ErrorContext::new("case.result").field("branch", index))?;
-                for (i, &position) in buffers.matched.iter().enumerate() {
-                    buffers.mapping[position] = (buffers.pieces.len(), i);
-                }
-                buffers.pieces.push(value);
-            }
+            errors.extend(builder.guard_errors(e, none_before)?);
+            let p = builder.predicate(&c)?;
+            let selected = builder.and_validity(none_before, Some(p))?;
+            let (v, e) = check(builder, value)
+                .and_then(|()| build_input(builder, value))
+                .with_context(|| ErrorContext::new("case.bind_result").field("branch", branch))?;
+            errors.extend(builder.guard_errors(e, selected)?);
+            arms.push((p, v));
+            let not_p = builder.not(p)?;
+            none_before = builder.and_validity(none_before, Some(not_p))?;
         }
-        if !buffers.remaining.is_empty() {
-            let input = branch_columns(
-                executor.columns()?,
-                executor.num_rows()?,
-                &buffers.remaining,
-            )?;
-            let remaining = ScalarExpressionExecutor::new(&input, buffers.remaining.len());
-            let value = self
-                .otherwise
-                .evaluate(&remaining)
-                .and_then(|value| value.into_array(remaining.num_rows()?))
-                .with_location()?;
-            for (i, &position) in buffers.remaining.iter().enumerate() {
-                buffers.mapping[position] = (buffers.pieces.len(), i);
-            }
-            buffers.pieces.push(value);
+        let (mut result, e) = check(builder, &self.else_expr)
+            .and_then(|()| build_input(builder, &self.else_expr))
+            .with_location()?;
+        errors.extend(builder.guard_errors(e, none_before)?);
+        for (p, v) in arms.into_iter().rev() {
+            result = builder.select_binding(p, &v, &result)?;
         }
-        Ok(())
-    }
-}
-
-/// Branches evaluate compact columns. Their row count is rows.len(), even
-/// when there are no columns; the parent retains positions to restore order.
-fn branch_columns(columns: &[ArrayRef], num_rows: usize, rows: &[usize]) -> Result<Vec<ArrayRef>> {
-    if rows.len() == num_rows {
-        return Ok(columns.to_vec());
-    }
-    let indices = UInt64Array::from_iter_values(rows.iter().map(|&row| row as u64));
-    columns
-        .iter()
-        .map(|col| {
-            take(col.as_ref(), &indices, None).map_err(|source| {
-                Error::internal("failed to select CASE input rows".into()).with_source(source)
-            })
-        })
-        .collect()
-}
-
-#[derive(Debug)]
-struct CaseBuffers {
-    remaining: Vec<usize>,
-    next: Vec<usize>,
-    matched: Vec<usize>,
-    pieces: Vec<ArrayRef>,
-    mapping: Vec<(usize, usize)>,
-}
-
-impl CaseBuffers {
-    fn new(len: usize) -> Self {
-        Self {
-            remaining: (0..len).collect(),
-            next: Vec::new(),
-            matched: Vec::new(),
-            pieces: Vec::new(),
-            mapping: vec![(0, 0); len],
-        }
+        Ok((result, errors))
     }
 }

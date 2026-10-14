@@ -18,54 +18,56 @@ pub use service::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSin
 
 use super::Operator;
 use crate::{
+    column::ColumnId,
     error::{Error, Result},
     exec::{ExchangeSinkExec, ExchangeSourceExec},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
-use arrow::datatypes::SchemaRef;
 use std::{fmt, sync::Arc};
 
 pub type ExchangeId = usize;
 
+/// Reads one exchange; its batches bind `outputs` in order.
 #[derive(Clone)]
 pub struct ExchangeSourceOperator {
     exchange: ExchangeId,
     service: Arc<dyn ExchangeService>,
+    outputs: Vec<ColumnId>,
 }
 
+/// Sends the child's output columns to every listed exchange.
 #[derive(Clone)]
 pub struct ExchangeSinkOperator {
     exchanges: Vec<ExchangeId>,
-    schema: SchemaRef,
     service: Arc<dyn ExchangeService>,
 }
 
 impl ExchangeSourceOperator {
-    pub fn new(exchange: ExchangeId, service: Arc<dyn ExchangeService>) -> Self {
-        Self { exchange, service }
+    pub fn new(
+        exchange: ExchangeId,
+        service: Arc<dyn ExchangeService>,
+        outputs: Vec<ColumnId>,
+    ) -> Self {
+        Self {
+            exchange,
+            service,
+            outputs,
+        }
     }
 
-    pub fn into_parts(self) -> (ExchangeId, Arc<dyn ExchangeService>) {
-        (self.exchange, self.service)
+    pub fn exchange(&self) -> ExchangeId {
+        self.exchange
     }
 }
 
 impl ExchangeSinkOperator {
-    pub fn new(
-        exchanges: Vec<ExchangeId>,
-        schema: SchemaRef,
-        service: Arc<dyn ExchangeService>,
-    ) -> Self {
-        Self {
-            exchanges,
-            schema,
-            service,
-        }
+    pub fn new(exchanges: Vec<ExchangeId>, service: Arc<dyn ExchangeService>) -> Self {
+        Self { exchanges, service }
     }
 
-    pub fn into_parts(self) -> (Vec<ExchangeId>, SchemaRef, Arc<dyn ExchangeService>) {
-        (self.exchanges, self.schema, self.service)
+    pub fn exchanges(&self) -> &[ExchangeId] {
+        &self.exchanges
     }
 }
 
@@ -73,6 +75,7 @@ impl fmt::Debug for ExchangeSourceOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExchangeSourceOperator")
             .field("exchange", &self.exchange)
+            .field("outputs", &self.outputs)
             .finish_non_exhaustive()
     }
 }
@@ -81,7 +84,6 @@ impl fmt::Debug for ExchangeSinkOperator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExchangeSinkOperator")
             .field("exchanges", &self.exchanges)
-            .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
 }
@@ -90,11 +92,16 @@ impl Operator for ExchangeSourceOperator {
     fn name(&self) -> &'static str {
         "exchange source"
     }
+
+    fn output_columns(&self) -> Vec<ColumnId> {
+        self.outputs.clone()
+    }
+
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
             return Err(Error::invalid_plan(format!(
@@ -102,9 +109,10 @@ impl Operator for ExchangeSourceOperator {
                 current_node.children().len(),
             )));
         }
-        graph
-            .pipeline_mut(current)?
-            .set_source(Box::new(ExchangeSourceExec::new(self.clone())))
+        graph.pipeline_mut(current)?.set_source(
+            Box::new(ExchangeSourceExec::new(self.exchange, self.service.clone())),
+            &self.outputs,
+        )
     }
 }
 
@@ -113,11 +121,15 @@ impl Operator for ExchangeSinkOperator {
         "exchange sink"
     }
 
+    fn output_columns(&self) -> Vec<ColumnId> {
+        vec![]
+    }
+
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
             return Err(Error::invalid_plan(format!(
@@ -125,9 +137,12 @@ impl Operator for ExchangeSinkOperator {
                 current_node.children().len(),
             )));
         };
+        build_pipeline_on_node(child, current, graph)?;
+        let outputs = child.operator().output_columns();
+        let schema = graph.columns().schema(&outputs)?;
+        let sink = ExchangeSinkExec::new(self.exchanges.clone(), schema, self.service.clone());
         graph
             .pipeline_mut(current)?
-            .set_sink(Box::new(ExchangeSinkExec::new(self.clone())))?;
-        build_pipeline_on_node(child, current, graph)
+            .set_sink(Box::new(sink), Some(outputs))
     }
 }

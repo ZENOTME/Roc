@@ -24,13 +24,14 @@ pub use exchange::{
     ExchangeSinkOperator, ExchangeSourceOperator,
 };
 pub use filter::FilterOperator;
-pub use project::{ProjectOperator, Projection, ProjectionExpression};
+pub use project::ProjectOperator;
 pub use scan::{
     ScanConsumer, ScanHandle, ScanOperator, ScanReceiver, ScanRequest, ScanSendError, ScanSender,
     ScanStorage, scan_channel,
 };
 
 use crate::{
+    column::{ColumnContext, ColumnId},
     error::Result,
     pipeline::{PipelineGraphBuilder, PipelineId},
 };
@@ -40,23 +41,34 @@ pub trait Operator: Debug + Send + Sync {
     /// Operator name.
     fn name(&self) -> &'static str;
 
-    /// Builds pipeline base on this operator. Operator is responsible to call this function on its child operator.
+    /// Columns produced for the parent, in order. They must be derivable from
+    /// the operator alone, without its children.
+    fn output_columns(&self) -> Vec<ColumnId>;
+
+    /// Builds pipelines for this operator. The operator is responsible for
+    /// building its children.
     fn build_pipeline(
         &self,
         current_node: &OperatorTreeNode,
         current: PipelineId,
-        graph: &mut PipelineGraphBuilder,
+        graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()>;
 }
 
+/// A physical plan: the operators and the columns they exchange.
 #[derive(Clone, Debug)]
 pub struct OperatorTree {
+    columns: ColumnContext,
     root: OperatorTreeNode,
 }
 
 impl OperatorTree {
-    pub fn new(root: OperatorTreeNode) -> Self {
-        Self { root }
+    pub fn new(columns: ColumnContext, root: OperatorTreeNode) -> Self {
+        Self { columns, root }
+    }
+
+    pub fn columns(&self) -> &ColumnContext {
+        &self.columns
     }
 
     pub fn root(&self) -> &OperatorTreeNode {
