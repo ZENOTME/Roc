@@ -29,7 +29,9 @@
 //! // Apply DataFrame filters/projection before planning to preserve pushdown.
 //! let plan = frame.create_physical_plan().await?;
 //! let source = DataFusionScan::new(plan, ctx.task_ctx());
-//! let scan = ScanOperator::new(source, Arc::new(DataFusionStorage));
+//! // One output column per field of the plan's schema.
+//! let columns = vec![];
+//! let scan = ScanOperator::new(source, Arc::new(DataFusionStorage), columns);
 //! # Ok(())
 //! # }
 //! ```
