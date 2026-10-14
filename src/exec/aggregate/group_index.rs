@@ -6,7 +6,8 @@ use crate::{
 };
 
 /// An open-addressing table of group IDs: one fixed-width key compares its
-/// canonical word, others their encoded bytes.
+/// canonical word, several fixed-width keys their words, others their
+/// encoded bytes.
 pub(crate) struct GroupIndex {
     types: Vec<DataType>,
     encoders: Vec<scalar::KeyEncoder>,
@@ -27,6 +28,14 @@ enum Keys {
     /// One fixed-width key: the canonical word of every group but the NULL
     /// one.
     Word { words: Vec<u64>, null: Option<u32> },
+    /// Fixed-width keys: per group `width` words, the canonical word of each
+    /// column (two for 128-bit ones, zero when NULL), then a word with a bit
+    /// per valid column.
+    Fixed {
+        width: usize,
+        words: Vec<u64>,
+        hashes: Vec<u64>,
+    },
     /// Encoded keys of every group, with their hashes.
     Encoded {
         hashes: Vec<u64>,
@@ -45,6 +54,37 @@ fn hash_bytes(key: &[u8]) -> u64 {
     let mut h = foldhash::fast::FixedState::with_seed(0x2d35_8dcc_aa6c_78a5).build_hasher();
     h.write(key);
     h.finish()
+}
+
+/// The hash of a fixed-width key's words.
+#[inline(always)]
+pub(crate) fn hash_words(words: &[u64]) -> u64 {
+    let mut h = 0x243f_6a88_85a3_08d3u64;
+    for &w in words {
+        h = (h.rotate_left(23) ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    h ^ (h >> 31)
+}
+
+/// The words of a fixed-width key column: 2 for 128-bit types, 1 for
+/// other integers, dates and timestamps, None for any other type.
+pub(crate) fn fixed_words(t: &DataType) -> Option<usize> {
+    match t {
+        DataType::Decimal128(..) => Some(2),
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Date32
+        | DataType::Date64
+        | DataType::Timestamp(..) => Some(1),
+        _ => None,
+    }
 }
 
 /// The slot of a hash in a table of `len` slots.
@@ -81,12 +121,19 @@ impl GroupIndex {
                     | DataType::Date64
                     | DataType::Timestamp(..)
             );
+        let fixed = types.iter().map(fixed_words).sum::<Option<usize>>();
         let keys = if types.is_empty() {
             Keys::None
         } else if word {
             Keys::Word {
                 words: vec![],
                 null: None,
+            }
+        } else if let Some(width) = fixed.filter(|_| types.len() <= 64) {
+            Keys::Fixed {
+                width: width + 1,
+                words: vec![],
+                hashes: vec![],
             }
         } else {
             Keys::Encoded {
@@ -119,12 +166,77 @@ impl GroupIndex {
         matches!(self.keys, Keys::Word { .. })
     }
 
+    /// The words of a key interned by `intern_fixed`, if it is one.
+    pub fn fixed_width(&self) -> Option<usize> {
+        match self.keys {
+            Keys::Fixed { width, .. } => Some(width),
+            _ => None,
+        }
+    }
+
     pub fn intern_row(&mut self, values: &[Cell]) -> usize {
         match self.keys {
             Keys::None => 0,
             Keys::Word { .. } => self.intern_word(values[0].bits, values[0].valid != 0),
+            Keys::Fixed { width, .. } => {
+                let (mut small, mut large) = ([0u64; 8], vec![]);
+                let words: &mut [u64] = if width <= 8 {
+                    &mut small[..width]
+                } else {
+                    large.resize(width, 0);
+                    &mut large
+                };
+                let mut at = 0;
+                for (i, (v, t)) in values.iter().zip(&self.types).enumerate() {
+                    let valid = v.valid != 0;
+                    words[at] = if valid { v.bits } else { 0 };
+                    if fixed_words(t) == Some(2) {
+                        words[at + 1] = if valid { v.len } else { 0 };
+                        at += 1;
+                    }
+                    at += 1;
+                    words[width - 1] |= (valid as u64) << i;
+                }
+                self.intern_fixed(words)
+            }
             Keys::Encoded { .. } => self.intern_encoded(values),
         }
+    }
+
+    /// The group of a fixed-width key's words, laid out as `Keys::Fixed`
+    /// describes. A new group gets the next ID.
+    #[inline]
+    pub fn intern_fixed(&mut self, key: &[u64]) -> usize {
+        let Keys::Fixed {
+            width,
+            words,
+            hashes,
+        } = &mut self.keys
+        else {
+            unreachable!("fixed keys")
+        };
+        let width = *width;
+        let hash = hash_words(key);
+        let len = self.slots.len();
+        let mut s = home(hash, len);
+        loop {
+            let slot = self.slots[s];
+            if slot == 0 {
+                break;
+            }
+            let id = slot as usize - 1;
+            if hashes[id] == hash && words[id * width..(id + 1) * width] == *key {
+                return id;
+            }
+            s = (s + 1) & (len - 1);
+        }
+        let id = self.groups;
+        words.extend_from_slice(key);
+        hashes.push(hash);
+        self.slots[s] = id as u32 + 1;
+        self.groups += 1;
+        self.grow();
+        id
     }
 
     /// The group of a word key, the canonical word of a fixed-width value;
@@ -141,7 +253,7 @@ impl GroupIndex {
             }
             *null = Some(id as u32);
             words.push(0);
-            self.add(&[Cell::default()]);
+            self.groups += 1;
             return id;
         }
         let len = self.slots.len();
@@ -158,11 +270,7 @@ impl GroupIndex {
         }
         words.push(key);
         self.slots[s] = id as u32 + 1;
-        self.add(&[Cell {
-            bits: key,
-            len: 0,
-            valid: 1,
-        }]);
+        self.groups += 1;
         self.grow();
         id
     }
@@ -236,7 +344,7 @@ impl GroupIndex {
                     }
                 }
             }
-            Keys::Encoded { hashes, .. } => {
+            Keys::Encoded { hashes, .. } | Keys::Fixed { hashes, .. } => {
                 for (id, &h) in hashes.iter().enumerate() {
                     place(h, id);
                 }
@@ -260,6 +368,27 @@ impl GroupIndex {
                 .take(rows)
                 .map(|c| if c.valid == 0 { 0 } else { hash_word(c.bits) })
                 .collect(),
+            Keys::Fixed { width, .. } => {
+                let mut words = vec![0u64; width];
+                (0..rows)
+                    .map(|r| {
+                        words.fill(0);
+                        let mut at = 0;
+                        for (i, (c, t)) in columns.iter().zip(&self.types).enumerate() {
+                            let v = c[r];
+                            let valid = v.valid != 0;
+                            words[at] = if valid { v.bits } else { 0 };
+                            if fixed_words(t) == Some(2) {
+                                words[at + 1] = if valid { v.len } else { 0 };
+                                at += 1;
+                            }
+                            at += 1;
+                            words[width - 1] |= (valid as u64) << i;
+                        }
+                        hash_words(&words)
+                    })
+                    .collect()
+            }
             Keys::Encoded { .. } => {
                 let mut key = vec![];
                 (0..rows)
@@ -296,24 +425,62 @@ impl GroupIndex {
     }
 
     pub fn columns(&self) -> Result<Vec<ArrayRef>> {
-        let width = self.types.len();
-        self.types
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let cells = (0..self.groups)
-                    .map(|g| self.cells[g * width + i].get())
+        let columns = self.types.len();
+        match &self.keys {
+            Keys::None => Ok(vec![]),
+            Keys::Word { words, null } => {
+                let cells = words
+                    .iter()
+                    .enumerate()
+                    .map(|(g, &w)| match Some(g as u32) == *null {
+                        true => Cell::default(),
+                        false => Cell::word(w),
+                    })
                     .collect::<Vec<_>>();
-                scalar::encode(t, &cells)
-            })
-            .collect()
+                Ok(vec![scalar::encode(&self.types[0], &cells)?])
+            }
+            Keys::Fixed { width, words, .. } => {
+                let mut at = 0;
+                self.types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let wide = fixed_words(t) == Some(2);
+                        let cells = words
+                            .chunks_exact(*width)
+                            .map(|k| match k[width - 1] >> i & 1 {
+                                0 => Cell::default(),
+                                _ => Cell {
+                                    bits: k[at],
+                                    len: if wide { k[at + 1] } else { 0 },
+                                    valid: 1,
+                                },
+                            })
+                            .collect::<Vec<_>>();
+                        at += 1 + wide as usize;
+                        scalar::encode(t, &cells)
+                    })
+                    .collect()
+            }
+            Keys::Encoded { .. } => self
+                .types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let cells = (0..self.groups)
+                        .map(|g| self.cells[g * columns + i].get())
+                        .collect::<Vec<_>>();
+                    scalar::encode(t, &cells)
+                })
+                .collect(),
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::arrow::array::Array;
-    use crate::arrow::array::{Int64Array, StringArray, UInt64Array};
+    use crate::arrow::array::{Decimal128Array, Int32Array, Int64Array, StringArray, UInt64Array};
     use std::sync::Arc;
 
     #[test]
@@ -423,6 +590,46 @@ mod tests {
         let emitted = index.columns().unwrap();
         assert_eq!(emitted[0].to_data(), columns[0].slice(0, 3).to_data());
         assert_eq!(emitted[1].to_data(), columns[1].slice(0, 3).to_data());
+    }
+
+    #[test]
+    fn fixed_width_compound_keys_keep_nulls_and_wide_values() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Int32, true),
+            Field::new("amount", DataType::Decimal128(20, 2), true),
+        ]);
+        let mut index = GroupIndex::new(&schema).unwrap();
+        assert_eq!(index.fixed_width(), Some(4));
+        let keys: ArrayRef = Arc::new(Int32Array::from(vec![
+            Some(-1),
+            None,
+            Some(-1),
+            Some(7),
+            None,
+            Some(-1),
+        ]));
+        let amounts: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![
+                Some(i128::MIN + 5),
+                Some(3),
+                Some(i128::MIN + 5),
+                None,
+                Some(3),
+                Some(0),
+            ])
+            .with_precision_and_scale(20, 2)
+            .unwrap(),
+        );
+        let mut ids = vec![];
+        index.intern(&[keys.clone(), amounts.clone()], 6, &mut ids).unwrap();
+        assert_eq!(ids, [0, 1, 0, 2, 1, 3]);
+        let columns = index.columns().unwrap();
+        assert_eq!(columns[0].to_data(), Int32Array::from(vec![Some(-1), None, Some(7), Some(-1)]).to_data());
+        let amounts = columns[1].as_any().downcast_ref::<Decimal128Array>().unwrap();
+        assert_eq!(
+            amounts.iter().collect::<Vec<_>>(),
+            [Some(i128::MIN + 5), Some(3), None, Some(0)]
+        );
     }
 
     #[test]

@@ -174,6 +174,7 @@ pub(super) struct Spare {
     pub rows: Vec<Vec<u32>>,
     pub probes: Vec<super::expand::Probes>,
     pub keys: Vec<Vec<u8>>,
+    pub words: Vec<Vec<u64>>,
     pub cells: Vec<Vec<Cell>>,
 }
 

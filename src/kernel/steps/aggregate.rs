@@ -274,6 +274,50 @@ impl Frame<'_> {
             self.bounds[output.0] = index.len();
             return Ok(());
         }
+        if let Some(width) = index.fixed_width() {
+            // The key words of every window row, filled column by column.
+            let n = self.n;
+            let mut words = self.spare.words.pop().unwrap_or_default();
+            words.clear();
+            words.resize(n * width, 0);
+            let mut column = [0u64; WINDOW];
+            let mut at = 0;
+            for (i, k) in keys.iter().enumerate() {
+                let valid = k
+                    .validity()
+                    .filter(|v| self.states[v.0] != BitState::AllTrue)
+                    .map(|v| -> [u64; WORDS] { self.words(v).try_into().unwrap() });
+                let is_valid = |r: usize| valid.is_none_or(|v| v[r / 64] >> (r % 64) & 1 != 0);
+                let value = k.value().unwrap();
+                let wide = matches!(k, ColumnVariableBinding::Int128 { .. });
+                if wide {
+                    for r in 0..n {
+                        let [lo, hi] = self.get_wide(value, r);
+                        let ok = is_valid(r);
+                        words[r * width + at] = if ok { lo } else { 0 };
+                        words[r * width + at + 1] = if ok { hi } else { 0 };
+                    }
+                } else {
+                    self.load_words(value, &mut column[..n]);
+                    for (r, &w) in column[..n].iter().enumerate() {
+                        words[r * width + at] = if is_valid(r) { w } else { 0 };
+                    }
+                }
+                for r in 0..n {
+                    words[r * width + width - 1] |= (is_valid(r) as u64) << i;
+                }
+                at += 1 + wide as usize;
+            }
+            rows.each(|r| {
+                // SAFETY: ids cover the window.
+                unsafe {
+                    *ids.add(r) = index.intern_fixed(&words[r * width..(r + 1) * width]) as u64
+                };
+            });
+            self.spare.words.push(words);
+            self.bounds[output.0] = index.len();
+            return Ok(());
+        }
         let mut cells = self.spare.cells.pop().unwrap_or_default();
         rows.each(|r| {
             cells.clear();
