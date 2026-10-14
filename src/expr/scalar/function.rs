@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::ScalarExpression;
 use super::{ScalarExprRef, build_input};
+use crate::arrow::array::Array;
 use crate::arrow::datatypes::DataType;
 use crate::column::ColumnId;
 use crate::error::{Error, ErrorContext, Result, ResultExt};
@@ -21,6 +23,7 @@ use crate::kernel::{
     ColumnVariableBinding, KernelBuilder, KernelError, PendingErrors, ScalarFunction, VariableId,
     scalar,
 };
+use crate::kernel::{ConstantValue, VariableType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionKind {
@@ -40,6 +43,22 @@ pub enum FunctionKind {
     IsNotNull,
     IsDistinctFrom,
     IsNotDistinctFrom,
+    /// Numbers and decimals; signed integer overflow fails.
+    Abs,
+    /// `[x, places]` with a constant integer `places`: floats round to that
+    /// many decimal places, halves away from zero; decimals round the same
+    /// way and keep the result type's scale.
+    Round,
+    BitwiseAnd,
+    BitwiseOr,
+    /// Integers shifted right by the second operand modulo their bits.
+    ShiftRight,
+    /// Strings: the first then the second.
+    Concat,
+    Upper,
+    /// `[string, start, count]` with Int64 positions, or `[string, start]`
+    /// to the end: the characters at 1-based positions from `start`.
+    Substring,
 }
 
 /// A built-in function. Binary operands must have the same type; arithmetic
@@ -56,6 +75,14 @@ impl FunctionExpression {
         Self {
             function,
             arguments: vec![argument],
+            output,
+        }
+    }
+
+    pub fn new(function: FunctionKind, arguments: Vec<ScalarExprRef>, output: ColumnId) -> Self {
+        Self {
+            function,
+            arguments,
             output,
         }
     }
@@ -112,6 +139,12 @@ impl FunctionExpression {
             types.push(builder.column_type(argument.output())?.data_type.clone());
         }
         let f = self.function;
+        if matches!(
+            f,
+            Abs | Round | BitwiseAnd | BitwiseOr | ShiftRight | Concat | Upper | Substring
+        ) {
+            return self.lower_more(builder, inputs, types, errors);
+        }
         let signature = || Error::unsupported(format!("unsupported signature: {f:?}{types:?}"));
         let t = &types[0];
         let unary = matches!(f, Negate | IsNull | IsNotNull);
@@ -267,6 +300,166 @@ impl FunctionExpression {
                     validity: None,
                 }
             }
+            _ => unreachable!("lowered by lower_more"),
+        };
+        Ok((binding, errors))
+    }
+}
+
+impl FunctionExpression {
+    /// Numeric, bitwise and string functions; all are strict.
+    fn lower_more(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+        inputs: Vec<ColumnVariableBinding>,
+        types: Vec<DataType>,
+        mut errors: PendingErrors,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        use FunctionKind::*;
+        let f = self.function;
+        let signature = || Error::unsupported(format!("unsupported signature: {f:?}{types:?}"));
+        let arity = match f {
+            Abs | Upper => 1..=1,
+            Substring => 2..=3,
+            _ => 2..=2,
+        };
+        if !arity.contains(&inputs.len()) {
+            return Err(Error::invalid_plan("invalid function arity".into()));
+        }
+        let output = builder.column_type(self.output)?.data_type.clone();
+        let validity = builder.strict_validity(&inputs)?;
+        let t = &types[0];
+        let value = |b: &ColumnVariableBinding| b.value().ok_or_else(signature);
+        let bytes = |b: &ColumnVariableBinding| match *b {
+            ColumnVariableBinding::Bytes { ptr, len, .. } => Ok([ptr, len]),
+            _ => Err(signature()),
+        };
+        let binding = match f {
+            Abs => {
+                if !(scalar::numeric(t) || decimal(t).is_some()) {
+                    return Err(signature());
+                }
+                let out = builder.call(ScalarFunction::Abs, vec![value(&inputs[0])?])?;
+                if let Some(&overflow) = out.get(1) {
+                    errors.push(builder.pending(
+                        overflow,
+                        validity,
+                        KernelError::ArithmeticOverflow,
+                        vec![],
+                    )?);
+                }
+                let ty = builder.variable_type(out[0])?;
+                ColumnVariableBinding::fixed(ty, out[0], validity)?
+            }
+            Round => {
+                let places = match self.arguments[1].as_ref() {
+                    ScalarExpression::Constant(c) if !c.value().is_null(0) => {
+                        let cell = scalar::decode(c.value())?[0];
+                        cell.bits as i64
+                    }
+                    _ => {
+                        return Err(Error::unsupported(
+                            "ROUND needs constant decimal places".into(),
+                        ));
+                    }
+                };
+                let x = value(&inputs[0])?;
+                if let (Some((_, s)), Some((_, out_scale))) = (decimal(t), decimal(&output)) {
+                    let places = places.clamp(-38, 38) as i8;
+                    let v = if places < s {
+                        let rounded =
+                            builder.rescale(x, s, places, KernelError::ArithmeticOverflow)?;
+                        let back = builder.rescale(
+                            rounded.value,
+                            places,
+                            out_scale,
+                            KernelError::ArithmeticOverflow,
+                        )?;
+                        for (flag, error) in rounded.flags.into_iter().chain(back.flags) {
+                            errors.push(builder.pending(flag, validity, error, vec![])?);
+                        }
+                        back.value
+                    } else {
+                        let back =
+                            builder.rescale(x, s, out_scale, KernelError::ArithmeticOverflow)?;
+                        for (flag, error) in back.flags {
+                            errors.push(builder.pending(flag, validity, error, vec![])?);
+                        }
+                        back.value
+                    };
+                    ColumnVariableBinding::Int128 { value: v, validity }
+                } else if matches!(t, DataType::Float64 | DataType::Float32) && output == *t {
+                    let ty = builder.variable_type(x)?;
+                    let factor = 10f64.powi(places as i32);
+                    let factor = builder.constant(if ty == VariableType::Float32 {
+                        ConstantValue::Float32(factor as f32)
+                    } else {
+                        ConstantValue::Float64(factor)
+                    })?;
+                    let scaled = builder.call(ScalarFunction::Multiply, vec![x, factor])?[0];
+                    let rounded = builder.call(ScalarFunction::Round, vec![scaled])?[0];
+                    let v = builder.call(ScalarFunction::Divide, vec![rounded, factor])?[0];
+                    ColumnVariableBinding::fixed(ty, v, validity)?
+                } else {
+                    return Err(signature());
+                }
+            }
+            BitwiseAnd | BitwiseOr | ShiftRight => {
+                if types[0] != types[1]
+                    || !scalar::numeric(t)
+                    || matches!(t, DataType::Float32 | DataType::Float64)
+                {
+                    return Err(signature());
+                }
+                let function = match f {
+                    BitwiseAnd => ScalarFunction::BitAnd,
+                    BitwiseOr => ScalarFunction::BitOr,
+                    _ => ScalarFunction::ShiftRight,
+                };
+                let out = builder.call(function, vec![value(&inputs[0])?, value(&inputs[1])?])?;
+                let ty = builder.variable_type(out[0])?;
+                ColumnVariableBinding::fixed(ty, out[0], validity)?
+            }
+            Concat | Upper => {
+                let mut args = bytes(&inputs[0])?.to_vec();
+                let function = if f == Concat {
+                    args.extend(bytes(&inputs[1])?);
+                    ScalarFunction::Concat
+                } else {
+                    ScalarFunction::Upper
+                };
+                let out = builder.call(function, args)?;
+                ColumnVariableBinding::Bytes {
+                    ptr: out[0],
+                    len: out[1],
+                    validity,
+                }
+            }
+            Substring => {
+                let [ptr, len] = bytes(&inputs[0])?;
+                let int = |b: &ColumnVariableBinding| match *b {
+                    ColumnVariableBinding::Int64 { value, .. } => Ok(value),
+                    _ => Err(signature()),
+                };
+                let start = int(&inputs[1])?;
+                let count = match inputs.get(2) {
+                    Some(c) => int(c)?,
+                    None => builder.constant(ConstantValue::Int64(i64::MAX))?,
+                };
+                let out = builder.call(ScalarFunction::Substring, vec![ptr, len, start, count])?;
+                errors.push(builder.pending(
+                    out[2],
+                    validity,
+                    KernelError::InvalidArgument,
+                    vec![],
+                )?);
+                ColumnVariableBinding::Bytes {
+                    ptr: out[0],
+                    len: out[1],
+                    validity,
+                }
+            }
+            _ => unreachable!("lowered by lower_function"),
         };
         Ok((binding, errors))
     }

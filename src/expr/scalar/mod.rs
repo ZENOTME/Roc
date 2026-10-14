@@ -29,6 +29,7 @@ mod coalesce;
 mod conjunction;
 mod constant;
 mod function;
+mod like;
 mod not;
 mod reference;
 
@@ -38,6 +39,7 @@ pub use coalesce::CoalesceExpression;
 pub use conjunction::{Conjunction, ConjunctionExpression};
 pub use constant::ConstantExpression;
 pub use function::{FunctionExpression, FunctionKind};
+pub use like::LikeExpression;
 pub use not::NotExpression;
 pub use reference::ReferenceExpression;
 
@@ -53,6 +55,7 @@ pub enum ScalarExpression {
     Not(NotExpression),
     Case(CaseExpression),
     Coalesce(CoalesceExpression),
+    Like(LikeExpression),
 }
 
 impl ScalarExpression {
@@ -67,6 +70,7 @@ impl ScalarExpression {
             Self::Not(e) => e.output(),
             Self::Case(e) => e.output(),
             Self::Coalesce(e) => e.output(),
+            Self::Like(e) => e.output(),
         }
     }
 
@@ -85,6 +89,7 @@ impl ScalarExpression {
                 .chain([e.else_expr()])
                 .collect(),
             Self::Coalesce(e) => e.arguments().iter().collect(),
+            Self::Like(e) => vec![e.input(), e.pattern()],
         }
     }
 
@@ -105,6 +110,7 @@ impl ScalarExpression {
             Self::Not(e) => e.lower(builder)?,
             Self::Case(e) => e.lower(builder)?,
             Self::Coalesce(e) => e.lower(builder)?,
+            Self::Like(e) => e.lower(builder)?,
         };
         builder.bind_column(output, binding, errors.clone())?;
         Ok(errors)
@@ -137,6 +143,7 @@ scalar_node! {
     Function(FunctionExpression), Cast(CastExpression),
     Conjunction(ConjunctionExpression), Not(NotExpression),
     Case(CaseExpression), Coalesce(CoalesceExpression),
+    Like(LikeExpression),
 }
 
 #[cfg(test)]

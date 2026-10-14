@@ -156,6 +156,14 @@ pub(crate) enum Text {
         len: VariableId,
         invalid: VariableId,
     },
+    /// Substring, Upper, Concat and Like, with a LIKE pattern compiled when
+    /// it is a constant.
+    Strings {
+        function: ScalarFunction,
+        inputs: Vec<VariableId>,
+        outputs: Vec<VariableId>,
+        pattern: Option<Arc<crate::kernel::text::Pattern>>,
+    },
 }
 
 /// How an AggregateUpdate runs, decided when it is prepared.
@@ -520,6 +528,37 @@ impl Builder {
                 });
                 return Ok(());
             }
+            S::Substring | S::Upper | S::Concat | S::Like { .. } => {
+                // A constant pattern compiles once.
+                let pattern = match function {
+                    S::Like { escape } => match (self.value(inputs[2]), self.value(inputs[3])) {
+                        (Some(ptr), Some(len)) => {
+                            // SAFETY: byte constants are retained by the program.
+                            let bytes = unsafe {
+                                std::slice::from_raw_parts(ptr as *const u8, len as usize)
+                            };
+                            let text = std::str::from_utf8(bytes).map_err(|source| {
+                                Error::invalid_plan("LIKE pattern is not UTF-8".into())
+                                    .with_source(source)
+                            })?;
+                            let escape = (escape != 0).then_some(escape as char);
+                            Some(Arc::new(crate::kernel::text::Pattern::new(text, escape)))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                self.steps.push(Step::Text {
+                    text: Text::Strings {
+                        function,
+                        inputs: inputs.to_vec(),
+                        outputs: outputs.to_vec(),
+                        pattern,
+                    },
+                    domain,
+                });
+                return Ok(());
+            }
             S::ValidateUtf8 => {
                 self.steps.push(Step::Text {
                     text: Text::Validate {
@@ -839,6 +878,9 @@ fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
             } => (vec![*ptr, *len], vec![*value, *invalid]),
             Text::Format { input, ptr, len } => (vec![*input], vec![*ptr, *len]),
             Text::Validate { ptr, len, invalid } => (vec![*ptr, *len], vec![*invalid]),
+            Text::Strings {
+                inputs, outputs, ..
+            } => (inputs.clone(), outputs.clone()),
         },
         Step::Filter { predicate, .. } => (vec![*predicate], vec![]),
         Step::RaiseIf { cond, args, .. } => (
@@ -945,6 +987,7 @@ fn rename(step: &mut Step, map: &HashMap<VariableId, VariableId>) {
                 r(len);
             }
             Text::Format { input, .. } => r(input),
+            Text::Strings { inputs, .. } => inputs.iter_mut().for_each(r),
         },
         Step::Filter { predicate, .. } => r(predicate),
         Step::RaiseIf { cond, args, .. } => {

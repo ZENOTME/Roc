@@ -555,6 +555,20 @@ pub enum ScalarFunction {
     FormatText,
     /// `[ptr, len]` to `[invalid]`.
     ValidateUtf8,
+    /// UTF-8 `[ptr, len, start, count]` (Int64 start and count) to `[ptr,
+    /// len, invalid]`: the characters at 1-based positions `start` to
+    /// `start + count - 1` that exist; a negative count is invalid.
+    Substring,
+    /// UTF-8 `[ptr, len]` to its uppercase `[ptr, len]`.
+    Upper,
+    /// `[a_ptr, a_len, b_ptr, b_len]` to `[ptr, len]`: a then b.
+    Concat,
+    /// UTF-8 `[ptr, len, pattern_ptr, pattern_len]` to `[matched]`: SQL LIKE,
+    /// where `%` matches any characters, `_` one character, and `escape`
+    /// (when not zero) makes the next pattern character literal.
+    Like {
+        escape: u8,
+    },
 }
 
 impl ScalarFunction {
@@ -610,6 +624,16 @@ impl ScalarFunction {
                 vec![T::BytePointer, T::Usize]
             }
             (ValidateUtf8, [T::BytePointer, T::Usize]) => vec![T::Boolean],
+            (Substring, [T::BytePointer, T::Usize, T::Int64, T::Int64]) => {
+                vec![T::BytePointer, T::Usize, T::Boolean]
+            }
+            (Upper, [T::BytePointer, T::Usize]) => vec![T::BytePointer, T::Usize],
+            (Concat, [T::BytePointer, T::Usize, T::BytePointer, T::Usize]) => {
+                vec![T::BytePointer, T::Usize]
+            }
+            (Like { .. }, [T::BytePointer, T::Usize, T::BytePointer, T::Usize]) => {
+                vec![T::Boolean]
+            }
             _ => return Err(invalid()),
         })
     }
@@ -623,6 +647,8 @@ pub enum KernelError {
     /// args: the source text `[ptr, len]`, when the input is a string.
     InvalidCast,
     InvalidUtf8,
+    /// A function argument outside the function's domain.
+    InvalidArgument,
 }
 
 impl KernelError {
@@ -653,6 +679,7 @@ impl KernelError {
             }
             Self::InvalidUtf8 => Error::invalid_input("cast failed".into())
                 .with_source(ArrowError::CastError("invalid UTF-8 cast".into())),
+            Self::InvalidArgument => Error::invalid_input("invalid function argument".into()),
         }
     }
 }

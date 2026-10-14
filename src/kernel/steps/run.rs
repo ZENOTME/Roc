@@ -920,6 +920,120 @@ impl Frame<'_> {
                     }
                 }
             }
+            Text::Strings {
+                function,
+                ref inputs,
+                ref outputs,
+                ref pattern,
+            } => self.strings(function, inputs, outputs, pattern.as_deref(), domain),
+        }
+    }
+
+    /// The bytes of a byte value at a window row.
+    fn text_at(&self, ptr: VariableId, len: VariableId, row: usize) -> &[u8] {
+        let (p, l) = (self.get(ptr, row), self.get(len, row));
+        if l == 0 {
+            &[]
+        } else {
+            // SAFETY: byte pointers are valid on every row.
+            unsafe { std::slice::from_raw_parts(p as *const u8, l as usize) }
+        }
+    }
+
+    fn strings(
+        &mut self,
+        function: ScalarFunction,
+        inputs: &[VariableId],
+        outputs: &[VariableId],
+        pattern: Option<&crate::kernel::text::Pattern>,
+        domain: DomainId,
+    ) {
+        use crate::kernel::text;
+        let n = self.n;
+        let (mask, state) = self.mask(domain);
+        let mask = mask.to_vec();
+        let selected = |r: usize| {
+            state == BitState::AllTrue
+                || (state == BitState::Mixed && mask[r / 64] >> (r % 64) & 1 != 0)
+        };
+        // SAFETY: string bindings hold UTF-8 values.
+        fn utf8(b: &[u8]) -> &str {
+            unsafe { std::str::from_utf8_unchecked(b) }
+        }
+        let empty = std::ptr::NonNull::<u8>::dangling().as_ptr() as u64;
+        let mut flags = [0u64; WORDS];
+        let mut out = vec![(empty, 0u64); n];
+        match function {
+            ScalarFunction::Like { escape } => {
+                for r in 0..n {
+                    let t = utf8(self.text_at(inputs[0], inputs[1], r));
+                    let hit = match pattern {
+                        Some(p) => p.matches(t),
+                        None => {
+                            let p = utf8(self.text_at(inputs[2], inputs[3], r));
+                            let escape = (escape != 0).then_some(escape as char);
+                            text::Pattern::new(p, escape).matches(t)
+                        }
+                    };
+                    flags[r / 64] |= (hit as u64) << (r % 64);
+                }
+                let v = outputs[0];
+                // SAFETY: Boolean slots hold a window bitmap.
+                unsafe { *(self.home[v.0] as *mut [u64; WORDS]) = flags };
+                self.ptrs[v.0] = self.home[v.0];
+                self.settle(v);
+                return;
+            }
+            ScalarFunction::Substring => {
+                for (r, slot) in out.iter_mut().enumerate() {
+                    let t = self.text_at(inputs[0], inputs[1], r);
+                    let (start, count) =
+                        (self.get(inputs[2], r) as i64, self.get(inputs[3], r) as i64);
+                    match text::substring(t, start, count) {
+                        Some((a, b)) => *slot = (t.as_ptr() as u64 + a as u64, (b - a) as u64),
+                        None => flags[r / 64] |= 1 << (r % 64),
+                    }
+                }
+            }
+            ScalarFunction::Upper | ScalarFunction::Concat => {
+                for (r, slot) in out.iter_mut().enumerate() {
+                    if !selected(r) {
+                        continue;
+                    }
+                    let value = if function == ScalarFunction::Upper {
+                        utf8(self.text_at(inputs[0], inputs[1], r))
+                            .to_uppercase()
+                            .into_bytes()
+                    } else {
+                        let mut v = self.text_at(inputs[0], inputs[1], r).to_vec();
+                        v.extend_from_slice(self.text_at(inputs[2], inputs[3], r));
+                        v
+                    };
+                    let value = value.into_boxed_slice();
+                    *slot = (value.as_ptr() as u64, value.len() as u64);
+                    self.strings.push(value);
+                }
+            }
+            _ => unreachable!("only string functions are text steps"),
+        }
+        let (p, l) = (
+            self.home[outputs[0].0] as *mut u64,
+            self.home[outputs[1].0] as *mut u64,
+        );
+        for (r, (address, length)) in out.into_iter().enumerate() {
+            // SAFETY: value slots hold a window of words.
+            unsafe {
+                *p.add(r) = address;
+                *l.add(r) = length;
+            }
+        }
+        self.ptrs[outputs[0].0] = self.home[outputs[0].0];
+        self.ptrs[outputs[1].0] = self.home[outputs[1].0];
+        if let Some(&invalid) = outputs.get(2) {
+            // SAFETY: Boolean slots hold a window bitmap.
+            unsafe { *(self.home[invalid.0] as *mut [u64; WORDS]) = flags };
+            self.ptrs[invalid.0] = self.home[invalid.0];
+            self.settle(invalid);
         }
     }
 }
