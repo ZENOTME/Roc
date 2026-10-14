@@ -93,7 +93,9 @@ unsafe fn compact_width(
             1 => compact(src, mask, n, dst),
             2 => compact(src as *const u16, mask, n, dst as *mut u16),
             4 => compact(src as *const u32, mask, n, dst as *mut u32),
-            _ => compact(src as *const u64, mask, n, dst as *mut u64),
+            8 => compact(src as *const u64, mask, n, dst as *mut u64),
+            // 128-bit values may be only eight-byte aligned.
+            _ => compact(src as *const [u64; 2], mask, n, dst as *mut [u64; 2]),
         }
     }
 }

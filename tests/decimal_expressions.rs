@@ -235,3 +235,72 @@ fn casts_round_and_check_precision_like_arrow() {
     // NULL decimal rows stay NULL.
     assert!(a.is_null(6));
 }
+
+#[test]
+fn filtered_decimal_rows_keep_both_words() {
+    use arrow::{
+        datatypes::{Field, Schema},
+        record_batch::RecordBatch,
+    };
+    use roc::{
+        column::{ColumnContext, ColumnType},
+        expr::scalar::{ConstantExpression, ReferenceExpression},
+        operator::{FilterOperator, OperatorTreeNode},
+    };
+    let mut columns = ColumnContext::new();
+    let d = columns.allocate_named(ColumnType::new(DataType::Decimal128(20, 2), true), "d");
+    let k = columns.allocate_named(ColumnType::new(DataType::Int64, true), "k");
+    let values = (0..3000i128)
+        .map(|i| (i % 7 != 0).then_some(i * 1_000_000_000_000_007 - 50))
+        .collect::<Vec<_>>();
+    let keys = (0..3000i64).collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("d", DataType::Decimal128(20, 2), true),
+        Field::new("k", DataType::Int64, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            decimals(&values, 20, 2),
+            Arc::new(Int64Array::from(keys.clone())),
+        ],
+    )
+    .unwrap();
+    // k % 3 = 1 keeps a third of the rows: outputs are compacted.
+    let three = columns.allocate(ColumnType::new(DataType::Int64, false));
+    let rem = columns.allocate(ColumnType::new(DataType::Int64, true));
+    let one = columns.allocate(ColumnType::new(DataType::Int64, false));
+    let keep = columns.allocate(ColumnType::new(DataType::Boolean, true));
+    let predicate = FunctionExpression::binary(
+        FunctionKind::Equal,
+        FunctionExpression::binary(
+            FunctionKind::Remainder,
+            ReferenceExpression::new(k).into_ref(),
+            ConstantExpression::int64(Some(3), three).into_ref(),
+            rem,
+        )
+        .into_ref(),
+        ConstantExpression::int64(Some(1), one).into_ref(),
+        keep,
+    )
+    .into_ref();
+    let filter = OperatorTreeNode::new(
+        FilterOperator::new(predicate, vec![d]),
+        vec![support::exec::scan(vec![batch], vec![d, k])],
+    );
+    let mut actual = support::exec::execute_all(&columns, &filter).unwrap();
+    let mut expected = values
+        .iter()
+        .zip(&keys)
+        .filter(|(_, k)| *k % 3 == 1)
+        .map(|(v, _)| {
+            vec![v.map_or("NULL".to_string(), |v| {
+                let sign = if v < 0 { "-" } else { "" };
+                format!("{sign}{}.{:02}", v.abs() / 100, v.abs() % 100)
+            })]
+        })
+        .collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
