@@ -30,3 +30,22 @@
 - `run.py` 新增 `--rustflags`（两套构建共用，记录进 metadata），供 `dev` 传 LLVM 系统库路径。
 - M4 官方对比（`target/main-compare-20261014-m4-llvm2`，3 replicas × 10 samples，执行中位数 ms，ZeroCompile vs 最快参考）：1T——scan 0.049/0.051，filter_project 4.86/8.90，arithmetic_chain 10.21/11.36，integer_division 11.60/15.03，global_aggregate 0.778/0.875，grouped_aggregate 6.78/8.74；4T——0.077/0.143，1.43/3.26，2.81/4.93，3.20/5.94，**0.318/0.311**，1.95/2.37。Compile：arithmetic_chain 6.92/2.01、integer_division 7.50/2.17（相对 ZeroCompile 1.45–1.55×）。12 项中 11 项达标，global_aggregate 4T 超出 2%（接近内存带宽上限；本机负载 ~4.5，交错复测在 ±10% 内波动），之后的聚合步骤合并改动尚未进入官方复测。
 - 阻塞：删除旧文件与访问 `dev` 均被权限分类器拦截，需用户操作。
+
+### [2026-10-14 18:00] — Progress
+- 旧文件删除完成；commit `96289e4` 推送到 `origin/codex/suboperator-execution-rewrite`。
+- x86（`dev`，EPYC 7K62）首次官方对比（`target/main-compare-20261014-x86-llvm`）：12 项中 10 项达标；scan 1T（0.155 vs 0.146）与 global_aggregate 4T（1.24 vs 1.18）未达标。scan 经"纯透传程序直接拼输出 + 每种 schema 只校验一次输入"降到 0.137。
+- code review（high）确认 6 个真实 bug：ZeroCompile 过滤后分组聚合段错误（过期分组 ID）、融合函数覆盖未读输入槽位、回退重跑读到被覆盖输入、输入位图越界读、同类型 cast 无内核、run.py 遇 None 崩溃。均先写独立期望值的回归测试确认失败，再修复。另补：emitter 整窗向量 vs 逐行单 lane 一致性测试（x86 上同时比较 SSE2/AVX2）、魔数除法测试。
+- 调度问题定位：`taskset` 把 4 线程测量限制在 CPU 0,2,4,6（同一个 CCX）。旧架构 tokio 4 worker 协调 + rayon 4 线程计算 = 8 线程抢 4 核，profile 中约 15% 在内核调度函数，global_aggregate 4T 时快时慢（1.29–1.57）。
+  - 方案对比（dev，4 核，三轮，global_aggregate / grouped）：双池 tokio=1 → 1.19/5.5；tokio=2 → 1.23–1.53/5.6–7.0；tokio=4 → 1.42–1.57/5.6–7.0；**单池（计算直接作为宿主执行器的任务，去掉 rayon）→ 1.16–1.21/5.55，稳定**；main → 1.20/9.1。
+  - 采用单池：计算任务无锁、不共享状态、每个任务数据量有上限，可直接跑在宿主执行器上，异步任务在任务间隙调度。`Pipeline::execute` 增加 executor 参数，rayon 依赖删除；bench 两个引擎恢复对称（tokio N worker）。
+  - 分散到 4 个 CCX（0,8,16,24）时单池 global 1.07–1.11 vs main 1.12–1.15：4T 下两者都接近内存层面上限，1T 我们快约 20%。
+- GroupLookup 在只覆盖部分行时先把 ID 槽清零，聚合热循环不再逐行掩码（M4 grouped 1T 8.12 → 6.95）。
+- 验证：本地与 dev 全量测试通过（120），clippy 无警告。commit `52c1ec1` 已推送。
+- 进行中：两台机器的官方对比（`target/main-compare-20261014-m4-onepool`、dev `target/main-compare-20261014-x86-onepool`）。
+- 已知：`integrations/datafusion/examples` 在本次改动前就已无法编译（引用不存在的 `roc::suboperator`），不在本任务范围。
+
+### [2026-10-14 19:10] — Verification
+- 单池版本（`52c1ec1`）官方对比，3 replicas × 10 samples，ZeroCompile 执行中位数 ms vs 最快参考：
+  - M4（`target/main-compare-20261014-m4-onepool`）：**12/12 达标**。1T：scan 0.043/0.051，filter 4.89/8.87，arith 10.22/11.19，div 11.62/15.06，global 0.757/0.859，grouped 6.92/8.59；4T：0.070/0.138，1.43/3.31，2.79/4.95，3.21/5.95，0.282/0.313，1.95/2.43。Compile arith 7.36/2.10、div 7.89/2.24。
+  - x86 dev（`target/main-compare-20261014-x86-onepool`）：11/12 达标，global_aggregate 4T 1.219 vs main 1.200（+1.6%，样本区间 1.18–1.34 vs 1.15–1.25 重叠，属噪声级；同 CCX 交错测量中单池 1.15–1.17 vs main 1.17–1.18）。1T：scan 0.136/0.147，filter 13.98/23.76，arith 16.53/21.90，div 20.72/42.13，global 2.60/3.30，grouped 16.90/23.38；4T：0.162/0.171，5.01/7.52，4.80/13.66，5.88/19.24，1.219/1.200，4.94/7.24。Compile arith 7.94/2.98、div 10.89/3.35（相对 ZeroCompile 1.6–2.1×）。
+- 结论：global_aggregate 4T 在 4 核同 CCX 配置下两引擎都接近内存层面上限，x86 持平、M4 快 10%；1T 快 20%+。

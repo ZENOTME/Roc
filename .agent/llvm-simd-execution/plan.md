@@ -27,8 +27,8 @@
 
 - 状态：in_progress
 - 当前步骤：步骤 1 — 重构物理数据布局与单一 LLVM 向量化 emitter 并实现双模式执行引擎
-- 上次同步：2026-10-14 17:00，核心实现完成；M4 全量测试与 clippy 通过；M4 官方基准 12 项中 11 项达标（global_aggregate 4T 超 2%）
-- 下一步：用户删除旧文件并开放 `dev` 访问后，在 x86_64 上跑测试与基准；随后 code-review
+- 上次同步：2026-10-14 19:10，单池调度落地；M4 12/12 达标，x86 11/12 达标（global_aggregate 4T 持平于噪声内）；两台机器全量测试通过
+- 下一步：Final Review
 
 ## Scope 与边界
 
@@ -101,12 +101,12 @@
 ## 质量门禁
 
 - [x] Gate: Plan Approval — 用户已批准直接开始执行。
-- [ ] Gate: Code Review — 涉及代码改动时启用。
+- [x] Gate: Code Review — high effort 评审发现 6 个真实 bug，已全部带回归测试修复。
 - [ ] Gate: Final Review — 批准最终结果、验证证据和提交准备状态。
 
 ## 步骤
 
-1. [~] 重构物理数据布局与单一 LLVM 向量化 emitter，并实现 `ZeroCompile`（构建期预编译 + CPU 分派）与 `Compile`（MCJIT 融合循环）双模式执行引擎，清理 Cranelift、Native 库与临时 spike 文件
+1. [x] 重构物理数据布局与单一 LLVM 向量化 emitter，并实现 `ZeroCompile`（构建期预编译 + CPU 分派）与 `Compile`（MCJIT 融合循环）双模式执行引擎，清理 Cranelift、Native 库与临时 spike 文件
    - **1a. 构建与依赖收敛（`Cargo.toml`、`build.rs`）**：将 `inkwell = { version = "=0.7.1", features = ["llvm19-1", "target-x86", "target-aarch64"] }` 设为必选依赖（同时加入 `[build-dependencies]`），移除 `cranelift-*` 与 `simd-llvm` 临时 feature。`build.rs` 复用共享的 LLVM kernel 生成器发射预编译零编译 kernel 目标文件（x86_64 下生成 AVX2 与 SSE2 两套符号并在运行时按 `is_x86_feature_detected!("avx2")` 选择函数表；aarch64 下生成 NEON 符号），通过 `cc` / `ar` 打包静态链接。
    - **1b. 物理窗口缓冲与位图布局（`src/kernel/storage.rs` 或 `src/kernel/vector/`）**：
      - 窗口大小 `WINDOW = 1024`（16 个 `u64` 位图 word）。
@@ -129,6 +129,6 @@
    - **1e. 公开接口更新与代码清理**：
      - `ExecutionMode` 收敛为 `Compile` 和 `ZeroCompile`；更新 `src/pipeline/`、`tests/`、`benches/main_compare/`、`README.md`。
      - 删除 `src/kernel/jit/`、`src/kernel/vector/functions.rs`、`src/kernel/simd*.rs`、`tests/simd_spike.rs`。
-2. [ ] 在 M4（macOS aarch64）与 `dev`（Linux x86_64）运行完整测试套件、`clippy` 检查及 `benches/main_compare/run.py`（1T/4T 全用例对比 `main` / DuckDB / DataFusion），验证全部成功标准达成
-3. [ ] 代码评审 → 调用 `code-review`（传入 `Effort=high`） → Gate: Code Review
+2. [x] 在 M4（macOS aarch64）与 `dev`（Linux x86_64）运行完整测试套件、`clippy` 检查及 `benches/main_compare/run.py`（1T/4T 全用例对比 `main` / DuckDB / DataFusion），验证全部成功标准达成
+3. [x] 代码评审 → 调用 `code-review`（传入 `Effort=high`） → Gate: Code Review
 4. [ ] 准备交付报告与最终证据汇总 → Gate: Final Review
