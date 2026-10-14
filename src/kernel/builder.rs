@@ -639,7 +639,12 @@ impl<'plan> KernelBuilder<'plan> {
 pub(crate) fn is_bytes(t: &DataType) -> bool {
     matches!(
         t,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::BinaryView
     )
 }
 

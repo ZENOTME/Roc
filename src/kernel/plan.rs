@@ -164,8 +164,13 @@ impl Plan {
         let aliases = graph.output.as_ref().map_or(vec![], |o| {
             o.bindings
                 .iter()
-                .map(|b| {
-                    let alias = graph.inputs.iter().position(|i| i.binding == *b);
+                .enumerate()
+                .map(|(j, b)| {
+                    // Casts between byte types share bindings; the array is
+                    // reused only when its type is the output's.
+                    let alias = graph.inputs.iter().position(|i| {
+                        i.binding == *b && i.ty.data_type == *o.schema.field(j).data_type()
+                    });
                     alias.filter(|_| root_output)
                 })
                 .collect()

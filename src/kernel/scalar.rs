@@ -69,6 +69,8 @@ pub(crate) fn supported(t: &DataType) -> bool {
             | DataType::Decimal128(..)
             | DataType::Utf8
             | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::BinaryView
             | DataType::Binary
             | DataType::LargeBinary
             | DataType::Date32
@@ -94,7 +96,12 @@ pub(crate) fn numeric(t: &DataType) -> bool {
 pub(crate) fn bytes_type(t: &DataType) -> bool {
     matches!(
         t,
-        DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::BinaryView
     )
 }
 pub(crate) fn signed(t: &DataType) -> bool {
@@ -169,6 +176,8 @@ pub(crate) fn decode(a: &ArrayRef) -> Result<Vec<Cell>> {
         }
         DataType::Utf8 => bytes!(StringArray),
         DataType::LargeUtf8 => bytes!(LargeStringArray),
+        DataType::Utf8View => bytes!(StringViewArray),
+        DataType::BinaryView => bytes!(BinaryViewArray),
         DataType::Binary => bytes!(BinaryArray),
         DataType::LargeBinary => bytes!(LargeBinaryArray),
         t => {
@@ -224,7 +233,7 @@ pub(crate) fn encode(t: &DataType, cells: &[Cell]) -> Result<ArrayRef> {
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             primitive!(TimestampNanosecondType, |v| v as i64)
         }
-        DataType::Utf8 | DataType::LargeUtf8 => {
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
             let strings = cells
                 .iter()
                 .map(|c| {
@@ -240,13 +249,18 @@ pub(crate) fn encode(t: &DataType, cells: &[Cell]) -> Result<ArrayRef> {
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
-            if *t == DataType::Utf8 {
-                Arc::new(StringArray::from(strings))
-            } else {
-                Arc::new(LargeStringArray::from(strings))
+            match t {
+                DataType::Utf8 => Arc::new(StringArray::from(strings)) as ArrayRef,
+                DataType::Utf8View => Arc::new(StringViewArray::from(strings)),
+                _ => Arc::new(LargeStringArray::from(strings)),
             }
         }
         DataType::Binary => Arc::new(BinaryArray::from_iter(
+            cells
+                .iter()
+                .map(|c| (c.valid != 0).then(|| unsafe { c.as_bytes() })),
+        )),
+        DataType::BinaryView => Arc::new(BinaryViewArray::from_iter(
             cells
                 .iter()
                 .map(|c| (c.valid != 0).then(|| unsafe { c.as_bytes() })),

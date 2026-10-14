@@ -297,15 +297,34 @@ impl Outputs {
                             l as usize
                         }
                     });
+                    // SAFETY: pointers refer to input arrays, retained
+                    // constants or formatted strings, all alive here.
+                    let value =
+                        |p: u64, l: usize| unsafe { std::slice::from_raw_parts(p as *const u8, l) };
+                    if matches!(t, DataType::Utf8View | DataType::BinaryView) {
+                        let mut views = BinaryViewBuilder::with_capacity(rows);
+                        for (i, (&p, l)) in ptrs.iter().zip(lengths).enumerate() {
+                            if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
+                                views.append_null();
+                            } else {
+                                views.append_value(value(p, l));
+                            }
+                        }
+                        let views = views.finish();
+                        let array: ArrayRef = if *t == DataType::Utf8View {
+                            // SAFETY: string bindings hold UTF-8 values.
+                            Arc::new(unsafe { views.to_string_view_unchecked() })
+                        } else {
+                            Arc::new(views)
+                        };
+                        arrays.push(array);
+                        continue;
+                    }
                     let total = lengths.clone().sum();
                     let mut bytes = MutableBuffer::with_capacity(total);
                     for (&p, l) in ptrs.iter().zip(lengths.clone()) {
                         if l != 0 {
-                            // SAFETY: pointers refer to input arrays, retained
-                            // constants or formatted strings, all alive here.
-                            bytes.extend_from_slice(unsafe {
-                                std::slice::from_raw_parts(p as *const u8, l)
-                            });
+                            bytes.extend_from_slice(value(p, l));
                         }
                     }
                     let bytes = Buffer::from(bytes);

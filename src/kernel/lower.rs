@@ -269,9 +269,13 @@ impl KernelBuilder<'_> {
             let ColumnVariableBinding::Bytes { ptr, len, .. } = *input else {
                 return Err(unsupported());
             };
-            if matches!(from, DataType::Binary | DataType::LargeBinary)
-                && matches!(to, DataType::Utf8 | DataType::LargeUtf8)
-            {
+            if matches!(
+                from,
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            ) && matches!(
+                to,
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) {
                 let invalid = self.call(ScalarFunction::ValidateUtf8, vec![ptr, len])?[0];
                 let (validity, errors) = checked(self, invalid, vec![], KernelError::InvalidUtf8)?;
                 return Ok((ColumnVariableBinding::Bytes { ptr, len, validity }, errors));

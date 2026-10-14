@@ -36,6 +36,9 @@ pub(super) struct Input {
     /// Byte arrays: i32 or i64 offsets.
     offsets: *const u8,
     large: bool,
+    /// View arrays: the 16-byte views and their data buffers.
+    views: *const u128,
+    buffers: Vec<*const u8>,
 }
 
 impl Input {
@@ -48,6 +51,8 @@ impl Input {
             nulls: array.nulls().filter(|n| n.null_count() != 0).cloned(),
             offsets: std::ptr::null(),
             large: false,
+            views: std::ptr::null(),
+            buffers: vec![],
         };
         macro_rules! fixed {
             ($($pattern:pat => $t:ty),*) => {
@@ -66,6 +71,16 @@ impl Input {
                         let a = array.as_string::<i64>();
                         (input.offsets, input.values) = (a.value_offsets().as_ptr().cast(), a.values().as_ptr());
                         input.large = true;
+                    }
+                    DataType::Utf8View => {
+                        let a = array.as_string_view();
+                        input.views = a.views().as_ptr();
+                        input.buffers = a.data_buffers().iter().map(|b| b.as_ptr()).collect();
+                    }
+                    DataType::BinaryView => {
+                        let a = array.as_binary_view();
+                        input.views = a.views().as_ptr();
+                        input.buffers = a.data_buffers().iter().map(|b| b.as_ptr()).collect();
                     }
                     DataType::Binary => {
                         let a = array.as_binary::<i32>();
@@ -100,6 +115,28 @@ impl Input {
             DataType::Timestamp(TimeUnit::Nanosecond, _) => TimestampNanosecondType
         );
         input
+    }
+
+    /// The address and length of a byte value.
+    fn bytes(&self, row: usize) -> (u64, u64) {
+        if !self.views.is_null() {
+            // SAFETY: rows are below the array length; long views name a
+            // data buffer and a range within it.
+            unsafe {
+                let view = self.views.add(row);
+                let len = *view as u32;
+                let address = if len <= 12 {
+                    (view as *const u8).add(4)
+                } else {
+                    let buffer = (*view >> 64) as u32 as usize;
+                    let offset = (*view >> 96) as u32 as usize;
+                    self.buffers[buffer].add(offset)
+                };
+                return (address as u64, len as u64);
+            }
+        }
+        let (a, b) = (self.offset(row), self.offset(row + 1));
+        (self.values as u64 + a, b - a)
     }
 
     fn offset(&self, row: usize) -> u64 {
@@ -416,8 +453,8 @@ impl Frame<'_> {
                     let input = self.inputs[input].as_ref().unwrap();
                     let out = self.home[v] as *mut u64;
                     for r in 0..n {
-                        let (a, b) = (input.offset(start + r), input.offset(start + r + 1));
-                        let word = if len { b - a } else { input.values as u64 + a };
+                        let (address, length) = input.bytes(start + r);
+                        let word = if len { length } else { address };
                         // SAFETY: value slots hold a window of words.
                         unsafe { *out.add(r) = word };
                     }
