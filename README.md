@@ -105,8 +105,11 @@ the umbrella `arrow` crate is only a test oracle. Output columns that pass an
 input through keep its Arrow array when all rows survive.
 
 One async `Pipeline::execute` coordinator owns the source cursor and a bounded
-pool of `LocalState`s, one per in-flight execution instance. Program calls run on
-Rayon (inline with one worker) and the coordinator passes each output chunk to
+pool of `LocalState`s, one per in-flight execution instance. Program calls run as
+tasks of the caller's executor (inline with one worker): one pool of threads both
+computes and runs async work. A job is a bounded run of chunks with no locks or
+shared state, so async tasks run between jobs. The coordinator passes each output
+chunk to
 `SinkExec::consume`. Once all work succeeds, it hands every `LocalState` to
 `SinkExec::combine`, which takes the states the sink registered while building
 the pipeline and merges them into state it owns exclusively, then calls

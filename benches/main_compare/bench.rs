@@ -561,6 +561,7 @@ fn main() {
     assert!(adapter::MODES.contains(&mode), "mode must be one of {:?}", adapter::MODES);
     let prewarm_ms = adapter::prewarm(mode);
     let batches = input(rows);
+    // Both engines compute on the tokio workers: one pool of `threads`.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()

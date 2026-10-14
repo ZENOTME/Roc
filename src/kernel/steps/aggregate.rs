@@ -229,12 +229,19 @@ impl Frame<'_> {
         output: VariableId,
         domain: DomainId,
     ) -> Result<()> {
-        let Some(rows) = self.rows(domain, None) else {
+        let ids = self.ptrs[output.0] as *mut u64;
+        let rows = self.rows(domain, None);
+        if !rows.as_ref().is_some_and(Rows::all) {
+            // Rows outside the domain get group 0, so updates may read the
+            // ID of every window row; the slot may hold another variable's.
+            // SAFETY: ID slots hold a window of words.
+            unsafe { std::ptr::write_bytes(ids, 0, self.n) };
+        }
+        let Some(rows) = rows else {
             return Ok(());
         };
         // SAFETY: the state is exclusively borrowed for the run.
         let index = unsafe { &mut (*self.groups[state.0]).index };
-        let ids = self.ptrs[output.0] as *mut u64;
         if let ([key], Some(_)) = (keys, &index.cache)
             && let Some(value) = key.value()
             && !self.steps.vars[value.0].scalar()
@@ -332,10 +339,10 @@ impl Frame<'_> {
                     let base = groups.as_mut_ptr();
                     let mut overflowed = false;
                     rows.each_weighted(|r, valid| {
-                        // Left-out rows add nothing to group 0, which exists.
-                        // SAFETY: IDs of rows are below the group count.
-                        let id = unsafe { *ids.add(r) } & valid.wrapping_neg();
-                        let count = unsafe { &mut (*base.add(id as usize)).count };
+                        // Every window row has an ID below the group count;
+                        // left-out rows add nothing.
+                        // SAFETY: as above.
+                        let count = unsafe { &mut (*base.add(*ids.add(r) as usize)).count };
                         let (c, o) = count.overflowing_add(valid as i64);
                         *count = c;
                         overflowed |= o;
@@ -379,8 +386,7 @@ impl Frame<'_> {
                     let base = groups.as_mut_ptr();
                     rows.each_weighted(|r, valid| {
                         // As for counts; the values cover the window.
-                        let id = unsafe { *ids.add(r) } & valid.wrapping_neg();
-                        let (sum, v) = unsafe { (&mut (*base.add(id as usize)).sum, *values.add(r)) };
+                        let (sum, v) = unsafe { (&mut (*base.add(*ids.add(r) as usize)).sum, *values.add(r)) };
                         sum.bits = sum.bits.wrapping_add(v & valid.wrapping_neg());
                         sum.valid |= valid;
                     });

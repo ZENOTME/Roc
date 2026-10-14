@@ -131,7 +131,7 @@ mimalloc = { version = "=0.1.48", default-features = false }
             for label, prefix, mode in variants[shift:] + variants[:shift]:
                 name = f'{label}-t{threads}-r{replica+1}'
                 print('Measuring',name,flush=True)
-                env = os.environ.copy(); env['RAYON_NUM_THREADS'] = str(threads)
+                env = os.environ.copy()
                 argv = prefix + [str(a.rows),str(a.samples),str(threads)] + mode
                 if cpus[threads]: argv = ['taskset','-c',cpus[threads]] + argv
                 with (out/f'{name}.json').open('w') as stdout, (out/f'{name}.log').open('w') as stderr:

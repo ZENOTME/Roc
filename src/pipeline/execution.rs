@@ -125,10 +125,13 @@ impl<E> PipelineGraphExecutor<E> {
 
 impl Pipeline {
     /// One async coordinator owns the source and a bounded pool of local state.
-    /// Only synchronous Program calls move to Rayon; no worker owns an async
-    /// source cursor or an executor object.
-    pub async fn execute(
+    /// Program calls run as tasks of `executor`, the one pool of the caller's
+    /// threads: a job is a bounded run of chunks with no locks or shared
+    /// state, so it returns its thread soon and async tasks run between jobs.
+    /// No worker owns an async source cursor or an executor object.
+    pub async fn execute<E: Executor>(
         mut self,
+        executor: Arc<E>,
         shutdown_guard: ShutdownGuard,
         config: PipelineExecutionConfig,
         parallelism: usize,
@@ -254,7 +257,7 @@ impl Pipeline {
                 let mut local = idle.pop().unwrap();
                 let code = program.clone();
                 let guard = shutdown_guard.clone();
-                jobs.push(on_cpu(move || {
+                jobs.push(on_cpu(executor.as_ref(), move || {
                     let mut chunks = Vec::new();
                     for batch in batches {
                         if let Some(chunk) = code.run(&batch, &mut local, &guard)?
@@ -410,20 +413,19 @@ async fn return_local(
     Ok(stop)
 }
 
-/// Rayon runs synchronous work only. Catch worker panics and return them through
-/// the completion channel rather than unwinding across the async runtime.
-fn on_cpu<T: Send + 'static>(
-    work: impl FnOnce() -> Result<T> + Send + 'static,
-) -> impl Future<Output = Result<T>> {
-    let (tx, rx) = futures::channel::oneshot::channel();
-    rayon::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-            .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())));
-        let _ = tx.send(result);
+/// Runs CPU work as a task of `executor`. Worker panics are caught and
+/// returned as errors rather than unwinding across the async runtime.
+fn on_cpu<E: Executor, T: Send + 'static, W: FnOnce() -> Result<T> + Send + 'static>(
+    executor: &E,
+    work: W,
+) -> impl Future<Output = Result<T>> + use<E, T, W> {
+    let task = executor.spawn(async move {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())))
     });
     async move {
-        rx.await
-            .map_err(|_| Error::Execution("CPU task did not return its state".into()))?
+        task.await
+            .map_err(|e| Error::Execution(format!("CPU task did not return its state: {e}")))?
     }
 }
 
@@ -476,6 +478,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
             while let Some(id) = ready.pop_front() {
                 let pipeline = pipelines[id].take().expect("pipeline started once");
                 let task = task_executor.spawn(pipeline.execute(
+                    task_executor.clone(),
                     shutdown_guard.clone(),
                     self.config,
                     self.parallelism,
@@ -526,6 +529,29 @@ mod tests {
     use crate::exec::{SinkExec, SinkStatus, SourceExec};
     use crate::kernel::KernelBuilder;
     use futures::{executor::block_on, future::BoxFuture};
+
+    /// Runs each task on a thread of its own.
+    struct ThreadTaskExecutor;
+
+    impl Executor for ThreadTaskExecutor {
+        type JoinError = futures::channel::oneshot::Canceled;
+        type Handle<T>
+            = futures::channel::oneshot::Receiver<T>
+        where
+            T: Send + 'static;
+
+        fn spawn<F>(&self, task: F) -> Self::Handle<F::Output>
+        where
+            F: Future + Send + 'static,
+            F::Output: Send + 'static,
+        {
+            let (send, receive) = futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = send.send(block_on(task));
+            });
+            receive
+        }
+    }
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -672,7 +698,7 @@ mod tests {
     #[test]
     fn source_morsels_split_and_empty_batches_are_skipped() {
         let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], passthrough(), None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
         assert_eq!(*observed.batch_sizes.lock().unwrap(), [2, 1]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
@@ -683,7 +709,7 @@ mod tests {
         let input = batch(&[1, 2]);
         let owner = input.column(0).clone();
         let (exec, observed) = executor(vec![input], passthrough(), None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert!(Arc::ptr_eq(
             &owner,
             observed.batches.lock().unwrap()[0].column(0)
@@ -693,7 +719,7 @@ mod tests {
     fn sink_finish_does_not_read_more_input_and_combines_once() {
         let (exec, observed) =
             executor(vec![batch(&[1, 2, 3]), batch(&[4])], passthrough(), Some(1));
-        block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
@@ -713,7 +739,7 @@ mod tests {
             .into_ref()
         });
         let (exec, observed) = executor(vec![batch(&[1])], division, None);
-        assert!(block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).is_err());
+        assert!(block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).is_err());
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
     }
@@ -724,7 +750,7 @@ mod tests {
             passthrough(),
             None,
         );
-        block_on(exec.execute(asyncband::shutdown::new().1, config(), 3)).unwrap();
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 3)).unwrap();
         assert_eq!(observed.cursors.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 3);
         let mut values = observed.values.lock().unwrap().clone();
@@ -737,7 +763,7 @@ mod tests {
         let (shutdown, guard) = asyncband::shutdown::new();
         shutdown.request_shutdown();
         assert!(matches!(
-            block_on(exec.execute(guard, config(), 1)),
+            block_on(exec.execute(Arc::new(ThreadTaskExecutor), guard, config(), 1)),
             Err(Error::Cancelled)
         ));
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 0);
@@ -746,7 +772,7 @@ mod tests {
     #[test]
     fn empty_source_still_returns_local_state_for_combine() {
         let (exec, observed) = executor(vec![], passthrough(), None);
-        block_on(exec.execute(asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
     // The second source read cannot finish until the first chunk is consumed.
@@ -820,7 +846,7 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            pipeline.execute(asyncband::shutdown::new().1, config(), 2),
+            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
         )
         .await
         .expect("source and consume deadlocked")
@@ -903,7 +929,7 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            pipeline.execute(asyncband::shutdown::new().1, config(), 2),
+            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
         )
         .await
         .expect("finish must interrupt pending source read")
@@ -913,7 +939,7 @@ mod tests {
     }
     #[test]
     fn cpu_panics_are_returned_as_errors() {
-        let result = block_on(on_cpu(|| -> Result<()> {
+        let result = block_on(on_cpu(&ThreadTaskExecutor, || -> Result<()> {
             panic!("intentional worker panic")
         }));
         assert!(matches!(result, Err(Error::Execution(_))));
