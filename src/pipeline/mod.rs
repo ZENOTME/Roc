@@ -33,6 +33,9 @@ pub struct Pipeline {
     pub source: Box<dyn SourceExec>,
     pub program: Program,
     pub sink: Box<dyn SinkExec>,
+    /// The sink receives chunks in source order: the pipeline runs on one
+    /// execution instance.
+    pub ordered: bool,
 }
 
 impl Pipeline {
@@ -41,6 +44,7 @@ impl Pipeline {
             source,
             program,
             sink,
+            ordered: false,
         }
     }
 }
@@ -56,6 +60,7 @@ pub struct PipelineBuilder<'plan> {
     source: Option<Box<dyn SourceExec>>,
     pub kernels: KernelBuilder<'plan>,
     sink: Option<Sink>,
+    ordered: bool,
 }
 
 impl<'plan> PipelineBuilder<'plan> {
@@ -64,7 +69,14 @@ impl<'plan> PipelineBuilder<'plan> {
             source: None,
             kernels: KernelBuilder::new(columns),
             sink: None,
+            ordered: false,
         }
+    }
+
+    /// The sink must receive chunks in source order, as an ordered source
+    /// produces them.
+    pub fn set_ordered(&mut self) {
+        self.ordered = true;
     }
 
     /// Sets the source; its chunks bind `columns` in order.
@@ -104,6 +116,8 @@ impl<'plan> PipelineBuilder<'plan> {
             .source
             .ok_or_else(|| Error::invalid_plan("pipeline has no source".into()))?;
         let program = Program::new(self.kernels.finish(outputs.as_deref())?, mode)?;
-        Ok(Pipeline::new(source, program, sink))
+        let mut pipeline = Pipeline::new(source, program, sink);
+        pipeline.ordered = self.ordered;
+        Ok(pipeline)
     }
 }

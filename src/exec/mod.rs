@@ -19,11 +19,15 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 
 pub(crate) mod aggregate;
+mod buffer;
 mod exchange;
 mod scan;
+pub mod sort;
 mod table;
+pub mod window;
 
 pub use aggregate::{AggregateExecuteState, AggregateSinkExec, AggregateSourceExec};
+pub use buffer::{Buffer, BufferSinkExec, BufferSourceExec, Finish};
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
 pub use scan::ScanExec;
 pub use table::TableSinkExec;

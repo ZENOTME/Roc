@@ -17,6 +17,7 @@ mod collect;
 mod exchange;
 mod filter;
 mod join;
+mod materialize;
 mod project;
 mod scan;
 
@@ -28,6 +29,10 @@ pub use exchange::{
 };
 pub use filter::FilterOperator;
 pub use join::{JoinOperator, JoinType};
+pub use materialize::{
+    LimitOperator, SingleRowOperator, SortColumn, SortOperator, SpoolOperator, UnionOperator,
+    WindowExpression, WindowOperator,
+};
 pub use project::ProjectOperator;
 pub use scan::{
     ScanConsumer, ScanHandle, ScanOperator, ScanReceiver, ScanRequest, ScanSendError, ScanSender,

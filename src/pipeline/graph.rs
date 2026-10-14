@@ -17,7 +17,9 @@ use super::{Pipeline, PipelineBuilder};
 use crate::column::ColumnContext;
 use crate::error::{Error, Result};
 use crate::kernel::ExecutionMode;
-use std::collections::{HashSet, VecDeque};
+use std::any::Any;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 pub type PipelineId = usize;
 
@@ -26,6 +28,8 @@ pub struct PipelineGraphBuilder<'plan> {
     pipelines: Vec<PipelineBuilder<'plan>>,
     dependencies: Vec<Vec<PipelineId>>,
     mode: ExecutionMode,
+    /// Pipelines that several operators read, with the state they share.
+    shared: HashMap<u64, (PipelineId, Arc<dyn Any + Send + Sync>)>,
 }
 
 impl<'plan> PipelineGraphBuilder<'plan> {
@@ -36,7 +40,34 @@ impl<'plan> PipelineGraphBuilder<'plan> {
             pipelines: vec![PipelineBuilder::new(columns)],
             dependencies: vec![vec![]],
             mode: ExecutionMode::default(),
+            shared: HashMap::new(),
         }
+    }
+
+    /// Makes `dependent` wait for an existing pipeline.
+    pub fn add_dependency(&mut self, dependent: PipelineId, dependency: PipelineId) -> Result<()> {
+        if dependent >= self.pipelines.len() || dependency >= self.pipelines.len() {
+            return Err(Error::invalid_plan("unknown pipeline".into()));
+        }
+        if !self.dependencies[dependent].contains(&dependency) {
+            self.dependencies[dependent].push(dependency);
+        }
+        Ok(())
+    }
+
+    /// The pipeline and state registered for `key` by an operator read in
+    /// several places of the tree.
+    pub fn shared(&self, key: u64) -> Option<(PipelineId, Arc<dyn Any + Send + Sync>)> {
+        self.shared.get(&key).cloned()
+    }
+
+    pub fn set_shared(
+        &mut self,
+        key: u64,
+        pipeline: PipelineId,
+        state: Arc<dyn Any + Send + Sync>,
+    ) {
+        self.shared.insert(key, (pipeline, state));
     }
 
     /// The mode of every pipeline program built by `finish`.

@@ -149,7 +149,8 @@ impl Pipeline {
         self.source.start(&shutdown_guard).with_location()?;
         // A single worker has no CPU parallelism to schedule, so run inline
         // and yield after bounded work instead of dispatching each batch.
-        if parallelism == 1 {
+        // Ordered pipelines run inline too: chunks keep their source order.
+        if parallelism == 1 || self.ordered {
             let mut local = self.program.new_local()?;
             let mut completed = 0;
             let mut stop = false;

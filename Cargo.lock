@@ -2235,6 +2235,7 @@ dependencies = [
  "arrow-buffer",
  "arrow-data",
  "arrow-schema",
+ "arrow-select",
  "asyncband",
  "criterion",
  "foldhash 0.2.0",
