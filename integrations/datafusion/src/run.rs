@@ -73,6 +73,16 @@ pub struct Outcome {
     pub rows: usize,
     pub roc: Option<Duration>,
     pub datafusion: Option<Duration>,
+    /// Roc's time translating the plan, building pipelines (which compiles
+    /// programs) and executing them.
+    pub phases: Phases,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Phases {
+    pub translate: Duration,
+    pub build: Duration,
+    pub execute: Duration,
 }
 
 /// The optimized plan of `sql`.
@@ -87,13 +97,19 @@ pub async fn run_roc(
     plan: &LogicalPlan,
     mode: ExecutionMode,
     parallelism: usize,
+    phases: &mut Phases,
 ) -> Result<Vec<RecordBatch>, Stage> {
     let state = ctx.state();
+    let start = Instant::now();
     let query = translate(plan, &state)
         .await
         .map_err(|e| Stage::Translate(format!("{e:?}")))?;
+    phases.translate = start.elapsed();
+    let start = Instant::now();
     let graph = build_pipeline_graph_with_mode(&query.tree, mode)
         .map_err(|e| Stage::Execute(format!("{e:?}")))?;
+    phases.build = start.elapsed();
+    let start = Instant::now();
     let executor = PipelineGraphExecutor::new(graph)
         .with_task_executor(TokioExecutor(tokio::runtime::Handle::current()))
         .with_parallelism(parallelism);
@@ -104,6 +120,7 @@ pub async fn run_roc(
     }
     shutdown.await;
     result.map_err(|e| Stage::Execute(format!("{e:?}")))?;
+    phases.execute = start.elapsed();
     Ok(query.collect.take())
 }
 
@@ -313,6 +330,7 @@ pub async fn run(
         rows: 0,
         roc: None,
         datafusion: None,
+        phases: Phases::default(),
     };
     let plan = match plan(ctx, sql).await {
         Ok(plan) => plan,
@@ -322,7 +340,7 @@ pub async fn run(
         }
     };
     let start = Instant::now();
-    let roc = run_roc(ctx, &plan, mode, parallelism).await;
+    let roc = run_roc(ctx, &plan, mode, parallelism, &mut outcome.phases).await;
     outcome.roc = Some(start.elapsed());
     let roc = match roc {
         Ok(batches) => batches,
