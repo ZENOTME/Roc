@@ -21,11 +21,11 @@
 //! expression that needs it.
 //!
 //! One rewrite is the translator's own, semi-join reduction: an inner join
-//! with a filtered table, `... JOIN dim ON key = dim.k`, also filters the
-//! rows that a join below it stores in a table, when they hold `key`: the
-//! stored rows become `rows SEMI JOIN dim ON key = dim.k`. The inner join
-//! drops rows without a match anyway; dropping them before they are stored
-//! shrinks the table and the matches of every join in between.
+//! with a filtered table, `... JOIN dim ON key = dim.k`, also filters rows
+//! holding `key` below another join: the rows a join below stores in a
+//! table, or the rows of the scan of `key`, become `rows SEMI JOIN dim ON
+//! key = dim.k`. The inner join drops rows without a match anyway; dropping
+//! them early shrinks tables and the work of every join in between.
 use crate::{DataFusionScan, DataFusionStorage};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::{
@@ -125,8 +125,11 @@ struct Reduction {
     key: datafusion::common::Column,
     dimension: LogicalPlan,
     dimension_key: datafusion::common::Column,
-    /// Whether a build side below took it.
+    /// Whether rows below took it.
     applied: bool,
+    /// Whether it passed a join below the one it reduces for: only then does
+    /// a scan gain from it.
+    crossed: bool,
 }
 
 /// Whether a plan is a filtered table: only projections, filters and
@@ -200,6 +203,18 @@ impl Translator<'_> {
     }
 
     async fn plan_node(&mut self, plan: &LogicalPlan) -> Result<Rel> {
+        if let LogicalPlan::TableScan(scan) = plan {
+            let reductions = std::mem::take(&mut self.active);
+            let rel = match self.scan(scan).await {
+                Ok(rel) => {
+                    self.reduce(rel, &scan.projected_schema, &reductions, true)
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            self.active = reductions;
+            return rel;
+        }
         // Reductions pass to the children of nodes that keep or drop rows
         // without looking at other rows, and keep the key's values; joins
         // decide for themselves.
@@ -540,6 +555,9 @@ impl Translator<'_> {
         let nulls_equal = j.null_equality == NullEquality::NullEqualsNull;
         let inner = j.join_type == D::Inner && !nulls_equal;
         let inherited = self.active.clone();
+        for &i in &inherited {
+            self.reductions[i].crossed = true;
+        }
         // Each side keeps the reductions over its rows; an inner join adds
         // its own for the other side of a filtered table.
         let (mut to_left, mut to_right) = match j.join_type {
@@ -564,6 +582,7 @@ impl Translator<'_> {
                             dimension: dimension.as_ref().clone(),
                             dimension_key: dimension_key.clone(),
                             applied: false,
+                            crossed: false,
                         });
                     }
                 }
@@ -582,8 +601,16 @@ impl Translator<'_> {
         // above apply to the other.
         let inner_probe_left = left.rows >= right.rows;
         let (left, right) = match (inner, inner_probe_left) {
-            (true, true) => (left, self.reduce(right, j.right.schema(), &inherited).await?),
-            (true, false) => (self.reduce(left, j.left.schema(), &inherited).await?, right),
+            (true, true) => (
+                left,
+                self.reduce(right, j.right.schema(), &inherited, false)
+                    .await?,
+            ),
+            (true, false) => (
+                self.reduce(left, j.left.schema(), &inherited, false)
+                    .await?,
+                right,
+            ),
             (false, _) => (left, right),
         };
         let (lw, rw) = (left.columns.len(), right.columns.len());
@@ -679,16 +706,22 @@ impl Translator<'_> {
         })
     }
 
-    /// The rows of a join's build side, semi-joined with the dimension of
-    /// each reduction in `reductions` that is over its rows and not taken by
-    /// a build side below.
-    async fn reduce(&mut self, mut rel: Rel, schema: &DFSchema, reductions: &[usize]) -> Result<Rel> {
+    /// The rows of a join's build side or of a scan, semi-joined with the
+    /// dimension of each reduction in `reductions` that is over its rows and
+    /// not taken below; a scan takes only reductions that crossed a join.
+    async fn reduce(
+        &mut self,
+        mut rel: Rel,
+        schema: &DFSchema,
+        reductions: &[usize],
+        scan: bool,
+    ) -> Result<Rel> {
         for &i in reductions {
             let r = &self.reductions[i];
             let Ok(at) = schema.index_of_column(&r.key) else {
                 continue;
             };
-            if r.applied {
+            if r.applied || (scan && !r.crossed) {
                 continue;
             }
             let dimension = r.dimension.clone();

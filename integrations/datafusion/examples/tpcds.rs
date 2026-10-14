@@ -18,7 +18,7 @@
 //!     cargo run --release -p roc-datafusion --example tpcds -- \
 //!         <data-dir> [--mode compile|zero] [--workers N] [--timeout SECONDS] [--verbose]
 //!         [--repeat N: best of N runs of each engine] [--profile: with --repeat, Roc alone]
-//!         [--explain: print pipelines]
+//!         [--explain: print pipelines] [--threads N: runtime threads, default --workers]
 //!         [--set datafusion.option=value] [--sql STATEMENT: run it instead]
 //!         [--report FILE] [query...]
 use roc::kernel::ExecutionMode;
@@ -32,12 +32,14 @@ use std::fmt::Write;
 /// plans as many partitions, so they compare on the same cores.
 fn main() -> datafusion::error::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
-    let workers = args
-        .iter()
-        .position(|a| a == "--workers")
-        .map_or(4, |i| args[i + 1].parse().unwrap());
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].parse::<usize>().unwrap())
+    };
+    let workers = value("--workers").unwrap_or(4);
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(workers)
+        .worker_threads(value("--threads").unwrap_or(workers))
         .enable_all()
         .build()
         .unwrap()
@@ -67,6 +69,7 @@ async fn run_all() -> datafusion::error::Result<()> {
                 }
             }
             "--workers" => workers = args.next().unwrap().parse().unwrap(),
+            "--threads" => drop(args.next()),
             "--report" => report = args.next(),
             "--timeout" => timeout = args.next().unwrap().parse().unwrap(),
             "--verbose" => verbose = true,
