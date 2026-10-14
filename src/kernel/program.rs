@@ -117,11 +117,11 @@ impl Program {
             .flatten();
         Ok(Self {
             mode,
+            explain: explain(&graph) + "steps:\n" + &steps.describe(),
             steps,
             passthrough,
             kinds: plan.states,
             aliases: plan.aliases,
-            explain: explain(&graph),
             inputs: graph.inputs,
             output: graph.output,
             states: graph.states,

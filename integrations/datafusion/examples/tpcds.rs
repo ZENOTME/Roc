@@ -17,7 +17,7 @@
 //!
 //!     cargo run --release -p roc-datafusion --example tpcds -- \
 //!         <data-dir> [--mode compile|zero] [--workers N] [--timeout SECONDS] [--verbose]
-//!         [--repeat N: run Roc alone N times, for profiling]
+//!         [--repeat N: run Roc alone N times, for profiling] [--explain: print pipelines]
 //!         [--set datafusion.option=value]
 //!         [--report FILE] [query...]
 use roc::kernel::ExecutionMode;
@@ -37,6 +37,7 @@ async fn main() -> datafusion::error::Result<()> {
     let mut timeout = 120;
     let mut verbose = false;
     let mut repeat = 0;
+    let mut explain = false;
     let mut only = vec![];
     let mut config = datafusion::prelude::SessionConfig::new();
     while let Some(a) = args.next() {
@@ -51,6 +52,7 @@ async fn main() -> datafusion::error::Result<()> {
             "--report" => report = args.next(),
             "--timeout" => timeout = args.next().unwrap().parse().unwrap(),
             "--verbose" => verbose = true,
+            "--explain" => explain = true,
             "--repeat" => repeat = args.next().unwrap().parse().unwrap(),
             "--set" => {
                 let setting = args.next().unwrap();
@@ -77,6 +79,14 @@ async fn main() -> datafusion::error::Result<()> {
             continue;
         }
         total += 1;
+        if explain {
+            let plan = roc_datafusion::run::plan(&ctx, &s.sql).await?;
+            match roc_datafusion::run::explain(&ctx, &plan, mode).await {
+                Ok(text) => println!("== {}\n{text}", s.name),
+                Err(stage) => println!("== {}: {stage:?}", s.name),
+            }
+            continue;
+        }
         if repeat > 0 {
             // Profiling: run Roc alone, again and again.
             let plan = roc_datafusion::run::plan(&ctx, &s.sql).await?;

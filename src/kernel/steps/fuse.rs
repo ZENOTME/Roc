@@ -362,11 +362,13 @@ pub(super) fn fuse(steps: &mut Steps) -> Result<()> {
         .zip(groups.into_iter().zip(functions))
         .peekable();
     for b in 0..steps.blocks.len() {
+        let at = std::mem::take(&mut steps.blocks[b].at);
         let mut old = std::mem::take(&mut steps.blocks[b].steps)
             .into_iter()
             .enumerate()
             .peekable();
         while let Some((i, step)) = old.next() {
+            steps.blocks[b].at.push(at[i]);
             match fused.peek() {
                 Some(((block, range), _)) if *block == b && range.start == i => {
                     let ((_, range), (run, f)) = fused.next().unwrap();

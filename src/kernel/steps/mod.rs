@@ -1430,6 +1430,42 @@ impl Steps {
                 .all(|s| matches!(s, Step::Output { .. }))
     }
 
+    /// The blocks and their steps, one step per line with its domain.
+    pub fn describe(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let v = |v: &[VariableId]| v.iter().map(|v| format!("v{}", v.0)).collect::<Vec<_>>().join(" ");
+        for (b, block) in self.blocks.iter().enumerate() {
+            let _ = writeln!(out, "block {b} d{}", block.dense.0);
+            for (step, at) in block.steps.iter().zip(&block.at) {
+                let (reads, writes) = access(step);
+                let name = match step {
+                    Step::Kernel { call, .. } => format!("{:?}", call.func),
+                    Step::Fused { fallback, .. } => format!("fused {} steps", fallback.len()),
+                    Step::Bits { op, .. } => format!("{op:?}"),
+                    Step::SelectBits { .. } => "select bits".into(),
+                    Step::Text { text, .. } => match text {
+                        Text::Compare { pred, .. } => format!("compare text {pred:?}"),
+                        Text::Parse { to, .. } => format!("parse {to:?}"),
+                        Text::Format { .. } => "format".into(),
+                        Text::Validate { .. } => "validate utf8".into(),
+                        Text::Strings { function, .. } => format!("{function:?}"),
+                    },
+                    Step::Filter { domain, .. } => format!("filter -> d{}", domain.0),
+                    Step::RaiseIf { .. } => "raise if".into(),
+                    Step::GroupLookup { state, .. } => format!("group lookup s{}", state.0),
+                    Step::Aggregates { updates, .. } => format!("{} aggregate updates", updates.len()),
+                    Step::Output { domain } => format!("output d{}", domain.0),
+                    Step::Gather { state, column, .. } => format!("gather s{} column {column}", state.0),
+                    Step::Import { .. } => "import".into(),
+                    Step::Expand(e) => format!("expand -> block {}", e.block),
+                };
+                let _ = writeln!(out, "  d{}: {name}: {} -> {}", at.0, v(&reads), v(&writes));
+            }
+        }
+        out
+    }
+
     /// The IR of the fused functions; empty without any.
     pub fn ir(&self) -> &str {
         self.jit.as_ref().map_or("", |j| j.ir())

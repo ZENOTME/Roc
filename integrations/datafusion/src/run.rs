@@ -91,6 +91,20 @@ pub async fn plan(ctx: &SessionContext, sql: &str) -> datafusion::error::Result<
     ctx.state().optimize(&plan)
 }
 
+/// The pipelines Roc would run for `plan`: their kernels and steps.
+pub async fn explain(
+    ctx: &SessionContext,
+    plan: &LogicalPlan,
+    mode: ExecutionMode,
+) -> Result<String, Stage> {
+    let query = translate(plan, &ctx.state())
+        .await
+        .map_err(|e| Stage::Translate(format!("{e:?}")))?;
+    let graph = build_pipeline_graph_with_mode(&query.tree, mode)
+        .map_err(|e| Stage::Execute(format!("{e:?}")))?;
+    Ok(graph.explain())
+}
+
 /// Executes `plan` through Roc with `parallelism` workers.
 pub async fn run_roc(
     ctx: &SessionContext,
