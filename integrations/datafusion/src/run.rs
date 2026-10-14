@@ -15,6 +15,7 @@
 //! Runs SQL statements through Roc and through DataFusion, and compares the
 //! results. DataFusion plans both; only downstream execution differs.
 use crate::plan::translate;
+use datafusion::arrow::compute::{SortColumn, SortOptions, concat, lexsort_to_indices, take};
 use datafusion::{
     arrow::{
         array::{Array, AsArray},
@@ -22,7 +23,7 @@ use datafusion::{
         record_batch::RecordBatch,
         util::display::ArrayFormatter,
     },
-    logical_expr::LogicalPlan,
+    logical_expr::{Expr, LogicalPlan},
     prelude::SessionContext,
 };
 use roc::{
@@ -178,9 +179,85 @@ fn key(row: &[Value]) -> Vec<String> {
         .collect()
 }
 
+/// The output columns the result of `plan` is ordered by, when its order
+/// is a sort by output columns; None when it has no order or one this
+/// cannot check.
+pub fn output_order(plan: &LogicalPlan) -> Option<Vec<(usize, SortOptions)>> {
+    match plan {
+        LogicalPlan::Sort(s) => s
+            .expr
+            .iter()
+            .map(|k| match &k.expr {
+                Expr::Column(c) => Some((
+                    s.input.schema().index_of_column(c).ok()?,
+                    SortOptions {
+                        descending: !k.asc,
+                        nulls_first: k.nulls_first,
+                    },
+                )),
+                _ => None,
+            })
+            .collect(),
+        LogicalPlan::Limit(l) => output_order(&l.input),
+        LogicalPlan::SubqueryAlias(a) => output_order(&a.input),
+        LogicalPlan::Projection(p) => {
+            let input = output_order(&p.input)?;
+            let schema = p.input.schema();
+            input
+                .into_iter()
+                .map(|(i, options)| {
+                    let position = p.expr.iter().position(|e| {
+                        let mut e = e;
+                        while let Expr::Alias(a) = e {
+                            e = &a.expr;
+                        }
+                        matches!(e, Expr::Column(c) if schema.index_of_column(c).ok() == Some(i))
+                    })?;
+                    Some((position, options))
+                })
+                .collect()
+        }
+        _ => None,
+    }
+}
+
+/// Whether the rows are ordered by `order`: sorting them by those keys
+/// leaves the key columns unchanged.
+fn ordered(batches: &[RecordBatch], order: &[(usize, SortOptions)]) -> bool {
+    if batches.is_empty() {
+        return true;
+    }
+    let columns = order
+        .iter()
+        .map(|&(i, _)| {
+            let parts = batches
+                .iter()
+                .map(|b| b.column(i).as_ref())
+                .collect::<Vec<_>>();
+            concat(&parts).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let keys = columns
+        .iter()
+        .zip(order)
+        .map(|(values, (_, options))| SortColumn {
+            values: values.clone(),
+            options: Some(*options),
+        })
+        .collect::<Vec<_>>();
+    let indices = lexsort_to_indices(&keys, None).unwrap();
+    columns
+        .iter()
+        .all(|c| take(c.as_ref(), &indices, None).unwrap().to_data() == c.to_data())
+}
+
 /// Compares Roc's result with DataFusion's: column types, then rows as an
-/// ordered sequence or, failing that, as a multiset.
-pub fn compare(roc: &[RecordBatch], expected: &[RecordBatch]) -> Stage {
+/// ordered sequence or, failing that, as a multiset ordered by `order`.
+pub fn compare(
+    roc: &[RecordBatch],
+    expected: &[RecordBatch],
+    order: Option<&[(usize, SortOptions)]>,
+) -> Stage {
     let types = |b: &[RecordBatch]| {
         b.first().map(|b| {
             b.schema()
@@ -205,6 +282,12 @@ pub fn compare(roc: &[RecordBatch], expected: &[RecordBatch]) -> Stage {
     a.sort_by_key(|r| key(r));
     b.sort_by_key(|r| key(r));
     if same(&a, &b) {
+        // Rows with equal sort keys may come in any order.
+        if let Some(order) = order
+            && !ordered(roc, order)
+        {
+            return Stage::Validate(format!("rows are not ordered by {order:?}"));
+        }
         return Stage::Passed { ordered: false };
     }
     let first = a
@@ -249,11 +332,13 @@ pub async fn run(
         }
     };
     let start = Instant::now();
+    let checked = plan.clone();
     let expected = match ctx.execute_logical_plan(plan).await {
         Ok(frame) => frame.collect().await,
         Err(e) => Err(e),
     };
     outcome.datafusion = Some(start.elapsed());
+    let order = output_order(&checked);
     let expected = match expected {
         Ok(batches) => batches,
         Err(e) => {
@@ -262,6 +347,53 @@ pub async fn run(
         }
     };
     outcome.rows = expected.iter().map(RecordBatch::num_rows).sum();
-    outcome.stage = compare(&roc, &expected);
+    outcome.stage = compare(&roc, &expected, order.as_deref());
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::{
+        array::{ArrayRef, Int64Array, StringArray},
+        datatypes::{Field, Schema},
+    };
+    use std::sync::Arc;
+
+    fn batch(keys: &[i64], values: &[&str]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, false),
+            Field::new("v", DataType::Utf8, false),
+        ]));
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(keys.to_vec())),
+            Arc::new(StringArray::from(values.to_vec())),
+        ];
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
+    #[test]
+    fn rows_must_follow_the_sort_keys_but_ties_may_come_in_any_order() {
+        let order = [(0, SortOptions::default())];
+        let expected = batch(&[1, 1, 2], &["a", "b", "c"]);
+        let tie_swapped = batch(&[1, 1, 2], &["b", "a", "c"]);
+        let misordered = batch(&[2, 1, 1], &["c", "a", "b"]);
+        assert_eq!(
+            compare(&[expected.clone()], &[expected.clone()], Some(&order)),
+            Stage::Passed { ordered: true }
+        );
+        assert_eq!(
+            compare(&[tie_swapped], &[expected.clone()], Some(&order)),
+            Stage::Passed { ordered: false }
+        );
+        assert!(matches!(
+            compare(&[misordered.clone()], &[expected.clone()], Some(&order)),
+            Stage::Validate(_)
+        ));
+        // Without an order to check, equal multisets pass.
+        assert_eq!(
+            compare(&[misordered], &[expected], None),
+            Stage::Passed { ordered: false }
+        );
+    }
 }
