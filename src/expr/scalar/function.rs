@@ -388,6 +388,34 @@ impl FunctionExpression {
                         back.value
                     };
                     ColumnVariableBinding::Int128 { value: v, validity }
+                } else if scalar::numeric(t)
+                    && !matches!(t, DataType::Float64 | DataType::Float32)
+                    && output == *t
+                {
+                    // Integers keep their value unless rounded to tens or
+                    // above: x / 10^k rounded half away from zero, times 10^k.
+                    let ty = builder.variable_type(x)?;
+                    if places >= 0 {
+                        ColumnVariableBinding::fixed(ty, x, validity)?
+                    } else {
+                        let k = places.unsigned_abs().min(38) as u32;
+                        let limit = 10i128.checked_pow(k).filter(|f| *f <= i64::MAX as i128);
+                        let Some(factor) = limit else {
+                            let zero = builder.constant(ConstantValue::from_bits(ty, 0))?;
+                            return Ok((ColumnVariableBinding::fixed(ty, zero, validity)?, errors));
+                        };
+                        let factor =
+                            builder.constant(ConstantValue::from_bits(ty, factor as u64))?;
+                        let q = builder.call(ScalarFunction::DivideRound, vec![x, factor])?[0];
+                        let out = builder.call(ScalarFunction::Multiply, vec![q, factor])?;
+                        errors.push(builder.pending(
+                            out[1],
+                            validity,
+                            KernelError::ArithmeticOverflow,
+                            vec![],
+                        )?);
+                        ColumnVariableBinding::fixed(ty, out[0], validity)?
+                    }
                 } else if matches!(t, DataType::Float64 | DataType::Float32) && output == *t {
                     let ty = builder.variable_type(x)?;
                     let factor = 10f64.powi(places as i32);
