@@ -172,6 +172,7 @@ pub(crate) struct Buffers {
 #[derive(Default)]
 pub(super) struct Spare {
     pub rows: Vec<Vec<u32>>,
+    pub probes: Vec<super::expand::Probes>,
     pub keys: Vec<Vec<u8>>,
     pub cells: Vec<Vec<Cell>>,
 }
@@ -537,6 +538,42 @@ impl Frame<'_> {
         self.states[v.0] = state;
         if let Some(p) = state.bitmap() {
             self.ptrs[v.0] = p;
+        }
+    }
+
+    /// The canonical words of a fixed-width variable on the first
+    /// `out.len()` rows, as `get` reads them.
+    pub(super) fn load_words(&self, v: VariableId, out: &mut [u64]) {
+        let var = &self.steps.vars[v.0];
+        let ptr = self.ptrs[v.0];
+        if var.scalar() && var.ty != Ty::Bool {
+            // SAFETY: a constant is one value.
+            out.fill(unsafe { load(ptr, var.ty, 0) });
+            return;
+        }
+        macro_rules! typed {
+            ($t:ty, $wide:ty) => {{
+                let p = ptr as *const $t;
+                for (r, o) in out.iter_mut().enumerate() {
+                    // SAFETY: values cover the window.
+                    *o = unsafe { *p.add(r) } as $wide as u64;
+                }
+            }};
+        }
+        match var.ty {
+            Ty::I8 => typed!(i8, i64),
+            Ty::I16 => typed!(i16, i64),
+            Ty::I32 => typed!(i32, i64),
+            Ty::U8 => typed!(u8, u64),
+            Ty::U16 => typed!(u16, u64),
+            Ty::U32 | Ty::F32 => typed!(u32, u64),
+            Ty::I64 | Ty::U64 | Ty::F64 => typed!(u64, u64),
+            ty => {
+                for (r, o) in out.iter_mut().enumerate() {
+                    // SAFETY: as above.
+                    *o = unsafe { load(ptr, ty, r) };
+                }
+            }
         }
     }
 

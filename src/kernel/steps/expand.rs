@@ -25,16 +25,35 @@ use super::aggregate::Rows;
 use super::bits::{self, BitState};
 use super::run::Frame;
 use super::*;
-use crate::kernel::table::{Probe, Table};
+use crate::kernel::table::Table;
 
-/// The probe row whose matches fill windows, and where its scan is.
-struct Scan {
-    row: u32,
-    /// Table rows left to compare with the probe's key.
-    rows: std::ops::Range<u32>,
-    matched: bool,
-    /// The key of a table with word keys; others are in the key buffer.
-    word: u64,
+/// The input rows of an expansion that may match, in order, with the range
+/// of table rows to compare with each.
+#[derive(Default)]
+pub(super) struct Probes {
+    rows: Vec<u32>,
+    lo: Vec<u32>,
+    hi: Vec<u32>,
+    /// Word keys, or the end of each encoded key in `keys`.
+    words: Vec<u64>,
+    keys: Vec<u8>,
+}
+
+impl Probes {
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.lo.clear();
+        self.hi.clear();
+        self.words.clear();
+        self.keys.clear();
+    }
+
+    fn push(&mut self, row: usize, rows: std::ops::Range<u32>, word: u64) {
+        self.rows.push(row as u32);
+        self.lo.push(rows.start);
+        self.hi.push(rows.end);
+        self.words.push(word);
+    }
 }
 
 impl Frame<'_> {
@@ -46,8 +65,6 @@ impl Frame<'_> {
             .expect("table states are bound");
         // SAFETY: the state keeps the table alive for the run.
         let table: &Table = unsafe { &*read.table };
-        let (mask, state) = self.mask(e.input);
-        let mask: [u64; WORDS] = mask.try_into().unwrap();
         let (n, limit) = (self.n, self.limit);
         for r in &e.reduces {
             for (_, out) in &r.any {
@@ -55,123 +72,88 @@ impl Frame<'_> {
                 unsafe { *(self.home[out.0] as *mut [u64; WORDS]) = [0; WORDS] };
             }
         }
-        let mut key = self.spare.keys.pop().unwrap_or_default();
-        let mut cells = self.spare.cells.pop().unwrap_or_default();
+        let mut probes = self.spare.probes.pop().unwrap_or_default();
+        self.probes(e, table, &mut probes);
         let rows = self.spare.rows.pop().unwrap_or_default();
         let enclosing = std::mem::replace(&mut self.parents, rows);
         self.lineage.push(enclosing);
-        let word = |w: usize| {
-            if state == BitState::AllTrue {
-                u64::MAX
-            } else {
-                mask[w]
-            }
-        };
-        let (mut w, mut m) = (0, if limit == 0 { 0 } else { word(0) & bits::tail_mask(0, limit) });
-        let mut probe: Option<Scan> = None;
+        let outer = matches!(e.kind, ExpandStepKind::Lookup { outer: true, .. });
+        let words = table.word_index().map(|i| i.words);
+        let product = matches!(e.kind, ExpandStepKind::Product { .. });
+        let null_row = table.rows() as u64;
         let mut failed = None;
         let steps = self.steps;
-        let (outer, lookup) = match &e.kind {
-            ExpandStepKind::Lookup { outer, .. } => (*outer, true),
-            ExpandStepKind::Product { .. } => (false, false),
-        };
-        let words = bits::words(limit);
-        let words_keys = table.word_keys();
-        if state != BitState::AllFalse {
-            loop {
-                let ids = self.home[e.row.0] as *mut u64;
-                let mut count = 0;
-                self.parents.clear();
-                while count < WINDOW {
-                    let Some(p) = &mut probe else {
-                        // The next input row.
-                        while m == 0 && w + 1 < words {
-                            w += 1;
-                            m = word(w) & bits::tail_mask(w, limit);
-                        }
-                        if m == 0 {
-                            break;
-                        }
-                        let r = w * 64 + m.trailing_zeros() as usize;
-                        m &= m - 1;
-                        let mut word_key = 0;
-                        let rows = match &e.kind {
-                            ExpandStepKind::Lookup {
-                                keys, nulls_equal, ..
-                            } => {
-                                if words_keys {
-                                    let k = &keys[0];
-                                    if k.validity().is_none_or(|v| self.get(v, r) != 0) {
-                                        word_key = self.get(k.value().unwrap(), r);
-                                        table.bucket(Probe::Word(word_key))
-                                    } else {
-                                        0..0
-                                    }
-                                } else {
-                                    cells.clear();
-                                    cells.extend(keys.iter().map(|k| self.cell(k, r)));
-                                    if table.encode(&cells, *nulls_equal, &mut key) {
-                                        table.bucket(Probe::Encoded(&key))
-                                    } else {
-                                        0..0
-                                    }
-                                }
-                            }
-                            ExpandStepKind::Product { .. } => 0..table.rows() as u32,
-                        };
-                        probe = Some(Scan {
-                            row: r as u32,
-                            rows,
-                            matched: false,
-                            word: word_key,
-                        });
-                        continue;
-                    };
-                    while count < WINDOW && p.rows.start < p.rows.end {
-                        let t = p.rows.start;
-                        p.rows.start += 1;
-                        let hit = match (lookup, words_keys) {
-                            (false, _) => true,
-                            (true, true) => table.equal_word(t, p.word),
-                            (true, false) => table.equal(t, &key),
-                        };
-                        if hit {
-                            self.parents.push(p.row);
-                            // SAFETY: row slots hold a window of words.
-                            unsafe { *ids.add(count) = t as u64 };
-                            count += 1;
-                            p.matched = true;
-                        }
+        // The probe being scanned, the next table row to compare and
+        // whether the probe matched yet.
+        let (mut c, mut at, mut matched) = (0, probes.lo.first().copied().unwrap_or(0), false);
+        let mut key_start = 0;
+        loop {
+            let ids = self.home[e.row.0] as *mut u64;
+            let mut count = 0;
+            self.parents.clear();
+            while count < WINDOW && c < probes.rows.len() {
+                let (row, hi) = (probes.rows[c], probes.hi[c]);
+                let emit = |t: u32, count: &mut usize, parents: &mut Vec<u32>| {
+                    parents.push(row);
+                    // SAFETY: row slots hold a window of words.
+                    unsafe { *ids.add(*count) = t as u64 };
+                    *count += 1;
+                };
+                if product {
+                    while at < hi && count < WINDOW {
+                        emit(at, &mut count, &mut self.parents);
+                        at += 1;
                     }
-                    if p.rows.start < p.rows.end {
+                    matched |= at > probes.lo[c];
+                } else if let Some(words) = words {
+                    let key = probes.words[c];
+                    while at < hi && count < WINDOW {
+                        if words[at as usize] == key {
+                            emit(at, &mut count, &mut self.parents);
+                            matched = true;
+                        }
+                        at += 1;
+                    }
+                } else {
+                    let key = &probes.keys[key_start..probes.words[c] as usize];
+                    while at < hi && count < WINDOW {
+                        if table.equal(at, key) {
+                            emit(at, &mut count, &mut self.parents);
+                            matched = true;
+                        }
+                        at += 1;
+                    }
+                }
+                if at < hi {
+                    break;
+                }
+                if outer && !matched {
+                    if count == WINDOW {
                         break;
                     }
-                    if outer && !p.matched {
-                        if count == WINDOW {
-                            break;
-                        }
-                        self.parents.push(p.row);
-                        // SAFETY: as above.
-                        unsafe { *ids.add(count) = table.rows() as u64 };
-                        count += 1;
-                    }
-                    probe = None;
+                    emit(null_row as u32, &mut count, &mut self.parents);
                 }
-                if count == 0 {
-                    break;
+                if !product && words.is_none() {
+                    key_start = probes.words[c] as usize;
                 }
-                self.n = count;
-                self.limit = count;
-                self.window(e.block);
-                self.ptrs[e.row.0] = self.home[e.row.0];
-                for step in &steps.blocks[e.block].steps {
-                    self.step(step)?;
-                }
-                self.reduce(e);
-                if self.limit < self.n {
-                    failed = Some(self.parents[self.limit] as usize);
-                    break;
-                }
+                c += 1;
+                at = probes.lo.get(c).copied().unwrap_or(0);
+                matched = false;
+            }
+            if count == 0 {
+                break;
+            }
+            self.n = count;
+            self.limit = count;
+            self.window(e.block);
+            self.ptrs[e.row.0] = self.home[e.row.0];
+            for step in &steps.blocks[e.block].steps {
+                self.step(step)?;
+            }
+            self.reduce(e);
+            if self.limit < self.n {
+                failed = Some(self.parents[self.limit] as usize);
+                break;
             }
         }
         self.n = n;
@@ -179,8 +161,7 @@ impl Frame<'_> {
         let enclosing = self.lineage.pop().unwrap();
         let rows = std::mem::replace(&mut self.parents, enclosing);
         self.spare.rows.push(rows);
-        self.spare.keys.push(key);
-        self.spare.cells.push(cells);
+        self.spare.probes.push(probes);
         for r in &e.reduces {
             for (_, out) in &r.any {
                 self.ptrs[out.0] = self.home[out.0];
@@ -189,6 +170,62 @@ impl Frame<'_> {
             self.masks[r.domain.0] = self.masks[e.input.0];
         }
         Ok(())
+    }
+
+    /// The input rows below the limit that may match and their buckets;
+    /// with `outer`, every input row.
+    fn probes(&mut self, e: &ExpandStep, table: &Table, probes: &mut Probes) {
+        probes.clear();
+        let Some(rows) = Rows::new(&[self.mask(e.input)], self.limit) else {
+            return;
+        };
+        let (keys, nulls_equal, outer) = match &e.kind {
+            ExpandStepKind::Product { .. } => {
+                let all = 0..table.rows() as u32;
+                rows.each(|r| probes.push(r, all.clone(), 0));
+                return;
+            }
+            ExpandStepKind::Lookup {
+                keys,
+                nulls_equal,
+                outer,
+                ..
+            } => (keys, *nulls_equal, *outer),
+        };
+        if let Some(index) = table.word_index() {
+            let k = &keys[0];
+            let mut words = [0u64; WINDOW];
+            self.load_words(k.value().unwrap(), &mut words[..self.n]);
+            let valid = k
+                .validity()
+                .filter(|v| self.states[v.0] != BitState::AllTrue)
+                .map(|v| -> [u64; WORDS] { self.words(v).try_into().unwrap() });
+            rows.each(|r| {
+                let ok = valid.is_none_or(|v| v[r / 64] >> (r % 64) & 1 != 0);
+                let range = if ok { index.bucket(words[r]) } else { 0..0 };
+                if outer || range.start < range.end {
+                    probes.push(r, range, words[r]);
+                }
+            });
+            return;
+        }
+        let mut cells = self.spare.cells.pop().unwrap_or_default();
+        let mut key = self.spare.keys.pop().unwrap_or_default();
+        rows.each(|r| {
+            cells.clear();
+            cells.extend(keys.iter().map(|k| self.cell(k, r)));
+            let range = if table.encode(&cells, nulls_equal, &mut key) {
+                table.bucket(&key)
+            } else {
+                0..0
+            };
+            if outer || range.start < range.end {
+                probes.keys.extend_from_slice(&key);
+                probes.push(r, range, probes.keys.len() as u64);
+            }
+        });
+        self.spare.cells.push(cells);
+        self.spare.keys.push(key);
     }
 
     /// ORs the reduced Booleans of a window into its enclosing rows.
