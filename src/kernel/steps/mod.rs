@@ -177,6 +177,8 @@ pub(crate) struct Update {
     pub validity: Option<VariableId>,
     /// The column of an integer sum.
     pub sum: Option<VariableId>,
+    /// The column of a 128-bit sum or average.
+    pub wide: Option<VariableId>,
     /// COUNT of a NULL-typed argument: nothing to do.
     pub none: bool,
 }
@@ -197,14 +199,21 @@ impl Update {
             }
             _ => None,
         };
+        let wide = match (kind, arguments) {
+            (K::SumI128 | K::AvgI128, [B::Int128 { value, .. }]) if !vars[value.0].scalar() => {
+                Some(*value)
+            }
+            _ => None,
+        };
         Self {
             kind,
             validity: match kind {
                 K::CountValues => valid,
-                _ if sum.is_some() => valid,
+                _ if sum.is_some() || wide.is_some() => valid,
                 _ => None,
             },
             sum,
+            wide,
             none: kind == K::CountValues && matches!(arguments, [a] if a.is_null_type()),
         }
     }
@@ -1022,6 +1031,7 @@ fn rename(step: &mut Step, map: &HashMap<VariableId, VariableId>) {
             for u in updates {
                 u.update.validity.iter_mut().for_each(r);
                 u.update.sum.iter_mut().for_each(r);
+                u.update.wide.iter_mut().for_each(r);
                 u.arguments.iter_mut().for_each(|a| rename_binding(a, map));
             }
         }

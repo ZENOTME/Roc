@@ -407,6 +407,41 @@ impl Frame<'_> {
             }
             _ => {}
         }
+        if let Some(value) = aggregate.update.wide {
+            // Rows are valid arguments; sums wrap like the row kernels'.
+            let values = self.ptrs[value.0] as *const i128;
+            let average = kind == K::AvgI128;
+            let groups = accumulator.groups_mut();
+            if constant {
+                let mut total = 0i128;
+                // SAFETY: 128-bit slots hold a window of aligned values.
+                rows.each(|r| total = total.wrapping_add(unsafe { *values.add(r) }));
+                let g = &mut groups[id(0)];
+                if count != 0 {
+                    g.sum = Cell::wide(g.sum.value128().wrapping_add(total));
+                }
+                if average {
+                    g.count = g.count.checked_add(count as i64).ok_or_else(overflow)?;
+                }
+            } else {
+                let base = groups.as_mut_ptr();
+                let mut overflowed = false;
+                rows.each(|r| {
+                    // SAFETY: as for counts; the values cover the window.
+                    let (g, v) = unsafe { (&mut *base.add(*ids.add(r) as usize), *values.add(r)) };
+                    g.sum = Cell::wide(g.sum.value128().wrapping_add(v));
+                    if average {
+                        let (c, o) = g.count.overflowing_add(1);
+                        g.count = c;
+                        overflowed |= o;
+                    }
+                });
+                if overflowed {
+                    return Err(overflow());
+                }
+            }
+            return Ok(());
+        }
         let update = row_update(kind);
         let mut cells = Vec::with_capacity(aggregate.arguments.len());
         let mut result = Ok(());
