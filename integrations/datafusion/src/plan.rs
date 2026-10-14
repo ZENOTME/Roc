@@ -345,6 +345,14 @@ impl Translator<'_> {
             )
             .await
             .map_err(external)?;
+        // DataFusion splits files into partitions when it optimizes physical
+        // plans, which a provider's scan is not yet: split it here, so Roc's
+        // workers share the scan.
+        let config = self.state.config_options();
+        let plan = plan
+            .repartitioned(config.execution.target_partitions, config)
+            .map_err(external)?
+            .unwrap_or(plan);
         // Only an estimate for choosing build sides.
         let rows = StatisticsContext::new()
             .compute(plan.as_ref(), &StatisticsArgs::new())
