@@ -339,6 +339,18 @@ pub async fn run(
     mode: ExecutionMode,
     parallelism: usize,
 ) -> Outcome {
+    run_repeated(ctx, sql, mode, parallelism, 1).await
+}
+
+/// Like `run`, with each engine running `runs` times: times are the best
+/// run's, and the last results are validated.
+pub async fn run_repeated(
+    ctx: &SessionContext,
+    sql: &str,
+    mode: ExecutionMode,
+    parallelism: usize,
+    runs: usize,
+) -> Outcome {
     let mut outcome = Outcome {
         stage: Stage::Plan(String::new()),
         rows: 0,
@@ -353,9 +365,23 @@ pub async fn run(
             return outcome;
         }
     };
-    let start = Instant::now();
-    let roc = run_roc(ctx, &plan, mode, parallelism, &mut outcome.phases).await;
-    outcome.roc = Some(start.elapsed());
+    let best = |best: &mut Option<Duration>, start: Instant| {
+        let t = start.elapsed();
+        *best = Some(best.map_or(t, |b| b.min(t)));
+    };
+    let mut roc = Ok(vec![]);
+    for _ in 0..runs.max(1) {
+        let start = Instant::now();
+        let mut phases = Phases::default();
+        roc = run_roc(ctx, &plan, mode, parallelism, &mut phases).await;
+        if outcome.roc.is_none_or(|b| start.elapsed() < b) {
+            outcome.phases = phases;
+        }
+        best(&mut outcome.roc, start);
+        if roc.is_err() {
+            break;
+        }
+    }
     let roc = match roc {
         Ok(batches) => batches,
         Err(stage) => {
@@ -363,13 +389,16 @@ pub async fn run(
             return outcome;
         }
     };
-    let start = Instant::now();
     let checked = plan.clone();
-    let expected = match ctx.execute_logical_plan(plan).await {
-        Ok(frame) => frame.collect().await,
-        Err(e) => Err(e),
-    };
-    outcome.datafusion = Some(start.elapsed());
+    let mut expected = Ok(vec![]);
+    for _ in 0..runs.max(1) {
+        let start = Instant::now();
+        expected = match ctx.execute_logical_plan(plan.clone()).await {
+            Ok(frame) => frame.collect().await,
+            Err(e) => Err(e),
+        };
+        best(&mut outcome.datafusion, start);
+    }
     let order = output_order(&checked);
     let expected = match expected {
         Ok(batches) => batches,

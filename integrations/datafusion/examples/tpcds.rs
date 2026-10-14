@@ -17,18 +17,34 @@
 //!
 //!     cargo run --release -p roc-datafusion --example tpcds -- \
 //!         <data-dir> [--mode compile|zero] [--workers N] [--timeout SECONDS] [--verbose]
-//!         [--repeat N: run Roc alone N times, for profiling] [--explain: print pipelines]
-//!         [--set datafusion.option=value]
+//!         [--repeat N: best of N runs of each engine] [--profile: with --repeat, Roc alone]
+//!         [--explain: print pipelines]
+//!         [--set datafusion.option=value] [--sql STATEMENT: run it instead]
 //!         [--report FILE] [query...]
 use roc::kernel::ExecutionMode;
 use roc_datafusion::{
-    run::{Stage, run},
+    run::{Stage, run_repeated},
     tpcds,
 };
 use std::fmt::Write;
 
-#[tokio::main]
-async fn main() -> datafusion::error::Result<()> {
+/// Both engines run on a runtime of `--workers` threads, and DataFusion
+/// plans as many partitions, so they compare on the same cores.
+fn main() -> datafusion::error::Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let workers = args
+        .iter()
+        .position(|a| a == "--workers")
+        .map_or(4, |i| args[i + 1].parse().unwrap());
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run_all())
+}
+
+async fn run_all() -> datafusion::error::Result<()> {
     let mut args = std::env::args().skip(1);
     let data = std::path::PathBuf::from(args.next().expect("a data directory"));
     let mut mode = ExecutionMode::Compile;
@@ -37,9 +53,11 @@ async fn main() -> datafusion::error::Result<()> {
     let mut timeout = 120;
     let mut verbose = false;
     let mut repeat = 0;
+    let mut profile = false;
     let mut explain = false;
+    let mut sql = None;
     let mut only = vec![];
-    let mut config = datafusion::prelude::SessionConfig::new();
+    let mut settings = vec![];
     while let Some(a) = args.next() {
         match a.as_str() {
             "--mode" => {
@@ -53,14 +71,17 @@ async fn main() -> datafusion::error::Result<()> {
             "--timeout" => timeout = args.next().unwrap().parse().unwrap(),
             "--verbose" => verbose = true,
             "--explain" => explain = true,
+            "--sql" => sql = args.next(),
             "--repeat" => repeat = args.next().unwrap().parse().unwrap(),
-            "--set" => {
-                let setting = args.next().unwrap();
-                let (key, value) = setting.split_once('=').expect("--set key=value");
-                config = config.set_str(key, value);
-            }
+            "--profile" => profile = true,
+            "--set" => settings.push(args.next().unwrap()),
             q => only.push(q.to_string()),
         }
+    }
+    let mut config = datafusion::prelude::SessionConfig::new().with_target_partitions(workers);
+    for setting in &settings {
+        let (key, value) = setting.split_once('=').expect("--set key=value");
+        config = config.set_str(key, value);
     }
     let ctx = datafusion::prelude::SessionContext::new_with_config(config);
     tpcds::register_tables(&ctx, &data).await?;
@@ -72,7 +93,13 @@ async fn main() -> datafusion::error::Result<()> {
     .unwrap();
     writeln!(table, "| --- | --- | ---: | ---: | ---: | ---: | --- |").unwrap();
     let mut passed = 0;
-    let statements = tpcds::statements(&tpcds::query_dir())?;
+    let mut statements = tpcds::statements(&tpcds::query_dir())?;
+    if let Some(sql) = sql {
+        statements = vec![tpcds::Statement {
+            name: "sql".into(),
+            sql,
+        }];
+    }
     let mut total = 0;
     for s in &statements {
         if !only.is_empty() && !only.contains(&s.name) {
@@ -87,7 +114,7 @@ async fn main() -> datafusion::error::Result<()> {
             }
             continue;
         }
-        if repeat > 0 {
+        if repeat > 0 && profile {
             // Profiling: run Roc alone, again and again.
             let plan = roc_datafusion::run::plan(&ctx, &s.sql).await?;
             let mut best = std::time::Duration::MAX;
@@ -103,7 +130,13 @@ async fn main() -> datafusion::error::Result<()> {
             continue;
         }
         let limit = std::time::Duration::from_secs(timeout);
-        let outcome = match tokio::time::timeout(limit, run(&ctx, &s.sql, mode, workers)).await {
+        let runs = repeat.max(1);
+        let outcome = match tokio::time::timeout(
+            limit,
+            run_repeated(&ctx, &s.sql, mode, workers, runs),
+        )
+        .await
+        {
             Ok(outcome) => outcome,
             Err(_) => roc_datafusion::run::Outcome {
                 stage: Stage::Execute(format!("timed out after {timeout} s")),
