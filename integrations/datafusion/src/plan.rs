@@ -31,7 +31,10 @@ use datafusion::{
         WindowFrameBound, WindowFrameUnits, expr::AggregateFunction as DfAggregate,
         expr::WindowFunction as DfWindow,
     },
-    physical_plan::ExecutionPlan,
+    physical_plan::{
+        ExecutionPlan,
+        statistics::{StatisticsArgs, StatisticsContext},
+    },
 };
 use roc::{
     column::{ColumnContext, ColumnId, ColumnType},
@@ -258,9 +261,8 @@ impl Translator<'_> {
             .await
             .map_err(external)?;
         // Only an estimate for choosing build sides.
-        #[allow(deprecated)]
-        let rows = plan
-            .partition_statistics(None)
+        let rows = StatisticsContext::new()
+            .compute(plan.as_ref(), &StatisticsArgs::new())
             .ok()
             .and_then(|s| s.num_rows.get_value().copied())
             .unwrap_or(1_000_000) as f64;
