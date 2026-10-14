@@ -284,13 +284,14 @@ impl Frame<'_> {
             self.bounds[output.0] = index.len();
             return Ok(());
         }
-        let mut cells = Vec::with_capacity(keys.len());
+        let mut cells = self.spare.cells.pop().unwrap_or_default();
         rows.each(|r| {
             cells.clear();
             cells.extend(keys.iter().map(|k| self.cell(k, r)));
             // SAFETY: ids cover the window.
             unsafe { *ids.add(r) = index.intern_row(&cells) as u64 };
         });
+        self.spare.cells.push(cells);
         self.bounds[output.0] = index.len();
         Ok(())
     }

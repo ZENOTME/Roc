@@ -33,14 +33,14 @@ impl Frame<'_> {
             .expect("table states are bound");
         // SAFETY: the state keeps the table alive for the run.
         let table: &Table = unsafe { &*read.table };
-        let mut pairs = std::mem::take(&mut self.pairs);
+        let mut pairs = self.spare.pairs.pop().unwrap_or_default();
         pairs.clear();
         let (mask, state) = self.mask(e.input);
         let mask: [u64; WORDS] = mask.try_into().unwrap();
         if state != BitState::AllFalse {
             let limit = self.limit;
-            let mut key = std::mem::take(&mut self.key);
-            let mut cells = vec![];
+            let mut key = self.spare.keys.pop().unwrap_or_default();
+            let mut cells = self.spare.cells.pop().unwrap_or_default();
             for w in 0..bits::words(limit) {
                 let mut m = if state == BitState::AllTrue {
                     u64::MAX
@@ -81,11 +81,14 @@ impl Frame<'_> {
                     }
                 }
             }
-            self.key = key;
+            self.spare.keys.push(key);
+            self.spare.cells.push(cells);
         }
         let (n, limit) = (self.n, self.limit);
-        let parents = std::mem::take(&mut self.parents);
-        let roots = std::mem::take(&mut self.roots);
+        let rows = self.spare.rows.pop().unwrap_or_default();
+        let parents = std::mem::replace(&mut self.parents, rows);
+        let rows = self.spare.rows.pop().unwrap_or_default();
+        let roots = std::mem::replace(&mut self.roots, rows);
         for r in &e.reduces {
             for (_, out) in &r.any {
                 // SAFETY: Boolean slots hold a window bitmap.
@@ -126,7 +129,8 @@ impl Frame<'_> {
                 }
                 let m: [u64; WORDS] = m.try_into().unwrap();
                 for &(v, out) in &r.any {
-                    let (values, vs) = (self.words(v).to_vec(), self.states[v.0]);
+                    let values: [u64; WORDS] = self.words(v).try_into().unwrap();
+                    let vs = self.states[v.0];
                     if vs == BitState::AllFalse {
                         continue;
                     }
@@ -155,9 +159,11 @@ impl Frame<'_> {
         }
         self.n = n;
         self.limit = failed.map_or(limit, |p| p.min(limit));
-        self.parents = parents;
-        self.roots = roots;
-        self.pairs = pairs;
+        let rows = std::mem::replace(&mut self.parents, parents);
+        self.spare.rows.push(rows);
+        let rows = std::mem::replace(&mut self.roots, roots);
+        self.spare.rows.push(rows);
+        self.spare.pairs.push(pairs);
         for r in &e.reduces {
             for (_, out) in &r.any {
                 self.ptrs[out.0] = self.home[out.0];

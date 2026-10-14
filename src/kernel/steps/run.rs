@@ -164,6 +164,17 @@ pub(crate) struct Buffers {
     groups: Vec<*mut GroupState>,
     accumulators: Vec<*mut AccumulatorState>,
     bounds: Vec<usize>,
+    spare: Spare,
+}
+
+/// Vectors of expansions; each (nested) expansion takes its own and gives
+/// them back, so windows and chunks reuse them.
+#[derive(Default)]
+pub(super) struct Spare {
+    pub rows: Vec<Vec<u32>>,
+    pub pairs: Vec<Vec<(u32, u32)>>,
+    pub keys: Vec<Vec<u8>>,
+    pub cells: Vec<Vec<Cell>>,
 }
 
 impl std::fmt::Debug for Buffers {
@@ -208,9 +219,7 @@ pub(super) struct Frame<'a> {
     /// window, and its row in the root window. Empty in the root block.
     pub parents: Vec<u32>,
     pub roots: Vec<u32>,
-    /// Reused by expansions: (enclosing row, table row) pairs and keys.
-    pub pairs: Vec<(u32, u32)>,
-    pub key: Vec<u8>,
+    pub spare: Spare,
 }
 
 /// A table and readers of its columns; the state keeps the table alive.
@@ -369,8 +378,7 @@ impl Steps {
             tables,
             parents: vec![],
             roots: vec![],
-            pairs: vec![],
-            key: vec![],
+            spare: std::mem::take(&mut b.spare),
         };
         for (v, var) in self.vars.iter().enumerate() {
             if let Place::Constant(i) = var.place {
@@ -401,6 +409,7 @@ impl Steps {
             groups: frame.groups,
             accumulators: frame.accumulators,
             bounds: frame.bounds,
+            spare: frame.spare,
         };
         result
     }

@@ -831,12 +831,18 @@ impl ColumnVariableBinding {
         fixed_bindings!(arms)
     }
 
-    /// The single value variable of a fixed-width binding.
+    /// The single value variable of a fixed-width binding. Execution reads
+    /// it per row, so it does not allocate.
     pub fn value(&self) -> Option<VariableId> {
-        match self.values().as_slice() {
-            [value] => Some(*value),
-            _ => None,
+        macro_rules! arms {
+            ($($v:ident),*) => {
+                match self {
+                    $(Self::$v { value, .. })|* => Some(*value),
+                    Self::Bytes { .. } | Self::Null { .. } => None,
+                }
+            };
         }
+        fixed_bindings!(arms)
     }
 
     pub fn variables(&self) -> Vec<VariableId> {
