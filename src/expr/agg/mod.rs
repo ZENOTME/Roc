@@ -15,18 +15,4 @@
 //! Aggregate descriptions are separate from scalar expressions.
 pub(crate) mod accumulator;
 mod aggregate;
-#[cfg(test)]
-pub(crate) mod test_support;
 pub use aggregate::{AggregateExpression, AggregateFunction};
-
-#[cfg(test)]
-#[path = "tests/agg_optimized.rs"]
-mod agg_optimized;
-
-#[cfg(test)]
-#[path = "tests/aggregate_compatibility.rs"]
-mod aggregate_compatibility;
-
-#[cfg(test)]
-#[path = "tests/aggregate_hotloop.rs"]
-mod aggregate_hotloop;
