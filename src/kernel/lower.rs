@@ -346,10 +346,15 @@ impl KernelBuilder<'_> {
             Ok(out)
         };
         match (decimal(from), decimal(to)) {
-            (Some((_, s1)), Some((p2, s2))) => {
+            (Some((p1, s1)), Some((p2, s2))) => {
                 let r = self.rescale(value, s1, s2, KernelError::InvalidCast)?;
                 let mut flags = r.flags.iter().map(|f| f.0).collect::<Vec<_>>();
-                flags.push(self.exceeds_precision(r.value, p2)?);
+                // A value of p1 digits has p1 + s2 - s1 after rescaling, one
+                // more when rounding carries; those that fit cannot fail.
+                let digits = p1 as i32 + s2 as i32 - s1 as i32 + (s2 < s1) as i32;
+                if digits > p2 as i32 {
+                    flags.push(self.exceeds_precision(r.value, p2)?);
+                }
                 Ok((r.value, VariableType::Int128, any(self, flags)?))
             }
             (Some((_, s1)), None) => {
