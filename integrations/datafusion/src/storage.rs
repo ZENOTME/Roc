@@ -69,13 +69,16 @@ impl DataFusionScan {
     }
 }
 
-/// Pulls DataFusion streams directly, without a second producer or batch queue.
+/// Reads DataFusion's partition streams for Roc consumers.
 ///
 /// Consumers share an unordered work pool: each DataFusion output partition is
-/// assigned once, and a consumer drains its partition before claiming another.
-/// There is no promise of global ordering, or of a stable partition-to-worker
-/// mapping. Use at least as many Roc workers as scan partitions for full I/O
-/// concurrency. DataFusion execution may require an active Tokio runtime.
+/// assigned once. There is no promise of global ordering, or of a stable
+/// partition-to-consumer mapping. Inside a Tokio runtime, the first read of a
+/// consumer starts one task per partition that drains partitions from the
+/// pool into the consumer's bounded queue, so partitions decode in parallel
+/// on the runtime's threads; a Roc pipeline reads its source from one
+/// coordinator. Without a runtime, a consumer drains one partition at a time
+/// as it is polled. DataFusion execution may require an active Tokio runtime.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DataFusionStorage;
 
@@ -100,6 +103,7 @@ impl ScanStorage for DataFusionStorage {
                 stopped: AtomicBool::new(false),
                 error: Mutex::new(None),
                 consumers: Mutex::new(Vec::new()),
+                tasks: Mutex::new(Vec::new()),
             }),
         }))
     }
@@ -114,6 +118,8 @@ struct Shared {
     /// it returns the error itself; the others report a failure of that kind.
     error: Mutex<Option<(ErrorKind, String)>>,
     consumers: Mutex<Vec<Weak<ConsumerSlot>>>,
+    /// The decoding tasks of consumers, aborted when the scan stops.
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Shared {
@@ -127,11 +133,50 @@ impl Shared {
             }
             self.stopped.store(true, Ordering::Release);
         }
+        for task in self.tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
         let consumers = self.consumers.lock().unwrap();
         for consumer in consumers.iter().filter_map(Weak::upgrade) {
             consumer.stream.lock().unwrap().take();
             consumer.waker.wake();
         }
+    }
+
+    /// Drains partitions from the pool into `queue` until none is left, the
+    /// scan stops or the consumer is gone. A failure goes to the queue first,
+    /// with its source and context, then stops the scan.
+    async fn decode(self: Arc<Self>, queue: tokio::sync::mpsc::Sender<Result<RecordBatch>>) {
+        use futures::StreamExt;
+        loop {
+            if self.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            let partition = self.next_partition.fetch_add(1, Ordering::Relaxed);
+            if partition >= self.source.partition_count() {
+                return;
+            }
+            let mut stream = match self.source.plan.execute(partition, self.source.context.clone()) {
+                Ok(stream) => stream,
+                Err(error) => return self.fail(&queue, scan_error(partition, error)).await,
+            };
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(batch) => {
+                        if queue.send(Ok(batch)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => return self.fail(&queue, scan_error(partition, error)).await,
+                }
+            }
+        }
+    }
+
+    async fn fail(&self, queue: &tokio::sync::mpsc::Sender<Result<RecordBatch>>, error: Error) {
+        let (kind, message) = (error.kind(), error.message().to_owned());
+        let _ = queue.send(Err(error)).await;
+        self.stop(Some(&Error::new(kind, message)));
     }
 
     fn terminal_result(&self) -> Result<Option<RecordBatch>> {
@@ -158,6 +203,7 @@ impl ScanHandle for Handle {
         Box::new(Consumer {
             shared: self.shared.clone(),
             slot,
+            queue: None,
         })
     }
 
@@ -185,11 +231,54 @@ struct ConsumerSlot {
 struct Consumer {
     shared: Arc<Shared>,
     slot: Arc<ConsumerSlot>,
+    /// The queue of the decoding tasks, once started.
+    queue: Option<tokio::sync::mpsc::Receiver<Result<RecordBatch>>>,
 }
 
 impl Consumer {
+    /// Starts the decoding tasks inside a Tokio runtime.
+    fn start_tasks(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let partitions = self.shared.source.partition_count();
+        let (sender, receiver) = tokio::sync::mpsc::channel(2 * partitions.max(1));
+        let mut tasks = self.shared.tasks.lock().unwrap();
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        for _ in 0..partitions {
+            tasks.push(runtime.spawn(self.shared.clone().decode(sender.clone())));
+        }
+        self.queue = Some(receiver);
+    }
+
+    fn poll_queue(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<RecordBatch>>> {
+        let queue = self.queue.as_mut().unwrap();
+        if self.shared.stopped.load(Ordering::Acquire) {
+            // A decoding failure is reported with its source.
+            while let Ok(item) = queue.try_recv() {
+                if let Err(error) = item {
+                    return Poll::Ready(Err(error));
+                }
+            }
+            return Poll::Ready(self.shared.terminal_result());
+        }
+        match queue.poll_recv(cx) {
+            Poll::Ready(Some(item)) => Poll::Ready(item.map(Some)),
+            Poll::Ready(None) => Poll::Ready(self.shared.terminal_result()),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<RecordBatch>>> {
         self.slot.waker.register(cx.waker());
+        if self.queue.is_none() && self.slot.stream.lock().unwrap().is_none() {
+            self.start_tasks();
+        }
+        if self.queue.is_some() {
+            return self.poll_queue(cx);
+        }
         loop {
             let mut current = self.slot.stream.lock().unwrap();
             if self.shared.stopped.load(Ordering::Acquire) {
