@@ -299,6 +299,38 @@ fn products_pair_every_row_and_empty_builds_match_nothing() {
     }
 }
 
+/// A probe pipeline whose rows all need a match in an empty table does not
+/// read its input; a global aggregate after it still has its one row, and a
+/// semi join with the empty table filters every row.
+#[test]
+fn empty_tables_leave_global_aggregates_their_row() {
+    for join_type in [JoinType::Inner, JoinType::Semi] {
+        let mut plan = Plan::new(probe_rows(5000), vec![]);
+        let (join, out, _) = plan.join(join_type, |_, _| None);
+        let total = plan.column("total", DataType::Int64);
+        let count = plan.column("count", DataType::Int64);
+        let aggregate = AggregateOperator::try_new(
+            vec![],
+            vec![
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Sum,
+                    vec![reference(out[1])],
+                    total,
+                )),
+                Arc::new(AggregateExpression::new(
+                    AggregateFunction::Count,
+                    vec![],
+                    count,
+                )),
+            ],
+        )
+        .unwrap();
+        let node = OperatorTreeNode::new(aggregate, vec![join]);
+        let rows = execute_all(&plan.columns, &node).unwrap();
+        assert_eq!(rows, [["NULL".to_string(), "0".into()]], "{join_type:?}");
+    }
+}
+
 #[test]
 fn work_after_a_join_reads_both_sides_and_aggregates_matches() {
     let mut plan = Plan::new(probe_rows(5000), build_rows());

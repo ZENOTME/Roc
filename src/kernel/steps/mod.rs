@@ -378,6 +378,8 @@ pub(crate) struct Steps {
     bit_slots: usize,
     /// Per domain: the bitmap slot of its mask; None for the root.
     masks: Vec<Option<usize>>,
+    /// Per domain: its parent.
+    parents: Vec<Option<DomainId>>,
     /// Per input: whether a step reads it.
     read: Vec<bool>,
     /// The output bindings, as variables of the output step's block.
@@ -1445,6 +1447,7 @@ impl Steps {
             value_slots,
             bit_slots,
             masks,
+            parents: graph.domains.iter().map(|d| d.parent).collect(),
             read,
             output_bindings,
             _bytes: bytes,
@@ -1454,6 +1457,83 @@ impl Steps {
             fuse::fuse(&mut prepared)?;
         }
         Ok(prepared)
+    }
+
+    /// Whether runs have no effect and no output on any input, given which
+    /// table states are empty. An inner expansion of an empty table never
+    /// runs its block, reductions over it are false, and filters on false
+    /// keep no rows; the program is idle when every step with an effect is
+    /// in a block or domain that therefore never runs.
+    pub fn idle(&self, empty: impl Fn(StateId) -> bool) -> bool {
+        fn effect(steps: &Steps, step: &Step) -> bool {
+            match step {
+                Step::Output { .. }
+                | Step::GroupLookup { .. }
+                | Step::Aggregates { .. }
+                | Step::RaiseIf { .. } => true,
+                Step::Fused { fallback, .. } => steps.fallback[fallback.clone()]
+                    .iter()
+                    .any(|s| matches!(s, Step::RaiseIf { .. })),
+                Step::Expand(e) => steps.blocks[e.block].steps.iter().any(|s| effect(steps, s)),
+                _ => false,
+            }
+        }
+        let mut dead = vec![false; self.parents.len()];
+        let mut falsy = vec![false; self.vars.len()];
+        let mut never = false;
+        let block = &self.blocks[0];
+        for (step, &at) in block.steps.iter().zip(&block.at) {
+            // A domain is dead with its parent; parents come first.
+            let mut d = Some(at);
+            while let Some(x) = d {
+                if dead[x.0] {
+                    dead[at.0] = true;
+                    break;
+                }
+                d = self.parents[x.0];
+            }
+            if dead[at.0] {
+                never = true;
+                continue;
+            }
+            match step {
+                Step::Expand(e)
+                    if !matches!(e.kind, ExpandStepKind::Lookup { outer: true, .. })
+                        && empty(e.kind.state()) =>
+                {
+                    never |= e.reduces.is_empty();
+                    for r in &e.reduces {
+                        for (_, out) in &r.any {
+                            falsy[out.0] = true;
+                        }
+                    }
+                }
+                Step::Bits { op, a, b, output } => {
+                    falsy[output.0] = match op {
+                        BitOp::And => falsy[a.0] || falsy[b.0],
+                        BitOp::Or => falsy[a.0] && falsy[b.0],
+                        BitOp::Not => false,
+                    }
+                }
+                Step::Fused { fallback, .. } if !effect(self, step) => {
+                    for s in &self.fallback[fallback.clone()] {
+                        if let Step::Bits { op, a, b, output } = s {
+                            falsy[output.0] = match op {
+                                BitOp::And => falsy[a.0] || falsy[b.0],
+                                BitOp::Or => falsy[a.0] && falsy[b.0],
+                                BitOp::Not => false,
+                            }
+                        }
+                    }
+                }
+                Step::Filter {
+                    predicate, domain, ..
+                } => dead[domain.0] = falsy[predicate.0],
+                step if effect(self, step) => return false,
+                _ => {}
+            }
+        }
+        never
     }
 
     /// Whether the only step is the output: the program computes nothing.

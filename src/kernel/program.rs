@@ -167,6 +167,19 @@ impl Program {
         self.steps.ir()
     }
 
+    /// Whether running on any input would have no effect and no output,
+    /// with the tables of `local`: then the input need not be read.
+    pub fn idle(&self, local: &LocalState) -> bool {
+        self.steps.idle(|id| {
+            local
+                .states
+                .get(id.0)
+                .and_then(Option::as_ref)
+                .and_then(|s| s.get::<super::table::TableState>().ok())
+                .is_some_and(|t| t.table.rows() == 0)
+        })
+    }
+
     pub fn new_local(&self) -> Result<LocalState> {
         let states = self
             .states

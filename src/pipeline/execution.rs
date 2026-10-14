@@ -154,11 +154,14 @@ impl Pipeline {
             let mut local = self.program.new_local()?;
             let mut completed = 0;
             let mut stop = false;
-            while let Some(batch) = self
-                .source
-                .next_batch(&shutdown_guard)
-                .await
-                .with_location()?
+            // A program that does nothing on any input does not read it.
+            let idle = self.program.idle(&local);
+            while !idle
+                && let Some(batch) = self
+                    .source
+                    .next_batch(&shutdown_guard)
+                    .await
+                    .with_location()?
             {
                 if shutdown_guard.is_shutdown_requested() {
                     return Err(Error::cancelled());
@@ -230,7 +233,8 @@ impl Pipeline {
         let mut jobs = FuturesUnordered::new();
         let mut morsel: Option<RecordBatch> = None;
         let mut offset = 0;
-        let mut eof = false;
+        // A program that does nothing on any input does not read it.
+        let mut eof = idle.first().is_some_and(|l| program.idle(l));
         let mut stop = false;
         let mut completed = 0;
         loop {
