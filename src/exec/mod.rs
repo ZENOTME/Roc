@@ -21,10 +21,12 @@ use futures::future::BoxFuture;
 pub(crate) mod aggregate;
 mod exchange;
 mod scan;
+mod table;
 
 pub use aggregate::{AggregateExecuteState, AggregateSinkExec, AggregateSourceExec};
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
 pub use scan::ScanExec;
+pub use table::TableSinkExec;
 
 pub trait SourceExec: Send + 'static {
     /// Open execution resources; plan construction must not start I/O.

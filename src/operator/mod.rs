@@ -16,6 +16,7 @@ mod aggregate;
 mod collect;
 mod exchange;
 mod filter;
+mod join;
 mod project;
 mod scan;
 
@@ -26,6 +27,7 @@ pub use exchange::{
     ExchangeSinkOperator, ExchangeSourceOperator,
 };
 pub use filter::FilterOperator;
+pub use join::{JoinOperator, JoinType};
 pub use project::ProjectOperator;
 pub use scan::{
     ScanConsumer, ScanHandle, ScanOperator, ScanReceiver, ScanRequest, ScanSendError, ScanSender,
