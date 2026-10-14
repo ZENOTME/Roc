@@ -246,6 +246,35 @@ impl GroupIndex {
         self.slots = slots;
     }
 
+    /// The hash of every row's key, as this index hashes keys: equal keys
+    /// hash equally in every index of the same key types.
+    pub fn hash_rows(&self, columns: &[ArrayRef], rows: usize) -> Result<Vec<u64>> {
+        let columns = columns
+            .iter()
+            .map(scalar::decode)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(match self.keys {
+            Keys::None => vec![0; rows],
+            Keys::Word { .. } => columns[0]
+                .iter()
+                .take(rows)
+                .map(|c| if c.valid == 0 { 0 } else { hash_word(c.bits) })
+                .collect(),
+            Keys::Encoded { .. } => {
+                let mut key = vec![];
+                (0..rows)
+                    .map(|r| {
+                        key.clear();
+                        for (c, encode) in columns.iter().zip(&self.encoders) {
+                            encode(c[r], &mut key);
+                        }
+                        hash_bytes(&key)
+                    })
+                    .collect()
+            }
+        })
+    }
+
     pub fn intern(
         &mut self,
         columns: &[ArrayRef],
