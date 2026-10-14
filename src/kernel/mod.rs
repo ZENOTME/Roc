@@ -33,6 +33,7 @@ pub(crate) mod runtime;
 pub(crate) mod scalar;
 mod state;
 mod steps;
+pub mod table;
 
 pub use builder::{
     GraphInput, GraphOutput, KernelBuilder, KernelGraph, PendingError, PendingErrors,

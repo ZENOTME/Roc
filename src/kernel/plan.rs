@@ -14,11 +14,15 @@
 
 //! Liveness, placement and emission order of one fused program.
 //!
-//! Pure kernels are total, so they may run in any descendant of their domain
-//! that contains all uses: each is placed in the lowest common ancestor of its
-//! uses. Effectful kernels (RaiseIf, GroupLookup, AggregateUpdate) stay in
-//! their declared domain. Items are emitted in builder order, except that an
-//! item never precedes the Filter that creates its placement domain.
+//! Domains belong to row spaces: the root and every Expand output start one;
+//! Filter and Reduce outputs share their parent's. Pure kernels are total, so
+//! they may run in any descendant of their domain within its space that
+//! contains all uses: each is placed in the lowest such common ancestor of
+//! its uses. A kernel never moves into another space, where it would run once
+//! per expanded row. Effectful kernels (RaiseIf, GroupLookup, AggregateUpdate)
+//! stay in their declared domain. Items are emitted in builder order, except
+//! that an item never precedes the domain kernel that creates its placement
+//! domain.
 //!
 //! Both execution modes run the same plan: generated code fuses it into one
 //! row loop, zero-compile execution runs each item over a whole chunk.
@@ -32,6 +36,8 @@ pub(crate) enum Item {
 
 pub(crate) struct Plan {
     pub items: Vec<(Item, DomainId)>,
+    /// Per domain: the domain that starts its row space.
+    pub spaces: Vec<DomainId>,
     /// Indexed by StateId; None for states of dead kernels.
     pub states: Vec<Option<StateKind>>,
     /// Per output column: the input whose array it reuses.
@@ -42,6 +48,7 @@ pub(crate) struct Plan {
 pub(crate) enum StateKind {
     Group,
     Accumulator,
+    Table,
 }
 
 impl Plan {
@@ -51,6 +58,19 @@ impl Plan {
         for (i, parent) in parents.iter().enumerate() {
             if let Some(p) = parent {
                 depth[i] = depth[p.0] + 1;
+            }
+        }
+        // Domains are allocated after their parents.
+        let mut spaces = (0..parents.len()).map(DomainId).collect::<Vec<_>>();
+        let mut expanded = vec![false; parents.len()];
+        for (_, kernel) in &graph.kernels {
+            if let Kernel::Domain(DomainKernel::Expand { output, .. }) = kernel {
+                expanded[output.0] = true;
+            }
+        }
+        for d in 1..parents.len() {
+            if !expanded[d] {
+                spaces[d] = spaces[parents[d].unwrap().0];
             }
         }
         let lca = |a: Option<DomainId>, b: DomainId| -> DomainId {
@@ -97,7 +117,11 @@ impl Plan {
                                 p = Some(lca(p, u));
                             }
                         }
-                        let Some(p) = p else { continue };
+                        let Some(mut p) = p else { continue };
+                        // Stay in the space of the declared domain.
+                        while spaces[p.0] != spaces[domain.0] {
+                            p = parents[p.0].unwrap();
+                        }
                         p
                     };
                     live[k] = true;
@@ -107,20 +131,38 @@ impl Plan {
                         uses[v.0] = Some(lca(uses[v.0], p));
                     }
                 }
-                Kernel::Domain(DomainKernel::Filter { predicate, output }) => {
-                    if domain_live[output.0] {
-                        live[k] = true;
-                        place[k] = *domain;
-                        uses[predicate.0] = Some(lca(uses[predicate.0], *domain));
+                Kernel::Domain(d) => {
+                    let used = match d {
+                        DomainKernel::Reduce { outputs, .. } => {
+                            outputs.iter().any(|v| uses[v.0].is_some())
+                        }
+                        _ => false,
+                    };
+                    if !domain_live[d.output().0] && !used {
+                        continue;
+                    }
+                    live[k] = true;
+                    place[k] = *domain;
+                    mark(&mut domain_live, *domain);
+                    let at = match d {
+                        // Reductions read their descendant's rows.
+                        DomainKernel::Reduce { descendant, .. } => {
+                            mark(&mut domain_live, *descendant);
+                            *descendant
+                        }
+                        _ => *domain,
+                    };
+                    for v in d.inputs() {
+                        uses[v.0] = Some(lca(uses[v.0], at));
                     }
                 }
-                Kernel::Domain(_) => unreachable!("rejected by the builder"),
             }
         }
-        // The builder position of the Filter creating each domain. Sort keys are
-        // `(position, rank, tie)`: an item sunk below its builder position into
-        // a later domain takes the creating Filter's position with rank 1, so it
-        // follows that Filter and keeps builder order among sunk items.
+        // The builder position of the domain kernel creating each domain.
+        // Sort keys are `(position, rank, tie)`: an item sunk below its
+        // builder position into a later domain takes the creating kernel's
+        // position with rank 1, so it follows that kernel and keeps builder
+        // order among sunk items.
         let mut created = vec![-1i64; parents.len()];
         for (k, (_, kernel)) in graph.kernels.iter().enumerate() {
             if let Kernel::Domain(d) = kernel {
@@ -147,12 +189,21 @@ impl Plan {
         items.sort_by_key(|(key, _, _)| *key);
         let mut states = vec![None; graph.states.len()];
         for (k, (_, kernel)) in graph.kernels.iter().enumerate() {
+            if !live[k] {
+                continue;
+            }
             match kernel {
-                Kernel::Scalar(ScalarKernel::GroupLookup { state, .. }) if live[k] => {
+                Kernel::Scalar(ScalarKernel::GroupLookup { state, .. }) => {
                     states[state.0] = Some(StateKind::Group)
                 }
-                Kernel::Scalar(ScalarKernel::AggregateUpdate { state, .. }) if live[k] => {
+                Kernel::Scalar(ScalarKernel::AggregateUpdate { state, .. }) => {
                     states[state.0] = Some(StateKind::Accumulator)
+                }
+                Kernel::Scalar(ScalarKernel::TableGather { state, .. }) => {
+                    states[state.0] = Some(StateKind::Table)
+                }
+                Kernel::Domain(DomainKernel::Expand { kind, .. }) => {
+                    states[kind.state().0] = Some(StateKind::Table)
                 }
                 _ => {}
             }
@@ -177,6 +228,7 @@ impl Plan {
         });
         Self {
             items: items.into_iter().map(|(_, i, p)| (i, p)).collect(),
+            spaces,
             states,
             aliases,
         }

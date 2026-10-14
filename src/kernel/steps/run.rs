@@ -24,15 +24,16 @@ use crate::error::ErrorContext;
 use crate::kernel::aggregation::{AccumulatorState, GroupState};
 use crate::kernel::runtime::{self, TextNumber};
 use crate::kernel::scalar::Cell;
+use crate::kernel::table::{Table, TableState};
 use arrow_buffer::{BooleanBuffer, NullBuffer};
 use asyncband::shutdown::ShutdownGuard;
 
 /// The Arrow buffers of one input column; the batch keeps them alive.
 pub(super) struct Input {
-    values: *const u8,
-    width: usize,
-    bools: Option<BooleanBuffer>,
-    nulls: Option<NullBuffer>,
+    pub values: *const u8,
+    pub width: usize,
+    pub bools: Option<BooleanBuffer>,
+    pub nulls: Option<NullBuffer>,
     /// Byte arrays: i32 or i64 offsets.
     offsets: *const u8,
     large: bool,
@@ -118,7 +119,7 @@ impl Input {
     }
 
     /// The address and length of a byte value.
-    fn bytes(&self, row: usize) -> (u64, u64) {
+    pub fn bytes(&self, row: usize) -> (u64, u64) {
         if !self.views.is_null() {
             // SAFETY: rows are below the array length; long views name a
             // data buffer and a range within it.
@@ -187,7 +188,7 @@ pub(super) struct Frame<'a> {
     pub raised: Option<Error>,
     pub ptrs: Vec<*mut u8>,
     pub states: Vec<BitState>,
-    home: Vec<*mut u8>,
+    pub home: Vec<*mut u8>,
     /// Per domain: the mask of this window.
     pub masks: Vec<(*mut u8, BitState)>,
     mask_home: Vec<*mut u8>,
@@ -200,6 +201,22 @@ pub(super) struct Frame<'a> {
     pub accumulators: Vec<*mut AccumulatorState>,
     /// Per group ID variable: the group count of its GroupLookup, or 0.
     pub bounds: Vec<usize>,
+    /// Per state: the table of an Expand or TableGather, with readers of
+    /// its columns.
+    pub tables: Vec<Option<TableRead>>,
+    /// In an expanded block: per window row, its row in the enclosing
+    /// window, and its row in the root window. Empty in the root block.
+    pub parents: Vec<u32>,
+    pub roots: Vec<u32>,
+    /// Reused by expansions: (enclosing row, table row) pairs and keys.
+    pub pairs: Vec<(u32, u32)>,
+    pub key: Vec<u8>,
+}
+
+/// A table and readers of its columns; the state keeps the table alive.
+pub(super) struct TableRead {
+    pub table: *const Table,
+    pub columns: Vec<Input>,
 }
 
 /// The canonical 64-bit form of a lane: signed integers sign-extended, other
@@ -284,27 +301,39 @@ impl Steps {
         }));
         b.groups.clear();
         b.accumulators.clear();
-        let states = self
-            .steps
-            .iter()
-            .chain(&self.fallback)
-            .flat_map(|step| match step {
-                Step::GroupLookup { state, .. } => vec![(*state, true)],
-                Step::Aggregates { updates, .. } => {
-                    updates.iter().map(|u| (u.state, false)).collect()
-                }
-                _ => vec![],
-            });
-        for (i, group) in states {
+        let mut tables: Vec<Option<TableRead>> = vec![];
+        // 0: group index, 1: accumulator, 2: table.
+        let states = self.all_steps().flat_map(|step| match step {
+            Step::GroupLookup { state, .. } => vec![(*state, 0)],
+            Step::Aggregates { updates, .. } => updates.iter().map(|u| (u.state, 1)).collect(),
+            Step::Gather { state, .. } => vec![(*state, 2)],
+            Step::Expand(e) => vec![(e.kind.state(), 2)],
+            _ => vec![],
+        });
+        for (i, kind) in states {
             if b.groups.len() <= i.0 {
                 b.groups.resize(i.0 + 1, std::ptr::null_mut());
                 b.accumulators.resize(i.0 + 1, std::ptr::null_mut());
             }
+            if tables.len() <= i.0 {
+                tables.resize_with(i.0 + 1, || None);
+            }
             let s = local.state_mut(i)?;
-            if group {
-                b.groups[i.0] = s.get_mut::<GroupState>()? as *mut GroupState;
-            } else {
-                b.accumulators[i.0] = s.get_mut::<AccumulatorState>()? as *mut AccumulatorState;
+            match kind {
+                0 => b.groups[i.0] = s.get_mut::<GroupState>()? as *mut GroupState,
+                1 => {
+                    b.accumulators[i.0] = s.get_mut::<AccumulatorState>()? as *mut AccumulatorState
+                }
+                _ if tables[i.0].is_none() => {
+                    let table = &*s.get::<TableState>()?.table;
+                    tables[i.0] = Some(TableRead {
+                        table,
+                        columns: (0..table.schema().fields().len())
+                            .map(|c| Input::new(table.column(c)))
+                            .collect(),
+                    });
+                }
+                _ => {}
             }
         }
         b.ptrs.clone_from(&b.home);
@@ -333,10 +362,15 @@ impl Steps {
                 .zip(&self.read)
                 .map(|(i, read)| read.then(|| Input::new(batch.column(i.position))))
                 .collect(),
-            outputs: output.map(|o| Outputs::new(o, aliases, &self.vars, rows)),
+            outputs: output.map(|_| Outputs::new(&self.output_bindings, aliases, &self.vars, rows)),
             groups: std::mem::take(&mut b.groups),
             accumulators: std::mem::take(&mut b.accumulators),
             bounds: std::mem::take(&mut b.bounds),
+            tables,
+            parents: vec![],
+            roots: vec![],
+            pairs: vec![],
+            key: vec![],
         };
         for (v, var) in self.vars.iter().enumerate() {
             if let Place::Constant(i) = var.place {
@@ -384,10 +418,8 @@ impl Frame<'_> {
             }
             self.n = WINDOW.min(rows - self.start);
             self.limit = self.n;
-            self.window();
-            for step in &self.steps.steps {
-                self.step(step)?;
-            }
+            self.window(0);
+            self.run_block(0)?;
             if let Some(e) = self.raised.take() {
                 return Err(e);
             }
@@ -396,10 +428,29 @@ impl Frame<'_> {
         Ok(())
     }
 
-    /// Points the variables at this window's rows.
-    fn window(&mut self) {
+    pub(super) fn run_block(&mut self, block: usize) -> Result<()> {
+        let steps = self.steps;
+        for step in &steps.blocks[block].steps {
+            self.step(step)?;
+        }
+        Ok(())
+    }
+
+    /// The root window row of a row of the current window.
+    pub(super) fn root(&self, row: usize) -> usize {
+        if self.roots.is_empty() {
+            row
+        } else {
+            self.roots[row] as usize
+        }
+    }
+
+    /// Points the variables of a block at this window's rows.
+    pub(super) fn window(&mut self, block: usize) {
         let (start, n) = (self.start, self.n);
-        for &VariableId(v) in &self.steps.windowed {
+        let steps = self.steps;
+        let block = &steps.blocks[block];
+        for &VariableId(v) in &block.windowed {
             match self.steps.vars[v].place {
                 Place::Bits(_) => self.ptrs[v] = self.home[v],
                 Place::Input(i) => {
@@ -463,12 +514,9 @@ impl Frame<'_> {
                 _ => {}
             }
         }
-        for (d, m) in self.masks.iter_mut().enumerate() {
-            *m = if d == 0 {
-                (ones(), BitState::AllTrue)
-            } else {
-                (self.mask_home[d], BitState::AllFalse)
-            };
+        self.masks[block.dense.0] = (ones(), BitState::AllTrue);
+        for d in &block.domains {
+            self.masks[d.0] = (self.mask_home[d.0], BitState::AllFalse);
         }
     }
 
@@ -677,7 +725,7 @@ impl Frame<'_> {
                     let values = args.iter().map(|v| self.get(*v, r)).collect::<Vec<_>>();
                     // The row is relative to the chunk passed to Program::run.
                     self.raised = Some(error.to_error(&values).with_context(
-                        ErrorContext::new("kernel.raise").field("row", self.start + r),
+                        ErrorContext::new("kernel.raise").field("row", self.start + self.root(r)),
                     ));
                     self.limit = r;
                 }
@@ -694,6 +742,13 @@ impl Frame<'_> {
                 validity,
                 updates,
             } => self.aggregates(*group, *domain, *validity, updates)?,
+            Step::Expand(e) => self.expand(e)?,
+            Step::Gather {
+                state,
+                row,
+                column,
+                output,
+            } => self.gather(*state, *row, *column, output),
             Step::Output { domain } => {
                 if self.raised.is_none() {
                     let mut outputs = self.outputs.take().unwrap();
@@ -706,7 +761,7 @@ impl Frame<'_> {
     }
 
     /// Computes the state of a Boolean written to its slot.
-    fn settle(&mut self, v: VariableId) {
+    pub(super) fn settle(&mut self, v: VariableId) {
         let state = bits::state(self.words(v), self.n);
         self.set_state(v, state);
         if state == BitState::Mixed {

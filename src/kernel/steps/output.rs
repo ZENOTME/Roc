@@ -120,10 +120,16 @@ fn append_bits(
 }
 
 impl Outputs {
-    pub fn new(output: &GraphOutput, aliases: &[Option<usize>], vars: &[Var], rows: usize) -> Self {
+    /// Expanded outputs may exceed `rows`: buffers grow when a window is
+    /// appended.
+    pub fn new(
+        bindings: &[ColumnVariableBinding],
+        aliases: &[Option<usize>],
+        vars: &[Var],
+        rows: usize,
+    ) -> Self {
         let capacity = rows + SLACK;
-        let columns = output
-            .bindings
+        let columns = bindings
             .iter()
             .enumerate()
             .map(|(j, binding)| {
@@ -191,8 +197,9 @@ impl Outputs {
                 } => {
                     let w = *width;
                     let src = frame.ptrs[value.0] as *const u8;
-                    // SAFETY: the buffer has capacity for every row of the chunk
-                    // plus slack; sources cover the window or are one value.
+                    data.reserve((count + n + SLACK) * w);
+                    // SAFETY: the buffer has capacity for these rows plus
+                    // slack; sources cover the window or are one value.
                     unsafe {
                         let dst = data.as_mut_ptr().add(count * w);
                         if frame.steps.vars[value.0].scalar() {
@@ -216,6 +223,7 @@ impl Outputs {
                     lens,
                 } => {
                     for (v, out) in [(*ptr, ptrs), (*len, lens)] {
+                        out.reserve(n + SLACK);
                         // SAFETY: as for fixed-width values, in words.
                         unsafe {
                             let dst = out.as_mut_ptr().add(count);

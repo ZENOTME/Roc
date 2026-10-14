@@ -81,6 +81,8 @@ pub struct KernelBuilder<'plan> {
     /// Indexed by DomainId; entry 0 is the root.
     domains: Vec<RowDomain>,
     domain_defined: Vec<bool>,
+    /// Per domain: the input domain when an Expand produced it.
+    expanded_from: Vec<Option<DomainId>>,
     current: DomainId,
     /// Each kernel with the domain it runs in. RaiseIf and AggregateUpdate may
     /// read only ancestor variables, so the domain cannot be inferred.
@@ -105,6 +107,7 @@ impl<'plan> KernelBuilder<'plan> {
                 parent_row: None,
             }],
             domain_defined: vec![true],
+            expanded_from: vec![None],
             current: DomainId::ROOT,
             kernels: vec![],
             states: vec![],
@@ -144,6 +147,7 @@ impl<'plan> KernelBuilder<'plan> {
             parent_row: None,
         });
         self.domain_defined.push(false);
+        self.expanded_from.push(None);
         let parent_row = self.allocate_variable(VariableType::Usize, id)?;
         self.domains[id.0].parent_row = Some(parent_row);
         Ok(id)
@@ -320,6 +324,21 @@ impl<'plan> KernelBuilder<'plan> {
                 }
                 vec![]
             }
+            ScalarKernel::TableGather { row, output, .. } => {
+                if self.variable_type(*row)? != VariableType::Usize {
+                    return Err(Error::invalid_plan("table rows must be Usize".into()));
+                }
+                if output.validity().is_none() || output.is_null_type() {
+                    return Err(Error::invalid_plan(
+                        "a gathered value has a validity".into(),
+                    ));
+                }
+                output
+                    .variables()
+                    .iter()
+                    .map(|v| self.variable_type(*v))
+                    .collect::<Result<_>>()?
+            }
         };
         for (id, ty) in kernel.outputs().into_iter().zip(outputs) {
             self.define(id, ty)?;
@@ -329,22 +348,101 @@ impl<'plan> KernelBuilder<'plan> {
     }
 
     /// Checks that the produced domain is declared, has no producer and is a
-    /// child of the current domain. Does not switch the current domain.
+    /// child of the current domain; for Reduce, of its parent. Does not switch
+    /// the current domain.
     pub fn add_domain_kernel(&mut self, kernel: DomainKernel) -> Result<()> {
-        let DomainKernel::Filter { predicate, output } = &kernel else {
-            return Err(Error::invalid_plan(
-                "only Filter domain kernels are supported".into(),
-            ));
+        let output = kernel.output();
+        let domain = *self.domain(output)?;
+        let parent = match &kernel {
+            DomainKernel::Filter { predicate, .. } => {
+                if self.check_visible(*predicate)? != VariableType::Boolean {
+                    return Err(Error::invalid_plan(
+                        "filter predicate must be Boolean".into(),
+                    ));
+                }
+                self.current
+            }
+            DomainKernel::Expand {
+                input,
+                kind,
+                outputs,
+                ..
+            } => {
+                if *input != self.current {
+                    return Err(Error::invalid_plan(
+                        "an expansion reads the current domain".into(),
+                    ));
+                }
+                if let ExpandKind::Lookup { keys, .. } = kind {
+                    if keys.is_empty() {
+                        return Err(Error::invalid_plan("a lookup needs keys".into()));
+                    }
+                    for key in keys {
+                        self.check_binding(key)?;
+                    }
+                }
+                if kind.state().0 >= self.states.len() {
+                    return Err(Error::invalid_plan(format!(
+                        "undefined state {}",
+                        kind.state().0
+                    )));
+                }
+                self.define_in(outputs, &[VariableType::Usize], output)?;
+                self.expanded_from[output.0] = Some(*input);
+                *input
+            }
+            DomainKernel::Reduce {
+                parent,
+                descendant,
+                aggregates,
+                outputs,
+                ..
+            } => {
+                if *parent != self.current {
+                    return Err(Error::invalid_plan(
+                        "a reduction produces a child of the current domain".into(),
+                    ));
+                }
+                // The descendant is in the rows of an expansion of `parent`.
+                let mut d = *descendant;
+                let expanded = loop {
+                    if let Some(input) = self.expanded_from.get(d.0).copied().flatten() {
+                        break Some(input);
+                    }
+                    match self.domain(d)?.parent {
+                        Some(p) if p != *parent => d = p,
+                        _ => break None,
+                    }
+                };
+                if expanded != Some(*parent) || !self.domain_defined[descendant.0] {
+                    return Err(Error::invalid_plan(
+                        "a reduction reads the rows of an expansion of its parent".into(),
+                    ));
+                }
+                let saved = std::mem::replace(&mut self.current, *descendant);
+                let types = aggregates
+                    .iter()
+                    .map(|(kind, v)| {
+                        let ty = self.check_visible(*v)?;
+                        match (kind, ty) {
+                            (ReduceKind::Any, VariableType::Boolean) => Ok(VariableType::Boolean),
+                            _ => Err(Error::invalid_plan(format!(
+                                "invalid reduction {kind:?} of {ty:?}"
+                            ))),
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>();
+                self.current = saved;
+                self.define_in(outputs, &types?, output)?;
+                *parent
+            }
+            DomainKernel::Union { .. } => {
+                return Err(Error::unsupported("union domains are not supported".into()));
+            }
         };
-        if self.check_visible(*predicate)? != VariableType::Boolean {
+        if domain.parent != Some(parent) || self.domain_defined[output.0] {
             return Err(Error::invalid_plan(
-                "filter predicate must be Boolean".into(),
-            ));
-        }
-        let domain = *self.domain(*output)?;
-        if domain.parent != Some(self.current) || self.domain_defined[output.0] {
-            return Err(Error::invalid_plan(
-                "filter must produce a new child of the current domain".into(),
+                "a domain kernel must produce a new child of its input domain".into(),
             ));
         }
         self.domain_defined[output.0] = true;
@@ -353,6 +451,96 @@ impl<'plan> KernelBuilder<'plan> {
         }
         self.kernels.push((self.current, Kernel::Domain(kernel)));
         Ok(())
+    }
+
+    /// Defines the outputs of a domain kernel, variables of its new domain.
+    fn define_in(
+        &mut self,
+        outputs: &[VariableId],
+        types: &[VariableType],
+        domain: DomainId,
+    ) -> Result<()> {
+        if outputs.len() != types.len() {
+            return Err(Error::invalid_plan(format!(
+                "a domain kernel produces {} outputs, got {}",
+                types.len(),
+                outputs.len()
+            )));
+        }
+        let saved = std::mem::replace(&mut self.current, domain);
+        let result = outputs
+            .iter()
+            .zip(types)
+            .try_for_each(|(v, ty)| self.define(*v, *ty));
+        self.current = saved;
+        result
+    }
+
+    /// Adds an Expand of the current domain; returns the new domain and its
+    /// table row, without switching to it.
+    pub fn expand(&mut self, kind: ExpandKind) -> Result<(DomainId, VariableId)> {
+        let output = self.allocate_domain(self.current)?;
+        let row = self.allocate_variable(VariableType::Usize, output)?;
+        self.add_domain_kernel(DomainKernel::Expand {
+            input: self.current,
+            kind,
+            outputs: vec![row],
+            output,
+        })?;
+        Ok((output, row))
+    }
+
+    /// Adds a Reduce of `descendant` into a new child of the current domain;
+    /// returns it and whether each Boolean is true on some descendant row.
+    pub fn reduce_any(
+        &mut self,
+        descendant: DomainId,
+        values: Vec<VariableId>,
+    ) -> Result<(DomainId, Vec<VariableId>)> {
+        let output = self.allocate_domain(self.current)?;
+        let outputs = values
+            .iter()
+            .map(|_| self.allocate_variable(VariableType::Boolean, output))
+            .collect::<Result<Vec<_>>>()?;
+        self.add_domain_kernel(DomainKernel::Reduce {
+            parent: self.current,
+            descendant,
+            aggregates: values.into_iter().map(|v| (ReduceKind::Any, v)).collect(),
+            outputs: outputs.clone(),
+            output,
+        })?;
+        Ok((output, outputs))
+    }
+
+    /// The value of a table column at `row`, as a binding of `data_type`.
+    pub fn table_gather(
+        &mut self,
+        state: StateId,
+        row: VariableId,
+        column: usize,
+        data_type: &DataType,
+    ) -> Result<ColumnVariableBinding> {
+        let validity = Some(self.allocate_variable(VariableType::Boolean, self.current)?);
+        let output = if is_bytes(data_type) {
+            ColumnVariableBinding::Bytes {
+                ptr: self.allocate_variable(VariableType::BytePointer, self.current)?,
+                len: self.allocate_variable(VariableType::Usize, self.current)?,
+                validity,
+            }
+        } else {
+            let ty = VariableType::of(data_type).ok_or_else(|| {
+                Error::unsupported(format!("unsupported column type: {data_type}"))
+            })?;
+            let value = self.allocate_variable(ty, self.current)?;
+            ColumnVariableBinding::fixed(ty, value, validity)?
+        };
+        self.add_scalar_kernel(ScalarKernel::TableGather {
+            state,
+            row,
+            column,
+            output,
+        })?;
+        Ok(output)
     }
 
     pub fn constant(&mut self, value: ConstantValue) -> Result<VariableId> {

@@ -28,6 +28,7 @@
 //! window where it may raise.
 mod aggregate;
 pub(crate) mod bits;
+mod expand;
 mod fuse;
 mod output;
 mod run;
@@ -42,6 +43,7 @@ use super::library::{self, KernelFn};
 use super::plan::{Item, Plan};
 use super::*;
 use crate::error::{Error, Result};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -259,6 +261,14 @@ pub(crate) enum Step {
     Output {
         domain: DomainId,
     },
+    /// A TableGather.
+    Gather {
+        state: StateId,
+        row: VariableId,
+        column: usize,
+        output: ColumnVariableBinding,
+    },
+    Expand(Box<ExpandStep>),
     /// Generated code for `fallback`, a range of `Steps::fallback`.
     Fused {
         f: KernelFn,
@@ -268,9 +278,66 @@ pub(crate) enum Step {
     },
 }
 
+/// An Expand: the rows it produces for a window of the enclosing block run
+/// `block`, in windows of their own.
+#[derive(Clone, Debug)]
+pub(crate) struct ExpandStep {
+    pub kind: ExpandStepKind,
+    /// The domain whose rows expand, in the enclosing block.
+    pub input: DomainId,
+    pub row: VariableId,
+    pub block: usize,
+    /// Enclosing-block variables the block reads, with their copies.
+    pub imports: Vec<(VariableId, VariableId)>,
+    pub reduces: Vec<ReduceStep>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ExpandStepKind {
+    Lookup {
+        state: StateId,
+        keys: Vec<ColumnVariableBinding>,
+        nulls_equal: bool,
+        outer: bool,
+    },
+    Product {
+        state: StateId,
+    },
+}
+
+impl ExpandStepKind {
+    pub fn state(&self) -> StateId {
+        match self {
+            Self::Lookup { state, .. } | Self::Product { state } => *state,
+        }
+    }
+}
+
+/// A Reduce, run by the Expand of its descendant.
+#[derive(Clone, Debug)]
+pub(crate) struct ReduceStep {
+    /// The domain produced: the rows of the expansion's input.
+    pub domain: DomainId,
+    pub descendant: DomainId,
+    /// Booleans of the block and the outputs they are reduced into.
+    pub any: Vec<(VariableId, VariableId)>,
+}
+
+/// The steps of one row space, run over its windows.
+pub(crate) struct Block {
+    pub steps: Vec<Step>,
+    /// The domain of every row of the block's windows.
+    pub dense: DomainId,
+    /// The other domains of the space; their masks start empty.
+    pub domains: Vec<DomainId>,
+    /// The variables whose window pointers change with the window.
+    pub windowed: Vec<VariableId>,
+}
+
 /// The prepared steps of one program.
 pub(crate) struct Steps {
-    steps: Vec<Step>,
+    /// The root block first.
+    blocks: Vec<Block>,
     fallback: Vec<Step>,
     vars: Vec<Var>,
     pool: Box<[u64]>,
@@ -280,8 +347,8 @@ pub(crate) struct Steps {
     masks: Vec<Option<usize>>,
     /// Per input: whether a step reads it.
     read: Vec<bool>,
-    /// The variables whose window pointers change with the window.
-    windowed: Vec<VariableId>,
+    /// The output bindings, as variables of the output step's block.
+    output_bindings: Vec<ColumnVariableBinding>,
     _bytes: Vec<Arc<[u8]>>,
     jit: Option<fuse::Jit>,
 }
@@ -289,7 +356,7 @@ pub(crate) struct Steps {
 impl std::fmt::Debug for Steps {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Steps")
-            .field("steps", &self.steps.len())
+            .field("blocks", &self.blocks.len())
             .field("fused", &self.jit.is_some())
             .finish_non_exhaustive()
     }
@@ -595,7 +662,143 @@ impl Builder {
     }
 }
 
-/// Variables a step reads and writes.
+impl Builder {
+    /// Adds the steps of one kernel item in `domain`. A Reduce adds none: its
+    /// expansion runs it.
+    fn item(&mut self, kernel: &Kernel, domain: DomainId) -> Result<()> {
+        match kernel {
+            Kernel::Domain(DomainKernel::Filter { predicate, output }) => {
+                self.steps.push(Step::Filter {
+                    predicate: *predicate,
+                    parent: domain,
+                    domain: *output,
+                })
+            }
+            Kernel::Domain(DomainKernel::Expand {
+                input,
+                kind,
+                outputs,
+                ..
+            }) => {
+                let kind = match kind {
+                    ExpandKind::Lookup {
+                        state,
+                        keys,
+                        nulls_equal,
+                        outer,
+                    } => ExpandStepKind::Lookup {
+                        state: *state,
+                        keys: keys.clone(),
+                        nulls_equal: *nulls_equal,
+                        outer: *outer,
+                    },
+                    ExpandKind::Product { state } => ExpandStepKind::Product { state: *state },
+                };
+                self.steps.push(Step::Expand(Box::new(ExpandStep {
+                    kind,
+                    input: *input,
+                    row: outputs[0],
+                    block: usize::MAX,
+                    imports: vec![],
+                    reduces: vec![],
+                })))
+            }
+            Kernel::Domain(DomainKernel::Reduce { .. }) => {}
+            Kernel::Domain(DomainKernel::Union { .. }) => {
+                return Err(Error::unsupported("union domains are not supported".into()));
+            }
+            Kernel::Scalar(kernel) => match kernel {
+                ScalarKernel::Constant { value, output } => {
+                    if let ConstantValue::BytePointer(bytes) = value {
+                        self.bytes.push(bytes.clone());
+                    }
+                    self.constant_words(*output, value.words());
+                }
+                ScalarKernel::Call {
+                    function,
+                    inputs,
+                    outputs,
+                } => self.call(*function, inputs, outputs, domain)?,
+                ScalarKernel::Select {
+                    cond,
+                    then,
+                    otherwise,
+                    output,
+                } => self.select(*cond, *then, *otherwise, *output)?,
+                ScalarKernel::RaiseIf { cond, error, args } => {
+                    if self.value(*cond) != Some(0) {
+                        self.steps.push(Step::RaiseIf {
+                            cond: *cond,
+                            error: *error,
+                            args: args.clone(),
+                            domain,
+                        })
+                    }
+                }
+                ScalarKernel::GroupLookup {
+                    state,
+                    keys,
+                    output,
+                } => {
+                    if keys.is_empty() {
+                        self.constant(*output, 0);
+                    } else {
+                        self.steps.push(Step::GroupLookup {
+                            state: *state,
+                            keys: keys.clone(),
+                            output: *output,
+                            domain,
+                        })
+                    }
+                }
+                ScalarKernel::AggregateUpdate {
+                    state,
+                    kind,
+                    group,
+                    arguments,
+                } => {
+                    let update = Update::new(*kind, arguments, &self.vars);
+                    let aggregate = Aggregate {
+                        state: *state,
+                        update,
+                        arguments: arguments.clone(),
+                    };
+                    match self.steps.last_mut() {
+                        Some(Step::Aggregates {
+                            group: g,
+                            domain: d,
+                            validity: v,
+                            updates,
+                        }) if *g == *group && *d == domain && *v == update.validity => {
+                            updates.push(aggregate)
+                        }
+                        _ => self.steps.push(Step::Aggregates {
+                            group: *group,
+                            domain,
+                            validity: update.validity,
+                            updates: vec![aggregate],
+                        }),
+                    }
+                }
+                ScalarKernel::TableGather {
+                    state,
+                    row,
+                    column,
+                    output,
+                } => self.steps.push(Step::Gather {
+                    state: *state,
+                    row: *row,
+                    column: *column,
+                    output: *output,
+                }),
+            },
+        }
+        Ok(())
+    }
+}
+
+/// The variables a step reads and writes. An Expand reads its keys and the
+/// variables its block imports, and writes the outputs of its reductions.
 fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
     let vars = |ops: &[Operand]| {
         ops.iter()
@@ -656,7 +859,121 @@ fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
                 .collect(),
             vec![],
         ),
+        Step::Gather { row, output, .. } => (vec![*row], output.variables()),
+        Step::Expand(e) => {
+            let mut reads = match &e.kind {
+                ExpandStepKind::Lookup { keys, .. } => {
+                    keys.iter().flat_map(|k| k.variables()).collect()
+                }
+                ExpandStepKind::Product { .. } => vec![],
+            };
+            reads.extend(e.imports.iter().map(|(from, _)| *from));
+            let writes = e
+                .reduces
+                .iter()
+                .flat_map(|r| r.any.iter().map(|(_, out)| *out))
+                .collect();
+            (reads, writes)
+        }
         Step::Output { .. } | Step::Fused { .. } => (vec![], vec![]),
+    }
+}
+
+fn rename_binding(b: &mut ColumnVariableBinding, map: &HashMap<VariableId, VariableId>) {
+    let r = |v: &mut VariableId| {
+        if let Some(n) = map.get(v) {
+            *v = *n;
+        }
+    };
+    use ColumnVariableBinding as B;
+    match b {
+        B::Null { validity } => r(validity),
+        B::Bytes { ptr, len, validity } => {
+            r(ptr);
+            r(len);
+            validity.iter_mut().for_each(r);
+        }
+        B::Boolean { value, validity }
+        | B::Int8 { value, validity }
+        | B::Int16 { value, validity }
+        | B::Int32 { value, validity }
+        | B::Int64 { value, validity }
+        | B::Int128 { value, validity }
+        | B::UInt8 { value, validity }
+        | B::UInt16 { value, validity }
+        | B::UInt32 { value, validity }
+        | B::UInt64 { value, validity }
+        | B::Float32 { value, validity }
+        | B::Float64 { value, validity } => {
+            r(value);
+            validity.iter_mut().for_each(r);
+        }
+    }
+}
+
+/// Replaces the variables a step reads by their copies in `map`. Imported
+/// variables are never written by the steps that read the copies.
+fn rename(step: &mut Step, map: &HashMap<VariableId, VariableId>) {
+    let r = |v: &mut VariableId| {
+        if let Some(n) = map.get(v) {
+            *v = *n;
+        }
+    };
+    match step {
+        Step::Kernel { args, call, .. } => {
+            for a in args {
+                if let Operand::Var(v) = a {
+                    r(v);
+                }
+            }
+            call.inputs.iter_mut().for_each(r);
+        }
+        Step::Bits { a, b, .. } => {
+            r(a);
+            r(b);
+        }
+        Step::SelectBits {
+            cond,
+            then,
+            otherwise,
+            ..
+        } => [cond, then, otherwise].into_iter().for_each(r),
+        Step::Text { text, .. } => match text {
+            Text::Compare { inputs, .. } => inputs.iter_mut().for_each(r),
+            Text::Parse { ptr, len, .. } | Text::Validate { ptr, len, .. } => {
+                r(ptr);
+                r(len);
+            }
+            Text::Format { input, .. } => r(input),
+        },
+        Step::Filter { predicate, .. } => r(predicate),
+        Step::RaiseIf { cond, args, .. } => {
+            r(cond);
+            args.iter_mut().for_each(r);
+        }
+        Step::GroupLookup { keys, .. } => keys.iter_mut().for_each(|k| rename_binding(k, map)),
+        Step::Aggregates {
+            group,
+            validity,
+            updates,
+            ..
+        } => {
+            r(group);
+            validity.iter_mut().for_each(r);
+            for u in updates {
+                u.update.validity.iter_mut().for_each(r);
+                u.update.sum.iter_mut().for_each(r);
+                u.arguments.iter_mut().for_each(|a| rename_binding(a, map));
+            }
+        }
+        Step::Gather { row, .. } => r(row),
+        Step::Expand(e) => {
+            if let ExpandStepKind::Lookup { keys, .. } = &mut e.kind {
+                keys.iter_mut().for_each(|k| rename_binding(k, map));
+            }
+            e.imports.iter_mut().for_each(|(from, _)| r(from));
+        }
+        Step::Output { .. } | Step::Fused { .. } => {}
     }
 }
 
@@ -676,120 +993,164 @@ impl Steps {
             bytes: vec![],
             steps: vec![],
         };
+        // One block per row space, enclosing blocks first.
+        let mut block_of = HashMap::new();
+        let mut blocks: Vec<Block> = vec![];
+        for (d, space) in plan.spaces.iter().enumerate() {
+            if space.0 == d {
+                block_of.insert(*space, blocks.len());
+                blocks.push(Block {
+                    steps: vec![],
+                    dense: *space,
+                    domains: vec![],
+                    windowed: vec![],
+                });
+            } else {
+                blocks[block_of[space]].domains.push(DomainId(d));
+            }
+        }
+        let block = |d: DomainId| block_of[&plan.spaces[d.0]];
+        // The Expand step of each child block: its block and position.
+        let mut expands: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut reduces = vec![];
         let mut output_reads = vec![];
+        let mut output_block = 0;
         for &(item, domain) in &plan.items {
-            match item {
-                Item::Output => {
-                    let output = graph.output.as_ref().unwrap();
-                    for (j, binding) in output.bindings.iter().enumerate() {
-                        if plan.aliases.get(j).copied().flatten().is_none() {
-                            output_reads.extend(binding.variables());
+            let target = block(domain);
+            std::mem::swap(&mut b.steps, &mut blocks[target].steps);
+            let result = (|| -> Result<()> {
+                match item {
+                    Item::Output => {
+                        let output = graph.output.as_ref().unwrap();
+                        for (j, binding) in output.bindings.iter().enumerate() {
+                            if plan.aliases.get(j).copied().flatten().is_none() {
+                                output_reads.extend(binding.variables());
+                            }
                         }
+                        output_block = target;
+                        b.steps.push(Step::Output { domain });
                     }
-                    b.steps.push(Step::Output { domain });
+                    Item::Kernel(k) => b.item(&graph.kernels[k].1, domain)?,
                 }
-                Item::Kernel(k) => match &graph.kernels[k].1 {
-                    Kernel::Domain(DomainKernel::Filter { predicate, output }) => {
-                        b.steps.push(Step::Filter {
-                            predicate: *predicate,
-                            parent: domain,
+                Ok(())
+            })();
+            if let Item::Kernel(k) = item {
+                match &graph.kernels[k].1 {
+                    Kernel::Domain(DomainKernel::Expand { output, .. }) => {
+                        let child = block(*output);
+                        if let Some(Step::Expand(e)) = b.steps.last_mut() {
+                            e.block = child;
+                        }
+                        expands.insert(child, (target, b.steps.len() - 1));
+                    }
+                    Kernel::Domain(DomainKernel::Reduce {
+                        descendant,
+                        aggregates,
+                        outputs,
+                        output,
+                        ..
+                    }) => reduces.push((
+                        block(*descendant),
+                        ReduceStep {
                             domain: *output,
-                        })
-                    }
-                    Kernel::Domain(_) => {
-                        return Err(Error::invalid_plan(
-                            "only Filter domain kernels are supported".into(),
-                        ));
-                    }
-                    Kernel::Scalar(kernel) => match kernel {
-                        ScalarKernel::Constant { value, output } => {
-                            if let ConstantValue::BytePointer(bytes) = value {
-                                b.bytes.push(bytes.clone());
-                            }
-                            b.constant_words(*output, value.words());
-                        }
-                        ScalarKernel::Call {
-                            function,
-                            inputs,
-                            outputs,
-                        } => b.call(*function, inputs, outputs, domain)?,
-                        ScalarKernel::Select {
-                            cond,
-                            then,
-                            otherwise,
-                            output,
-                        } => b.select(*cond, *then, *otherwise, *output)?,
-                        ScalarKernel::RaiseIf { cond, error, args } => {
-                            if b.value(*cond) != Some(0) {
-                                b.steps.push(Step::RaiseIf {
-                                    cond: *cond,
-                                    error: *error,
-                                    args: args.clone(),
-                                    domain,
-                                })
-                            }
-                        }
-                        ScalarKernel::GroupLookup {
-                            state,
-                            keys,
-                            output,
-                        } => {
-                            if keys.is_empty() {
-                                b.constant(*output, 0);
-                            } else {
-                                b.steps.push(Step::GroupLookup {
-                                    state: *state,
-                                    keys: keys.clone(),
-                                    output: *output,
-                                    domain,
-                                })
-                            }
-                        }
-                        ScalarKernel::AggregateUpdate {
-                            state,
-                            kind,
-                            group,
-                            arguments,
-                        } => {
-                            let update = Update::new(*kind, arguments, &b.vars);
-                            let aggregate = Aggregate {
-                                state: *state,
-                                update,
-                                arguments: arguments.clone(),
-                            };
-                            match b.steps.last_mut() {
-                                Some(Step::Aggregates {
-                                    group: g,
-                                    domain: d,
-                                    validity: v,
-                                    updates,
-                                }) if *g == *group && *d == domain && *v == update.validity => {
-                                    updates.push(aggregate)
-                                }
-                                _ => b.steps.push(Step::Aggregates {
-                                    group: *group,
-                                    domain,
-                                    validity: update.validity,
-                                    updates: vec![aggregate],
-                                }),
-                            }
-                        }
-                    },
-                },
+                            descendant: *descendant,
+                            any: aggregates
+                                .iter()
+                                .map(|(_, v)| *v)
+                                .zip(outputs.iter().copied())
+                                .collect(),
+                        },
+                    )),
+                    _ => {}
+                }
+            }
+            std::mem::swap(&mut b.steps, &mut blocks[target].steps);
+            result?;
+        }
+        for (child, reduce) in reduces {
+            let (parent, at) = expands[&child];
+            match &mut blocks[parent].steps[at] {
+                Step::Expand(e) => e.reduces.push(reduce),
+                _ => unreachable!("expands index their steps"),
             }
         }
         let Builder {
             mut vars,
             pool,
             bytes,
-            steps,
             ..
         } = b;
+        let mut var_block = graph
+            .variables
+            .iter()
+            .map(|v| block(v.domain))
+            .collect::<Vec<_>>();
+
+        // Each child block reads enclosing-block variables through copies,
+        // gathered by row when a window starts. Inner blocks first: their
+        // imports are reads of the enclosing block.
+        let mut output_bindings = graph.output.as_ref().map_or(vec![], |o| o.bindings.clone());
+        for k in (1..blocks.len()).rev() {
+            let (parent, at) = expands[&k];
+            let mut reads = blocks[k]
+                .steps
+                .iter()
+                .flat_map(|s| access(s).0)
+                .collect::<Vec<_>>();
+            if output_block == k {
+                reads.extend(output_bindings.iter().flat_map(|b| b.variables()));
+            }
+            if let Step::Expand(e) = &blocks[parent].steps[at] {
+                reads.extend(e.reduces.iter().flat_map(|r| r.any.iter().map(|(v, _)| *v)));
+            }
+            reads.sort();
+            reads.dedup();
+            let mut imports = vec![];
+            let mut map = HashMap::new();
+            for v in reads {
+                if var_block[v.0] == k || matches!(vars[v.0].place, Place::Constant(_)) {
+                    continue;
+                }
+                let copy = VariableId(vars.len());
+                vars.push(Var {
+                    place: Place::Unused,
+                    ..vars[v.0]
+                });
+                var_block.push(k);
+                imports.push((v, copy));
+                map.insert(v, copy);
+            }
+            for step in &mut blocks[k].steps {
+                rename(step, &map);
+            }
+            if output_block == k {
+                output_bindings
+                    .iter_mut()
+                    .for_each(|b| rename_binding(b, &map));
+                output_reads.iter_mut().for_each(|v| {
+                    if let Some(n) = map.get(v) {
+                        *v = *n;
+                    }
+                });
+            }
+            if let Step::Expand(e) = &mut blocks[parent].steps[at] {
+                for r in &mut e.reduces {
+                    for (v, _) in &mut r.any {
+                        if let Some(n) = map.get(v) {
+                            *v = *n;
+                        }
+                    }
+                }
+                e.imports = imports;
+            }
+        }
 
         // Input variables that some step reads.
         let mut read_var = vec![false; vars.len()];
-        for step in &steps {
-            access(step).0.iter().for_each(|v| read_var[v.0] = true);
+        for block in &blocks {
+            for step in &block.steps {
+                access(step).0.iter().for_each(|v| read_var[v.0] = true);
+            }
         }
         output_reads.iter().for_each(|v| read_var[v.0] = true);
         let mut read = vec![false; graph.inputs.len()];
@@ -833,22 +1194,22 @@ impl Steps {
         }
 
         // Root outputs are written in place by the step defining them.
-        let mut defined = vec![false; vars.len()];
-        for step in &steps {
-            if matches!(
-                step,
-                Step::Kernel { .. }
-                    | Step::Text {
-                        text: Text::Parse { .. },
-                        ..
-                    }
-            ) {
-                access(step).1.iter().for_each(|v| defined[v.0] = true);
-            }
-        }
         if let Some(output) = &graph.output
             && output.domain == DomainId::ROOT
         {
+            let mut defined = vec![false; vars.len()];
+            for step in &blocks[0].steps {
+                if matches!(
+                    step,
+                    Step::Kernel { .. }
+                        | Step::Text {
+                            text: Text::Parse { .. },
+                            ..
+                        }
+                ) {
+                    access(step).1.iter().for_each(|v| defined[v.0] = true);
+                }
+            }
             for (j, binding) in output.bindings.iter().enumerate() {
                 if plan.aliases.get(j).copied().flatten().is_some() {
                     continue;
@@ -863,48 +1224,77 @@ impl Steps {
             }
         }
 
-        // Slots, free after the last read.
-        let mut last = vec![None; vars.len()];
-        for (s, step) in steps.iter().enumerate() {
-            access(step).0.iter().for_each(|v| last[v.0] = Some(s));
-            if let Step::Output { .. } = step {
-                output_reads.iter().for_each(|v| last[v.0] = Some(s));
+        // Slots per block, free after the last read; blocks never share
+        // slots, since an enclosing window stays live while its expansion
+        // runs.
+        let mut allocate = |vars: &mut Vec<Var>, v: VariableId, free: &mut Free| {
+            if vars[v.0].place != Place::Unused {
+                return false;
             }
-        }
-        let mut free_values = vec![];
-        let mut free_wide = vec![];
-        let mut free_bits = vec![];
-        let mut release: Vec<Vec<VariableId>> = vec![vec![]; steps.len()];
-        for (s, step) in steps.iter().enumerate() {
-            for v in access(step).1 {
-                if vars[v.0].place != Place::Unused {
-                    continue;
+            vars[v.0].place = if vars[v.0].ty == Ty::Bool {
+                Place::Bits(free.bits.pop().unwrap_or_else(|| {
+                    bit_slots += 1;
+                    bit_slots - 1
+                }))
+            } else if vars[v.0].ty == Ty::I128 {
+                // Two consecutive value slots.
+                Place::Value(free.wide.pop().unwrap_or_else(|| {
+                    value_slots += 2;
+                    value_slots - 2
+                }))
+            } else {
+                Place::Value(free.values.pop().unwrap_or_else(|| {
+                    value_slots += 1;
+                    value_slots - 1
+                }))
+            };
+            true
+        };
+        let release = |vars: &Vec<Var>, v: VariableId, free: &mut Free| match vars[v.0].place {
+            Place::Bits(slot) => free.bits.push(slot),
+            Place::Value(slot) if vars[v.0].ty == Ty::I128 => free.wide.push(slot),
+            Place::Value(slot) => free.values.push(slot),
+            _ => {}
+        };
+        for k in 0..blocks.len() {
+            let steps = &blocks[k].steps;
+            let mut last = vec![None; vars.len()];
+            for (s, step) in steps.iter().enumerate() {
+                access(step).0.iter().for_each(|v| last[v.0] = Some(s));
+                if let Step::Output { .. } = step {
+                    output_reads.iter().for_each(|v| last[v.0] = Some(s));
                 }
-                vars[v.0].place = if vars[v.0].ty == Ty::Bool {
-                    Place::Bits(free_bits.pop().unwrap_or_else(|| {
-                        bit_slots += 1;
-                        bit_slots - 1
-                    }))
-                } else if vars[v.0].ty == Ty::I128 {
-                    // Two consecutive value slots.
-                    Place::Value(free_wide.pop().unwrap_or_else(|| {
-                        value_slots += 2;
-                        value_slots - 2
-                    }))
-                } else {
-                    Place::Value(free_values.pop().unwrap_or_else(|| {
-                        value_slots += 1;
-                        value_slots - 1
-                    }))
-                };
-                release[last[v.0].unwrap_or(s).max(s)].push(v);
             }
-            for v in std::mem::take(&mut release[s]) {
-                match vars[v.0].place {
-                    Place::Bits(slot) => free_bits.push(slot),
-                    Place::Value(slot) if vars[v.0].ty == Ty::I128 => free_wide.push(slot),
-                    Place::Value(slot) => free_values.push(slot),
-                    _ => {}
+            // The rows and imports of a child block exist from its start;
+            // reductions read their Booleans after its last step.
+            let mut initial = vec![];
+            if k > 0 {
+                let (parent, at) = expands[&k];
+                if let Step::Expand(e) = &blocks[parent].steps[at] {
+                    initial.push(e.row);
+                    initial.extend(e.imports.iter().map(|(_, copy)| *copy));
+                    for r in &e.reduces {
+                        for (v, _) in &r.any {
+                            last[v.0] = Some(steps.len());
+                        }
+                    }
+                }
+            }
+            let mut free = Free::default();
+            let mut releases: Vec<Vec<VariableId>> = vec![vec![]; steps.len() + 1];
+            for v in initial {
+                if allocate(&mut vars, v, &mut free) {
+                    releases[last[v.0].unwrap_or(0)].push(v);
+                }
+            }
+            for (s, step) in steps.iter().enumerate() {
+                for v in access(step).1 {
+                    if allocate(&mut vars, v, &mut free) {
+                        releases[last[v.0].unwrap_or(s).max(s)].push(v);
+                    }
+                }
+                for v in std::mem::take(&mut releases[s]) {
+                    release(&vars, v, &mut free);
                 }
             }
         }
@@ -919,22 +1309,20 @@ impl Steps {
                 })
             })
             .collect();
-        let windowed = (0..vars.len())
-            .map(VariableId)
-            .filter(|v| {
-                matches!(
-                    vars[v.0].place,
-                    Place::Bits(_)
-                        | Place::Input(_)
-                        | Place::Output(_)
-                        | Place::InputBits { .. }
-                        | Place::InputBytes { .. }
-                )
-            })
-            .collect();
+        for (v, var) in vars.iter().enumerate() {
+            if matches!(
+                var.place,
+                Place::Bits(_)
+                    | Place::Input(_)
+                    | Place::Output(_)
+                    | Place::InputBits { .. }
+                    | Place::InputBytes { .. }
+            ) {
+                blocks[var_block[v]].windowed.push(VariableId(v));
+            }
+        }
         let mut prepared = Self {
-            windowed,
-            steps,
+            blocks,
             fallback: vec![],
             vars,
             pool: pool.into_boxed_slice(),
@@ -942,22 +1330,42 @@ impl Steps {
             bit_slots,
             masks,
             read,
+            output_bindings,
             _bytes: bytes,
             jit: None,
         };
         if compile {
-            fuse::fuse(&mut prepared, graph)?;
+            fuse::fuse(&mut prepared)?;
         }
         Ok(prepared)
     }
 
     /// Whether the only step is the output: the program computes nothing.
     pub fn is_output_only(&self) -> bool {
-        self.steps.iter().all(|s| matches!(s, Step::Output { .. }))
+        self.blocks.len() == 1
+            && self.blocks[0]
+                .steps
+                .iter()
+                .all(|s| matches!(s, Step::Output { .. }))
     }
 
     /// The IR of the fused functions; empty without any.
     pub fn ir(&self) -> &str {
         self.jit.as_ref().map_or("", |j| j.ir())
     }
+
+    /// Every step, including those of nested blocks and fallbacks.
+    pub(crate) fn all_steps(&self) -> impl Iterator<Item = &Step> {
+        self.blocks
+            .iter()
+            .flat_map(|b| b.steps.iter())
+            .chain(&self.fallback)
+    }
+}
+
+#[derive(Default)]
+struct Free {
+    values: Vec<usize>,
+    wide: Vec<usize>,
+    bits: Vec<usize>,
 }

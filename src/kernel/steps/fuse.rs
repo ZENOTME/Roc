@@ -268,38 +268,49 @@ fn separate(steps: &mut Steps, run: &Run) {
     }
 }
 
-pub(super) fn fuse(steps: &mut Steps, graph: &KernelGraph) -> Result<()> {
+pub(super) fn fuse(steps: &mut Steps) -> Result<()> {
+    // Runs of fusable steps within each block.
     let mut runs = vec![];
-    let mut s = 0;
-    while s < steps.steps.len() {
-        let e = (s..steps.steps.len())
-            .find(|&e| !fusable(&steps.steps[e]))
-            .unwrap_or(steps.steps.len());
-        let kernels = steps.steps[s..e]
-            .iter()
-            .filter(|s| matches!(s, Step::Kernel { .. }))
-            .count();
-        if kernels >= 1 {
-            runs.push(s..e);
+    for (b, block) in steps.blocks.iter().enumerate() {
+        let len = block.steps.len();
+        let mut s = 0;
+        while s < len {
+            let e = (s..len).find(|&e| !fusable(&block.steps[e])).unwrap_or(len);
+            let kernels = block.steps[s..e]
+                .iter()
+                .filter(|s| matches!(s, Step::Kernel { .. }))
+                .count();
+            if kernels >= 1 {
+                runs.push((b, s..e));
+            }
+            s = e + 1;
         }
-        s = e + 1;
     }
     if runs.is_empty() {
         return Ok(());
     }
-    let output_vars = graph
-        .output
+    // Variables read outside the steps of their block: the output and
+    // reductions, run after the block's steps.
+    let mut outside = steps
+        .output_bindings
         .iter()
-        .flat_map(|o| o.bindings.iter().flat_map(|b| b.variables()))
+        .flat_map(|b| b.variables())
         .collect::<Vec<_>>();
+    for block in &steps.blocks {
+        for step in &block.steps {
+            if let Step::Expand(e) = step {
+                outside.extend(e.reduces.iter().flat_map(|r| r.any.iter().map(|(v, _)| *v)));
+            }
+        }
+    }
     let mut groups = vec![];
-    for run in &runs {
+    for (b, run) in &runs {
         let mut later = vec![false; steps.vars.len()];
-        for step in &steps.steps[run.end..] {
+        for step in &steps.blocks[*b].steps[run.end..] {
             access(step).0.iter().for_each(|v| later[v.0] = true);
         }
-        output_vars.iter().for_each(|v| later[v.0] = true);
-        groups.push(group(steps, &steps.steps[run.clone()], &later));
+        outside.iter().for_each(|v| later[v.0] = true);
+        groups.push(group(steps, &steps.blocks[*b].steps[run.clone()], &later));
     }
 
     for run in &groups {
@@ -339,31 +350,33 @@ pub(super) fn fuse(steps: &mut Steps, graph: &KernelGraph) -> Result<()> {
         functions.push(unsafe { std::mem::transmute::<usize, KernelFn>(address) });
     }
 
-    let mut old = std::mem::take(&mut steps.steps)
+    let mut fused = runs
         .into_iter()
-        .enumerate()
-        .peekable();
-    let mut runs_iter = runs
-        .iter()
         .zip(groups.into_iter().zip(functions))
         .peekable();
-    while let Some((i, step)) = old.next() {
-        match runs_iter.peek() {
-            Some((range, _)) if range.start == i => {
-                let (range, (run, f)) = runs_iter.next().unwrap();
-                let begin = steps.fallback.len();
-                steps.fallback.push(step);
-                for _ in range.start + 1..range.end {
-                    steps.fallback.push(old.next().unwrap().1);
+    for b in 0..steps.blocks.len() {
+        let mut old = std::mem::take(&mut steps.blocks[b].steps)
+            .into_iter()
+            .enumerate()
+            .peekable();
+        while let Some((i, step)) = old.next() {
+            match fused.peek() {
+                Some(((block, range), _)) if *block == b && range.start == i => {
+                    let ((_, range), (run, f)) = fused.next().unwrap();
+                    let begin = steps.fallback.len();
+                    steps.fallback.push(step);
+                    for _ in range.start + 1..range.end {
+                        steps.fallback.push(old.next().unwrap().1);
+                    }
+                    steps.blocks[b].steps.push(Step::Fused {
+                        f,
+                        args: run.args,
+                        reports: run.reports,
+                        fallback: begin..steps.fallback.len(),
+                    });
                 }
-                steps.steps.push(Step::Fused {
-                    f,
-                    args: run.args,
-                    reports: run.reports,
-                    fallback: begin..steps.fallback.len(),
-                });
+                _ => steps.blocks[b].steps.push(step),
             }
-            _ => steps.steps.push(step),
         }
     }
     steps.jit = Some(Jit {

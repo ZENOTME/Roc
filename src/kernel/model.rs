@@ -210,6 +210,14 @@ pub enum ScalarKernel {
         group: VariableId,
         arguments: Vec<ColumnVariableBinding>,
     },
+    /// The value of `column` of a table state at `row`. Rows past the end of
+    /// the table are NULL, so the output always has a validity.
+    TableGather {
+        state: StateId,
+        row: VariableId,
+        column: usize,
+        output: ColumnVariableBinding,
+    },
 }
 
 impl ScalarKernel {
@@ -232,6 +240,7 @@ impl ScalarKernel {
             } => std::iter::once(*group)
                 .chain(arguments.iter().flat_map(|a| a.variables()))
                 .collect(),
+            Self::TableGather { row, .. } => vec![*row],
         }
     }
     pub fn outputs(&self) -> Vec<VariableId> {
@@ -240,12 +249,15 @@ impl ScalarKernel {
             | Self::Select { output, .. }
             | Self::GroupLookup { output, .. } => vec![*output],
             Self::Call { outputs, .. } => outputs.clone(),
+            Self::TableGather { output, .. } => output.variables(),
             Self::RaiseIf { .. } | Self::AggregateUpdate { .. } => vec![],
         }
     }
     pub fn states(&self) -> Vec<StateId> {
         match self {
-            Self::GroupLookup { state, .. } | Self::AggregateUpdate { state, .. } => vec![*state],
+            Self::GroupLookup { state, .. }
+            | Self::AggregateUpdate { state, .. }
+            | Self::TableGather { state, .. } => vec![*state],
             _ => vec![],
         }
     }
@@ -268,7 +280,8 @@ pub enum DomainKernel {
         predicate: VariableId,
         output: DomainId,
     },
-    /// Produces zero or more rows per input row.
+    /// Produces zero or more rows per input row, ordered by input row; see
+    /// `ExpandKind`.
     Expand {
         input: DomainId,
         kind: ExpandKind,
@@ -283,7 +296,8 @@ pub enum DomainKernel {
         outputs: Vec<VariableId>,
         output: DomainId,
     },
-    /// One row per parent row: a grouped reduction of descendant rows.
+    /// One row per parent row: a grouped reduction of descendant rows. The
+    /// descendant is in the domains of an Expand of `parent`.
     Reduce {
         parent: DomainId,
         descendant: DomainId,
@@ -305,7 +319,12 @@ impl DomainKernel {
     pub fn inputs(&self) -> Vec<VariableId> {
         match self {
             Self::Filter { predicate, .. } => vec![*predicate],
-            Self::Expand { .. } => vec![],
+            Self::Expand { kind, .. } => match kind {
+                ExpandKind::Lookup { keys, .. } => {
+                    keys.iter().flat_map(|k| k.variables()).collect()
+                }
+                ExpandKind::Product { .. } => vec![],
+            },
             Self::Union { arms, .. } => arms.iter().flat_map(|a| a.values.clone()).collect(),
             Self::Reduce { aggregates, .. } => aggregates.iter().map(|(_, v)| *v).collect(),
         }
@@ -326,13 +345,39 @@ pub struct UnionArm {
     pub values: Vec<VariableId>,
 }
 
-/// Join probes, unnest and other expansions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExpandKind {}
+/// Join probes and other expansions over a table state. Every kind outputs
+/// `[row]`: the Usize table row of each new row.
+#[derive(Clone, Debug)]
+pub enum ExpandKind {
+    /// The table rows whose key columns equal `keys`, in table order. A NULL
+    /// key matches only with `nulls_equal`. With `outer`, an input row
+    /// without a match expands to one row past the end of the table, where
+    /// gathers are NULL.
+    Lookup {
+        state: StateId,
+        keys: Vec<ColumnVariableBinding>,
+        nulls_equal: bool,
+        outer: bool,
+    },
+    /// Every table row.
+    Product { state: StateId },
+}
 
-/// Count, Sum, Any and other per-parent reductions.
+impl ExpandKind {
+    pub fn state(&self) -> StateId {
+        match self {
+            Self::Lookup { state, .. } | Self::Product { state } => *state,
+        }
+    }
+}
+
+/// Per-parent reductions of descendant rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReduceKind {}
+pub enum ReduceKind {
+    /// A non-null Boolean: whether the Boolean is true on some descendant row
+    /// of the parent row.
+    Any,
+}
 
 /// The value of a Constant kernel.
 #[derive(Clone, Debug)]
