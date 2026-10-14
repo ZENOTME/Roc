@@ -15,6 +15,11 @@
 //! Table states: immutable rows, optionally indexed by key columns, that
 //! Expand looks rows up in and TableGather reads values from. A table is
 //! shared by every execution instance of the pipelines reading it.
+//!
+//! An indexed table stores its rows grouped by hash bucket, so the rows a
+//! probe matches are adjacent: a probe reads one bucket range, and gathers
+//! of its matches read neighbouring values. Within a bucket rows keep their
+//! input order, so the matches of a key come in input order.
 use super::scalar::{self, Cell, KeyEncoder};
 use crate::arrow::{
     array::{Array, ArrayRef, make_array},
@@ -25,7 +30,7 @@ use crate::error::{Error, Result};
 use arrow_data::transform::MutableArrayData;
 use std::sync::{Arc, OnceLock};
 
-/// No row: the end of a chain.
+/// Tables hold fewer rows than this.
 const END: u32 = u32::MAX;
 
 pub struct Table {
@@ -35,18 +40,20 @@ pub struct Table {
     index: Option<Index>,
 }
 
-/// A chained hash index; each chain lists its rows in table order.
+/// A hash index over the table's rows, which are grouped by bucket: the
+/// rows of bucket `b` are `starts[b]..starts[b + 1]`. Rows with a NULL key
+/// that matches nothing follow the last bucket.
 struct Index {
-    heads: Vec<u32>,
-    next: Vec<u32>,
+    starts: Vec<u32>,
     shift: u32,
     keys: Keys,
 }
 
 enum Keys {
-    /// One fixed-width key without NULL matches: its canonical word per row.
+    /// One fixed-width key without NULL matches: its canonical word per
+    /// indexed row.
     Word(Vec<u64>),
-    /// Encoded keys of any types, in `offsets` order.
+    /// Encoded keys of any types per indexed row.
     Encoded {
         encoders: Vec<KeyEncoder>,
         data: Vec<u8>,
@@ -98,7 +105,7 @@ impl Table {
         keys: &[usize],
         nulls_equal: bool,
     ) -> Result<Self> {
-        let columns = (0..schema.fields().len())
+        let mut columns = (0..schema.fields().len())
             .map(|i| {
                 concat(
                     batches.iter().map(|b| b.column(i)),
@@ -113,9 +120,24 @@ impl Table {
                 format!("a table holds at most {} rows", END - 1),
             ));
         }
-        let index = (!keys.is_empty())
-            .then(|| Index::new(&columns, rows, keys, nulls_equal))
-            .transpose()?;
+        let index = if keys.is_empty() {
+            None
+        } else {
+            let (index, order) = Index::new(&columns, rows, keys, nulls_equal)?;
+            if let Some(order) = order {
+                let order = crate::arrow::array::UInt32Array::from(order);
+                for c in &mut columns {
+                    *c = arrow_select::take::take(c, &order, None).map_err(|source| {
+                        Error::new(
+                            crate::error::ErrorKind::ResourceExhausted,
+                            "a column exceeds the offsets of its type",
+                        )
+                        .with_source(source)
+                    })?;
+                }
+            }
+            Some(index)
+        };
         Ok(Self {
             schema,
             columns,
@@ -170,23 +192,22 @@ impl Table {
             Probe::Word(k) => hash_word(k),
             Probe::Encoded(k) => hash_bytes(k),
         };
-        let mut row = index.heads[(hash >> index.shift) as usize];
+        let b = (hash >> index.shift) as usize;
+        let rows = index.starts[b]..index.starts[b + 1];
         match (&index.keys, probe) {
             (Keys::Word(words), Probe::Word(k)) => {
-                while row != END {
+                for row in rows {
                     if words[row as usize] == k {
                         f(row);
                     }
-                    row = index.next[row as usize];
                 }
             }
             (Keys::Encoded { data, offsets, .. }, Probe::Encoded(k)) => {
-                while row != END {
+                for row in rows {
                     let r = row as usize;
                     if &data[offsets[r]..offsets[r + 1]] == k {
                         f(row);
                     }
-                    row = index.next[r];
                 }
             }
             _ => {}
@@ -195,7 +216,14 @@ impl Table {
 }
 
 impl Index {
-    fn new(columns: &[ArrayRef], rows: usize, keys: &[usize], nulls_equal: bool) -> Result<Self> {
+    /// The index of the rows, and the order the table stores them in
+    /// (`None` when they already are in it).
+    fn new(
+        columns: &[ArrayRef],
+        rows: usize,
+        keys: &[usize],
+        nulls_equal: bool,
+    ) -> Result<(Self, Option<Vec<u32>>)> {
         let types = keys
             .iter()
             .map(|&k| columns[k].data_type().clone())
@@ -204,22 +232,13 @@ impl Index {
             .iter()
             .map(|&k| scalar::decode(&columns[k]))
             .collect::<Result<Vec<_>>>()?;
-        let buckets = rows.max(1).next_power_of_two() * 2;
+        let buckets = rows.max(2).next_power_of_two();
         let shift = 64 - buckets.trailing_zeros();
-        let mut heads = vec![END; buckets];
-        let mut next = vec![END; rows];
         let indexed = |r: usize| nulls_equal || decoded.iter().all(|c| c[r].valid != 0);
-        // Rows are pushed onto chains last first: chains list them in order.
-        let keys = if types.len() == 1 && word_key(&types[0]) && !nulls_equal {
+        let word = types.len() == 1 && word_key(&types[0]) && !nulls_equal;
+        let (words, encoders, mut data, mut offsets) = if word {
             let words = decoded[0].iter().map(|c| c.bits).collect::<Vec<_>>();
-            for r in (0..rows).rev() {
-                if indexed(r) {
-                    let b = (hash_word(words[r]) >> shift) as usize;
-                    next[r] = heads[b];
-                    heads[b] = r as u32;
-                }
-            }
-            Keys::Word(words)
+            (words, vec![], vec![], vec![])
         } else {
             let encoders = types
                 .iter()
@@ -234,12 +253,41 @@ impl Index {
                 }
                 offsets.push(data.len());
             }
-            for r in (0..rows).rev() {
-                if indexed(r) {
-                    let b = (hash_bytes(&data[offsets[r]..offsets[r + 1]]) >> shift) as usize;
-                    next[r] = heads[b];
-                    heads[b] = r as u32;
-                }
+            (vec![], encoders, data, offsets)
+        };
+        // The bucket of each row; unindexed rows go after the last one.
+        let bucket = (0..rows)
+            .map(|r| match indexed(r) {
+                false => buckets as u32,
+                true if word => (hash_word(words[r]) >> shift) as u32,
+                true => (hash_bytes(&data[offsets[r]..offsets[r + 1]]) >> shift) as u32,
+            })
+            .collect::<Vec<_>>();
+        // A stable counting sort of the rows by bucket.
+        let mut starts = vec![0u32; buckets + 2];
+        for &b in &bucket {
+            starts[b as usize + 1] += 1;
+        }
+        for b in 1..starts.len() {
+            starts[b] += starts[b - 1];
+        }
+        let mut order = vec![0u32; rows];
+        let mut at = starts.clone();
+        for (r, &b) in bucket.iter().enumerate() {
+            order[at[b as usize] as usize] = r as u32;
+            at[b as usize] += 1;
+        }
+        starts.truncate(buckets + 1);
+        let sorted = order.iter().enumerate().all(|(i, &r)| i == r as usize);
+        let keys = if word {
+            Keys::Word(order.iter().map(|&r| words[r as usize]).collect())
+        } else {
+            let (old, old_offsets) = (std::mem::take(&mut data), std::mem::take(&mut offsets));
+            offsets.push(0);
+            for &r in &order {
+                let r = r as usize;
+                data.extend_from_slice(&old[old_offsets[r]..old_offsets[r + 1]]);
+                offsets.push(data.len());
             }
             Keys::Encoded {
                 encoders,
@@ -247,12 +295,12 @@ impl Index {
                 offsets,
             }
         };
-        Ok(Self {
-            heads,
-            next,
+        let index = Self {
+            starts,
             shift,
             keys,
-        })
+        };
+        Ok((index, (!sorted).then_some(order)))
     }
 }
 
