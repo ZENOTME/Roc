@@ -1,29 +1,58 @@
-//! Query-owned hash table; keys are scalar values supplied by generated code.
+//! Query-owned hash table of group keys: group IDs in insertion order.
 use crate::{
     arrow::{array::ArrayRef, datatypes::*},
     error::{Error, Result},
     kernel::scalar::{self, Cell, OwnedCell},
 };
-use std::collections::HashMap;
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-pub(crate) struct WordEntry {
-    pub key: u64,
-    pub id: u64,
-    pub tag: u64,
-}
-#[repr(C)]
+
+/// An open-addressing table of group IDs: one fixed-width key compares its
+/// canonical word, others their encoded bytes.
 pub(crate) struct GroupIndex {
-    pub cache: Option<Box<[WordEntry; 1024]>>,
     types: Vec<DataType>,
     encoders: Vec<scalar::KeyEncoder>,
     owners: Vec<scalar::OwnValue>,
-    index: HashMap<Vec<u8>, usize, foldhash::fast::RandomState>,
-    rows: Vec<Vec<OwnedCell>>,
-    words: HashMap<(u64, bool), usize, foldhash::fast::RandomState>,
+    /// The key cells of every group, one per key column.
+    cells: Vec<OwnedCell>,
+    groups: usize,
+    /// Per slot: a group ID plus one, or 0 when empty. A power of two at most
+    /// half full.
+    slots: Vec<u32>,
+    keys: Keys,
     scratch: Vec<u8>,
-    word_key: bool,
 }
+
+enum Keys {
+    /// No key columns: one group.
+    None,
+    /// One fixed-width key: the canonical word of every group but the NULL
+    /// one.
+    Word { words: Vec<u64>, null: Option<u32> },
+    /// Encoded keys of every group, with their hashes.
+    Encoded {
+        hashes: Vec<u64>,
+        data: Vec<u8>,
+        offsets: Vec<usize>,
+    },
+}
+
+#[inline(always)]
+fn hash_word(key: u64) -> u64 {
+    (key ^ (key >> 29)).wrapping_mul(0xbf58_476d_1ce4_e5b9)
+}
+
+fn hash_bytes(key: &[u8]) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = foldhash::fast::FixedState::with_seed(0x2d35_8dcc_aa6c_78a5).build_hasher();
+    h.write(key);
+    h.finish()
+}
+
+/// The slot of a hash in a table of `len` slots.
+#[inline(always)]
+fn home(hash: u64, len: usize) -> usize {
+    (hash >> (64 - len.trailing_zeros())) as usize
+}
+
 impl GroupIndex {
     pub fn new(schema: &Schema) -> Result<Self> {
         let types = schema
@@ -36,9 +65,9 @@ impl GroupIndex {
         }
         let encoders = types.iter().map(scalar::bind_key).collect::<Result<_>>()?;
         let owners = types.iter().map(scalar::bind_owner).collect();
-        let word_key = schema.fields().len() == 1
+        let word = types.len() == 1
             && matches!(
-                schema.field(0).data_type(),
+                types[0],
                 DataType::Boolean
                     | DataType::Int8
                     | DataType::Int16
@@ -52,78 +81,171 @@ impl GroupIndex {
                     | DataType::Date64
                     | DataType::Timestamp(..)
             );
+        let keys = if types.is_empty() {
+            Keys::None
+        } else if word {
+            Keys::Word {
+                words: vec![],
+                null: None,
+            }
+        } else {
+            Keys::Encoded {
+                hashes: vec![],
+                data: vec![],
+                offsets: vec![0],
+            }
+        };
         Ok(Self {
-            cache: word_key.then(|| Box::new([WordEntry::default(); 1024])),
             types,
             encoders,
             owners,
-            index: HashMap::default(),
-            rows: vec![],
-            words: HashMap::default(),
+            cells: vec![],
+            groups: 0,
+            slots: vec![0; 16],
+            keys,
             scratch: vec![],
-            word_key,
         })
     }
+
     pub fn len(&self) -> usize {
-        if self.types.is_empty() {
-            1
-        } else {
-            self.rows.len()
+        match self.keys {
+            Keys::None => 1,
+            _ => self.groups,
         }
     }
+
+    /// Whether the key is one fixed-width column, interned by `intern_word`.
+    pub fn word_keys(&self) -> bool {
+        matches!(self.keys, Keys::Word { .. })
+    }
+
     pub fn intern_row(&mut self, values: &[Cell]) -> usize {
-        if self.types.is_empty() {
-            return 0;
+        match self.keys {
+            Keys::None => 0,
+            Keys::Word { .. } => self.intern_word(values[0].bits, values[0].valid != 0),
+            Keys::Encoded { .. } => self.intern_encoded(values),
         }
-        if self.word_key {
-            return self.intern_word(values[0]);
+    }
+
+    /// The group of a word key, the canonical word of a fixed-width value;
+    /// `valid` false for NULL. A new group gets the next ID.
+    #[inline(always)]
+    pub fn intern_word(&mut self, key: u64, valid: bool) -> usize {
+        let Keys::Word { words, null } = &mut self.keys else {
+            unreachable!("word keys")
+        };
+        let id = self.groups;
+        if !valid {
+            if let Some(id) = null {
+                return *id as usize;
+            }
+            *null = Some(id as u32);
+            words.push(0);
+            self.add(&[Cell::default()]);
+            return id;
         }
-        self.scratch.clear();
+        let len = self.slots.len();
+        let mut s = home(hash_word(key), len);
+        loop {
+            let slot = self.slots[s];
+            if slot == 0 {
+                break;
+            }
+            if words[slot as usize - 1] == key {
+                return slot as usize - 1;
+            }
+            s = (s + 1) & (len - 1);
+        }
+        words.push(key);
+        self.slots[s] = id as u32 + 1;
+        self.add(&[Cell {
+            bits: key,
+            len: 0,
+            valid: 1,
+        }]);
+        self.grow();
+        id
+    }
+
+    /// Records the key cells of a new group.
+    fn add(&mut self, values: &[Cell]) {
+        self.cells
+            .extend(values.iter().zip(&self.owners).map(|(v, own)| own(*v)));
+        self.groups += 1;
+    }
+
+    fn intern_encoded(&mut self, values: &[Cell]) -> usize {
         let mut key = std::mem::take(&mut self.scratch);
+        key.clear();
         for (v, encode) in values.iter().zip(&self.encoders) {
             encode(*v, &mut key);
         }
-        if let Some(&id) = self.index.get(&key) {
-            self.scratch = key;
-            return id;
+        let hash = hash_bytes(&key);
+        let Keys::Encoded {
+            hashes,
+            data,
+            offsets,
+        } = &mut self.keys
+        else {
+            unreachable!("encoded keys")
+        };
+        let len = self.slots.len();
+        let mut s = home(hash, len);
+        loop {
+            let slot = self.slots[s];
+            if slot == 0 {
+                break;
+            }
+            let id = slot as usize - 1;
+            if hashes[id] == hash && data[offsets[id]..offsets[id + 1]] == key[..] {
+                self.scratch = key;
+                return id;
+            }
+            s = (s + 1) & (len - 1);
         }
-        let id = self.rows.len();
-        self.rows.push(
-            values
-                .iter()
-                .zip(&self.owners)
-                .map(|(v, own)| own(*v))
-                .collect(),
-        );
-        self.index.insert(key, id);
+        let id = self.groups;
+        hashes.push(hash);
+        data.extend_from_slice(&key);
+        offsets.push(data.len());
+        self.slots[s] = id as u32 + 1;
+        self.scratch = key;
+        self.add(values);
+        self.grow();
         id
     }
-    pub fn intern_word(&mut self, value: Cell) -> usize {
-        let key = (
-            if value.valid == 0 { 0 } else { value.bits },
-            value.valid != 0,
-        );
-        let slot = key.0 as usize & 1023;
-        let tag = if key.1 { 2 } else { 1 };
-        let cached = self.cache.as_ref().unwrap()[slot];
-        if cached.tag == tag && cached.key == key.0 {
-            return cached.id as usize;
+
+    /// Doubles the table once the groups fill half of it.
+    fn grow(&mut self) {
+        if self.groups * 2 <= self.slots.len() {
+            return;
         }
-        let id = if let Some(&id) = self.words.get(&key) {
-            id
-        } else {
-            let id = self.rows.len();
-            self.rows.push(vec![(self.owners[0])(value)]);
-            self.words.insert(key, id);
-            id
+        let len = self.slots.len() * 2;
+        let mut slots = vec![0u32; len];
+        let mut place = |hash: u64, id: usize| {
+            let mut s = home(hash, len);
+            while slots[s] != 0 {
+                s = (s + 1) & (len - 1);
+            }
+            slots[s] = id as u32 + 1;
         };
-        self.cache.as_mut().unwrap()[slot] = WordEntry {
-            key: key.0,
-            id: id as u64,
-            tag,
-        };
-        id
+        match &self.keys {
+            Keys::Word { words, null } => {
+                for (id, &w) in words.iter().enumerate() {
+                    if Some(id as u32) != *null {
+                        place(hash_word(w), id);
+                    }
+                }
+            }
+            Keys::Encoded { hashes, .. } => {
+                for (id, &h) in hashes.iter().enumerate() {
+                    place(h, id);
+                }
+            }
+            Keys::None => {}
+        }
+        self.slots = slots;
     }
+
     pub fn intern(
         &mut self,
         columns: &[ArrayRef],
@@ -135,18 +257,25 @@ impl GroupIndex {
             .map(scalar::decode)
             .collect::<Result<Vec<_>>>()?;
         ids.clear();
+        let mut values = Vec::with_capacity(columns.len());
         for row in 0..rows {
-            let values = columns.iter().map(|c| c[row]).collect::<Vec<_>>();
+            values.clear();
+            values.extend(columns.iter().map(|c| c[row]));
             ids.push(self.intern_row(&values));
         }
         Ok(())
     }
+
     pub fn columns(&self) -> Result<Vec<ArrayRef>> {
+        let width = self.types.len();
         self.types
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                scalar::encode(t, &self.rows.iter().map(|r| r[i].get()).collect::<Vec<_>>())
+                let cells = (0..self.groups)
+                    .map(|g| self.cells[g * width + i].get())
+                    .collect::<Vec<_>>();
+                scalar::encode(t, &cells)
             })
             .collect()
     }
@@ -159,7 +288,7 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn word_cache_collisions_keep_full_keys_and_stable_ids() {
+    fn colliding_word_keys_keep_full_keys_and_stable_ids() {
         let schema = Schema::new(vec![Field::new("key", DataType::UInt64, true)]);
         let mut index = GroupIndex::new(&schema).unwrap();
         let values = [
@@ -169,12 +298,14 @@ mod tests {
             Cell::default(),
             Cell::word(2048),
         ];
+        // Enough keys to grow the table several times.
+        let more = (0..1000u64).map(|k| Cell::word(k * 4096 + 7)).collect::<Vec<_>>();
         for _ in 0..3 {
-            for (expected, value) in values.iter().enumerate() {
-                assert_eq!(index.intern_word(*value), expected);
+            for (expected, value) in values.iter().chain(&more).enumerate() {
+                assert_eq!(index.intern_row(&[*value]), expected);
             }
         }
-        assert_eq!(index.len(), values.len());
+        assert_eq!(index.len(), values.len() + more.len());
         let column = index.columns().unwrap().remove(0);
         assert_eq!(
             column
@@ -182,6 +313,7 @@ mod tests {
                 .downcast_ref::<UInt64Array>()
                 .unwrap()
                 .iter()
+                .take(5)
                 .collect::<Vec<_>>(),
             [Some(0), Some(1024), Some(u64::MAX), None, Some(2048)]
         );
@@ -262,5 +394,27 @@ mod tests {
         let emitted = index.columns().unwrap();
         assert_eq!(emitted[0].to_data(), columns[0].slice(0, 3).to_data());
         assert_eq!(emitted[1].to_data(), columns[1].slice(0, 3).to_data());
+    }
+
+    #[test]
+    fn many_compound_keys_survive_growth() {
+        let schema = Schema::new(vec![
+            Field::new("key", DataType::Int64, true),
+            Field::new("text", DataType::Utf8, true),
+        ]);
+        let mut index = GroupIndex::new(&schema).unwrap();
+        let n = 5000i64;
+        let keys: ArrayRef = Arc::new(Int64Array::from_iter_values((0..n).map(|i| i % 1000)));
+        let text: ArrayRef = Arc::new(StringArray::from_iter_values(
+            (0..n).map(|i| format!("t{}", i % 7)),
+        ));
+        let mut ids = vec![];
+        index.intern(&[keys.clone(), text.clone()], n as usize, &mut ids).unwrap();
+        // (i % 1000, i % 7) repeats with period 7000: every row is new.
+        assert_eq!(index.len(), n as usize);
+        let first = ids.clone();
+        index.intern(&[keys, text], n as usize, &mut ids).unwrap();
+        assert_eq!(ids, first);
+        assert_eq!(index.len(), n as usize);
     }
 }

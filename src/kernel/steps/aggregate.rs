@@ -201,7 +201,7 @@ macro_rules! words {
 }
 words!(i8: i64, i16: i64, i32: i64, i64: i64, u8: u64, u16: u64, u32: u64, u64: u64);
 
-/// Word keys probed in the index's word cache, as generated code did.
+/// The groups of word keys.
 fn lookup_words<T: Word>(
     index: &mut crate::exec::aggregate::group_index::GroupIndex,
     rows: &Rows,
@@ -209,26 +209,11 @@ fn lookup_words<T: Word>(
     valid: Option<&[u64]>,
     ids: *mut u64,
 ) {
-    let cache: *const [crate::exec::aggregate::group_index::WordEntry; 1024] =
-        &**index.cache.as_ref().unwrap();
     rows.each(|r| {
         // SAFETY: keys and ids cover the window.
         let bits = unsafe { *keys.add(r) }.word();
-        let v = valid.map_or(1, |w| w[r / 64] >> (r % 64) & 1);
-        let key = if v != 0 { bits } else { 0 };
-        // SAFETY: interning rewrites cache entries in place and never
-        // replaces the boxed cache.
-        let cached = unsafe { (*cache)[key as usize & 1023] };
-        let id = if cached.key == key && cached.tag == v + 1 {
-            cached.id
-        } else {
-            index.intern_word(Cell {
-                bits,
-                len: 0,
-                valid: v,
-            }) as u64
-        };
-        unsafe { *ids.add(r) = id };
+        let v = valid.is_none_or(|w| w[r / 64] >> (r % 64) & 1 != 0);
+        unsafe { *ids.add(r) = index.intern_word(bits, v) as u64 };
     });
 }
 
@@ -266,7 +251,7 @@ impl Frame<'_> {
         };
         // SAFETY: the state is exclusively borrowed for the run.
         let index = unsafe { &mut (*self.groups[state.0]).index };
-        if let ([key], Some(_)) = (keys, &index.cache)
+        if let ([key], true) = (keys, index.word_keys())
             && let Some(value) = key.value()
             && !self.steps.vars[value.0].scalar()
             && self.steps.vars[value.0].ty != Ty::Bool
