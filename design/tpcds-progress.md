@@ -70,21 +70,48 @@ Commit history on the branch tells the order of work. Update this section
 and `tpcds/status.md` from the runner output after each milestone.
 
 <!-- STATUS -->
-2026-10-15, SF1, Apple M1 Pro. Full per-statement report:
+2026-10-15, SF1, Apple M1 Pro (machine shared with other jobs; timings are
+noisy, compare engines within one run). Full per-statement report:
 [`integrations/datafusion/tpcds/status.md`](../integrations/datafusion/tpcds/status.md).
 
-| Mode | Workers | Passed | Roc total | DataFusion total |
-| --- | ---: | --- | ---: | ---: |
-| Compile | 4 | 103 / 103 | 96.5 s | 6.5 s |
-| ZeroCompile | 4 | 103 / 103 | 82.0 s | 6.5 s |
-| Compile | 1 | 102 / 103 (q72: 120 s timeout) | 58.9 s | 5.6 s |
-| ZeroCompile | 1 | 102 / 103 (q72: 120 s timeout) | 43.2 s | 5.6 s |
+Correctness: 103 / 103 in both modes with 4 workers; with 1 worker q72 used
+to time out (it now takes about 1 s).
 
-Correctness is complete for the corpus at SF1 (q72 is correct with 4
-workers, 56 s). Performance has not been worked on yet: Roc is about 10x
-slower than DataFusion in total, slower with 4 workers than with 1, and the
-worst statements are 40–75x slower (q72, q2, q36, q43, q66, q27, q21).
+Performance, ZeroCompile, 4 workers, both engines on a 4-thread runtime
+with 4 DataFusion partitions, best of 3 runs (`--repeat 3`):
+
+| Point | Roc total | DataFusion total | Roc slower on |
+| --- | ---: | ---: | --- |
+| start of the phase (10-thread runtime) | 77 s | 6.5 s | 101 / 103 |
+| after the commits up to `cc65ed8` | 23.4 s | 11.4 s | 88 / 103 |
+
+DuckDB 1.5 (`tpcds/duckdb.py --threads 4`): 4.1 s over the 101 statements
+it parses (q77 and q90 use reserved words as aliases).
 <!-- /STATUS -->
+
+## Performance work so far
+
+Each item is a commit (or two) on the branch; the commit messages explain
+the why.
+
+- Runner: `--repeat`, `--profile`, `--sql`, `--explain` (pipelines with
+  their prepared steps), `--threads`, `--set`; Roc phase times; DuckDB
+  script. Profile with macOS `sample` while `--repeat N --profile` runs.
+- Scans: DataFusion partitions decode in parallel tasks (`storage.rs`);
+  scans split files into target partitions (`plan.rs`).
+- Joins: indexed tables are stored grouped by hash bucket
+  (`kernel/table.rs`); expansions probe a window's rows in one batch and
+  stream matches straight into windows (`steps/expand.rs`); gathers and
+  imports read only the rows of their domain (`Step::Import`,
+  `steps/mod.rs::place_imports`).
+- Translator: real row estimates from DataFusion's `StatisticsContext`;
+  semi-join reduction of build sides and of probe scans by filtered
+  dimension tables joined above them (`plan.rs::Reduction`).
+- Aggregates: open-addressing group index (`exec/aggregate/group_index.rs`);
+  128-bit sums over whole windows; partials of all workers merge as
+  hash partitions in parallel CPU jobs at finish (`SinkExec::finish_on`,
+  `exec::Cpu`).
+- Lowering: decimal casts that cannot overflow skip their precision check.
 
 ## Known gaps and next steps
 
@@ -101,26 +128,27 @@ Correctness:
 - Not yet covered: larger scale factors; an automated test that runs the
   corpus (it needs the generated data, so it is an example today).
 
-Performance (the next phase; profile before changing anything):
+Performance, largest gaps first (profile before changing anything):
 
-1. **Multi-worker slowdown.** 4 workers are slower than 1. Suspects:
-   materializing operators concatenate and sort on the coordinator thread
-   (`exec/buffer.rs`, `exec/sort.rs`, `exec/window.rs`); `TableSinkExec`
-   builds join tables serially at `finish`; DataFusion scan partitions vs.
-   worker count (`storage.rs`).
-2. **Compile mode overhead.** LLVM compiles every program of every
-   pipeline when the graph is built (q2: 1.7 s Compile vs 0.1 s
-   ZeroCompile). Options inside the framework: cache fused functions by a
-   structural key of the fused group, compile lazily or in the background
-   and run zero-compile kernels until code is ready, or skip fusion for
-   pipelines with little input.
-3. **q72** (56 s vs 0.76 s): a join with a large fan-out and residual
-   filter; expansions call `Table::find` per row and gather per row
-   (`kernel/steps/expand.rs`) — vectorize probe and gather kernels.
-4. Row-at-a-time paths that should become kernels: string comparisons and
-   LIKE (`Step::Text`), group lookups with multiple or string keys
-   (`GroupIndex::intern_row`), table index builds (`kernel/table.rs`),
-   and windows/sorts over `scalar::decode` cells.
+1. **Large group-bys** (q23, q67, q14, q78, q97): composite fixed-width
+   keys still go through the encoded-bytes path one row at a time;
+   `Accumulator` keeps one ~180-byte `Group` per group for every function;
+   merges decode partial arrays into cells. Next: fixed-width composite
+   keys interned from whole windows, typed accumulator storage, merges of
+   indexes and accumulators without Arrow arrays.
+2. **Windows and sorts** (q51, q47, q57, q67): `exec/sort.rs` and
+   `exec/window.rs` work on `scalar::decode` cells on one thread.
+3. **Runtime pruning**: DataFusion prunes row groups of date-sorted fact
+   tables with dynamic filters from join builds (q39, q21). An equivalent
+   would hand key bounds of a built table to the scan of a semi-join's
+   probe side; it is a storage hint and changes no semantics.
+4. **Empty build sides** (q27, q68, q46): DataFusion skips the probe side;
+   Roc still scans it.
+5. **Compile mode overhead.** LLVM compiles every program when the graph is
+   built (q2/q66 ~1.5 s). Cache fused functions by a structural key, or
+   compile in the background.
+6. Row-at-a-time paths: string comparisons and LIKE (`Step::Text`), table
+   index builds (`kernel/table.rs`), serial table builds at `finish`.
 
 Keep the boundary: these are kernel and execution-strategy changes; the IR
 semantics and the translator stay general.
