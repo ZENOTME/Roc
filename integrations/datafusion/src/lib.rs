@@ -34,6 +34,8 @@
 //! # }
 //! ```
 
+pub mod plan;
+pub mod run;
 mod storage;
 pub mod tpcds;
 
