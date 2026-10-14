@@ -13,12 +13,14 @@
 // limitations under the License.
 
 mod aggregate;
+mod collect;
 mod exchange;
 mod filter;
 mod project;
 mod scan;
 
 pub use aggregate::AggregateOperator;
+pub use collect::CollectOperator;
 pub use exchange::{
     ExchangeConsumer, ExchangeHandle, ExchangeId, ExchangeService, ExchangeSink,
     ExchangeSinkOperator, ExchangeSourceOperator,

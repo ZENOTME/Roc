@@ -17,6 +17,8 @@
 //! reads, so tests can describe expressions without threading a plan around.
 #![allow(dead_code)]
 
+pub mod exec;
+
 use arrow::{
     array::ArrayRef,
     datatypes::{DataType, Field, Schema},
