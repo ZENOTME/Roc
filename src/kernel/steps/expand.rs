@@ -74,6 +74,11 @@ impl Frame<'_> {
         }
         let mut probes = self.spare.probes.pop().unwrap_or_default();
         self.probes(e, table, &mut probes);
+        if e.exists {
+            self.exists(e, table, &probes);
+            self.spare.probes.push(probes);
+            return Ok(());
+        }
         let rows = self.spare.rows.pop().unwrap_or_default();
         let enclosing = std::mem::replace(&mut self.parents, rows);
         self.lineage.push(enclosing);
@@ -226,6 +231,41 @@ impl Frame<'_> {
         });
         self.spare.cells.push(cells);
         self.spare.keys.push(key);
+    }
+
+    /// Sets the reduced Booleans of the input rows with a match: the block
+    /// computes nothing, so one match is all an input row needs.
+    fn exists(&mut self, e: &ExpandStep, table: &Table, probes: &Probes) {
+        let mut found = [0u64; WORDS];
+        let words = table.word_index().map(|i| i.words);
+        let mut key_start = 0;
+        for c in 0..probes.rows.len() {
+            let rows = probes.lo[c]..probes.hi[c];
+            let hit = match (&e.kind, words) {
+                (ExpandStepKind::Product { .. }, _) => !rows.is_empty(),
+                (_, Some(words)) => {
+                    let key = probes.words[c];
+                    words[rows.start as usize..rows.end as usize].contains(&key)
+                }
+                (_, None) => {
+                    let end = probes.words[c] as usize;
+                    let key = &probes.keys[key_start..end];
+                    key_start = end;
+                    rows.clone().any(|t| table.equal(t, key))
+                }
+            };
+            let r = probes.rows[c] as usize;
+            found[r / 64] |= (hit as u64) << (r % 64);
+        }
+        for r in &e.reduces {
+            for (_, out) in &r.any {
+                // SAFETY: Boolean slots hold a window bitmap.
+                unsafe { *(self.home[out.0] as *mut [u64; WORDS]) = found };
+                self.ptrs[out.0] = self.home[out.0];
+                self.settle(*out);
+            }
+            self.masks[r.domain.0] = self.masks[e.input.0];
+        }
     }
 
     /// ORs the reduced Booleans of a window into its enclosing rows.

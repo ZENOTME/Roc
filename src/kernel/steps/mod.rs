@@ -318,6 +318,9 @@ pub(crate) struct ExpandStep {
     /// block's Import steps copy them.
     pub imports: Vec<(VariableId, VariableId)>,
     pub reduces: Vec<ReduceStep>,
+    /// The block only reduces constant true values: an input row needs one
+    /// match, not the windows of all of them.
+    pub exists: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -762,6 +765,7 @@ impl Builder {
                     block: usize::MAX,
                     imports: vec![],
                     reduces: vec![],
+                    exists: false,
                 })))
             }
             Kernel::Domain(DomainKernel::Reduce { .. }) => {}
@@ -1227,6 +1231,27 @@ impl Steps {
             let (imports, reduces) = (e.imports.clone(), e.reduces.clone());
             let outputs = (output_block == k).then_some(&output_bindings);
             place_imports(&mut blocks[k], graph, &vars, &imports, &reduces, outputs);
+        }
+        // Expansions whose block computes nothing and only reduces true.
+        let mut exists = vec![];
+        for (b, block) in blocks.iter().enumerate() {
+            for (s, step) in block.steps.iter().enumerate() {
+                if let Step::Expand(e) = step {
+                    let truth = |v: &VariableId| {
+                        matches!(vars[v.0].place, Place::Constant(i) if pool[i] == 1)
+                    };
+                    let only = blocks[e.block].steps.is_empty()
+                        && output_block != e.block
+                        && !e.reduces.is_empty()
+                        && e.reduces.iter().all(|r| r.any.iter().all(|(v, _)| truth(v)));
+                    exists.push((b, s, only));
+                }
+            }
+        }
+        for (b, s, only) in exists {
+            if let Step::Expand(e) = &mut blocks[b].steps[s] {
+                e.exists = only;
+            }
         }
         expands.clear();
         for (b, block) in blocks.iter().enumerate() {
