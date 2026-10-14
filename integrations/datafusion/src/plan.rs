@@ -360,6 +360,13 @@ impl Translator<'_> {
             )
             .await
             .map_err(external)?;
+        // Only an estimate for choosing build sides. Split files have no
+        // row counts: estimate first.
+        let rows = StatisticsContext::new()
+            .compute(plan.as_ref(), &StatisticsArgs::new())
+            .ok()
+            .and_then(|s| s.num_rows.get_value().copied())
+            .unwrap_or(1_000_000) as f64;
         // DataFusion splits files into partitions when it optimizes physical
         // plans, which a provider's scan is not yet: split it here, so Roc's
         // workers share the scan.
@@ -368,12 +375,6 @@ impl Translator<'_> {
             .repartitioned(config.execution.target_partitions, config)
             .map_err(external)?
             .unwrap_or(plan);
-        // Only an estimate for choosing build sides.
-        let rows = StatisticsContext::new()
-            .compute(plan.as_ref(), &StatisticsArgs::new())
-            .ok()
-            .and_then(|s| s.num_rows.get_value().copied())
-            .unwrap_or(1_000_000) as f64;
         let columns = self.columns_of(&scan.projected_schema);
         let source = DataFusionScan::new(plan, self.state.task_ctx());
         let node = OperatorTreeNode::new(
