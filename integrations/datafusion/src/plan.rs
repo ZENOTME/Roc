@@ -19,6 +19,13 @@
 //! names, types, coercions and the optimized plan shape. Its scans read the
 //! tables. Anything without a Roc equivalent fails with the node or
 //! expression that needs it.
+//!
+//! One rewrite is the translator's own, semi-join reduction: an inner join
+//! with a filtered table, `... JOIN dim ON key = dim.k`, also filters the
+//! rows that a join below it stores in a table, when they hold `key`: the
+//! stored rows become `rows SEMI JOIN dim ON key = dim.k`. The inner join
+//! drops rows without a match anyway; dropping them before they are stored
+//! shrinks the table and the matches of every join in between.
 use crate::{DataFusionScan, DataFusionStorage};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::{
@@ -84,6 +91,8 @@ pub async fn translate(plan: &LogicalPlan, state: &SessionState) -> Result<Query
         columns: ColumnContext::new(),
         state,
         subqueries: HashMap::new(),
+        reductions: vec![],
+        active: vec![],
     };
     let rel = t.plan(plan).await?;
     // The result columns in schema order.
@@ -106,6 +115,58 @@ struct Translator<'a> {
     state: &'a SessionState,
     /// Scalar subqueries of the expressions being translated, by plan.
     subqueries: HashMap<String, ColumnId>,
+    reductions: Vec<Reduction>,
+    /// The reductions that apply to the plan node being translated.
+    active: Vec<usize>,
+}
+
+/// A semi-join reduction by an inner join `key = dimension.dimension_key`.
+struct Reduction {
+    key: datafusion::common::Column,
+    dimension: LogicalPlan,
+    dimension_key: datafusion::common::Column,
+    /// Whether a build side below took it.
+    applied: bool,
+}
+
+/// Whether a plan is a filtered table: only projections, filters and
+/// aliases over a scan, with a filter somewhere. Such a dimension is worth
+/// reading twice to reduce a join's build side.
+fn filtered_table(plan: &LogicalPlan) -> bool {
+    let subquery = |e: &Expr| {
+        e.exists(|x| {
+            Ok(matches!(
+                x,
+                Expr::ScalarSubquery(_) | Expr::InSubquery(_) | Expr::Exists(_)
+            ))
+        })
+        .unwrap_or(true)
+    };
+    let mut filtered = false;
+    let simple = plan
+        .apply(|n| {
+            let ok = match n {
+                LogicalPlan::Filter(f) => {
+                    filtered = true;
+                    !subquery(&f.predicate)
+                }
+                LogicalPlan::TableScan(s) => {
+                    filtered |= !s.filters.is_empty();
+                    true
+                }
+                LogicalPlan::Projection(p) => !p.expr.iter().any(subquery),
+                LogicalPlan::SubqueryAlias(_) => true,
+                _ => false,
+            };
+            Ok(if ok {
+                TreeNodeRecursion::Continue
+            } else {
+                TreeNodeRecursion::Stop
+            })
+        })
+        .map_err(external)
+        .is_ok_and(|r| r == TreeNodeRecursion::Continue);
+    simple && filtered
 }
 
 impl Translator<'_> {
@@ -139,6 +200,30 @@ impl Translator<'_> {
     }
 
     async fn plan_node(&mut self, plan: &LogicalPlan) -> Result<Rel> {
+        // Reductions pass to the children of nodes that keep or drop rows
+        // without looking at other rows, and keep the key's values; joins
+        // decide for themselves.
+        let passed = match plan {
+            LogicalPlan::Filter(_) | LogicalPlan::Join(_) => self.active.clone(),
+            LogicalPlan::Sort(s) if s.fetch.is_none() => self.active.clone(),
+            LogicalPlan::Projection(p) => self
+                .active
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    let key = &self.reductions[i].key;
+                    p.expr.iter().any(|e| matches!(e, Expr::Column(c) if c == key))
+                })
+                .collect(),
+            _ => vec![],
+        };
+        let inherited = std::mem::replace(&mut self.active, passed);
+        let result = self.plan_kind(plan).await;
+        self.active = inherited;
+        result
+    }
+
+    async fn plan_kind(&mut self, plan: &LogicalPlan) -> Result<Rel> {
         match plan {
             LogicalPlan::TableScan(scan) => self.scan(scan).await,
             LogicalPlan::SubqueryAlias(a) => self.plan(&a.input).await,
@@ -443,20 +528,63 @@ impl Translator<'_> {
         if j.null_aware {
             return Err(unsupported("null-aware anti joins"));
         }
-        let left = self.plan(&j.left).await?;
-        let right = self.plan(&j.right).await?;
+        use DfJoinType as D;
+        let nulls_equal = j.null_equality == NullEquality::NullEqualsNull;
+        let inner = j.join_type == D::Inner && !nulls_equal;
+        let inherited = self.active.clone();
+        // Each side keeps the reductions over its rows; an inner join adds
+        // its own for the other side of a filtered table.
+        let (mut to_left, mut to_right) = match j.join_type {
+            D::Inner => (inherited.clone(), inherited.clone()),
+            D::Left | D::LeftSemi | D::LeftAnti | D::LeftMark => (inherited.clone(), vec![]),
+            D::Right | D::RightSemi | D::RightAnti | D::RightMark => (vec![], inherited.clone()),
+            D::Full => (vec![], vec![]),
+        };
+        if inner {
+            for (l, r) in &j.on {
+                let (Expr::Column(l), Expr::Column(r)) = (l, r) else {
+                    continue;
+                };
+                for (key, side, dimension, dimension_key) in [
+                    (l, &mut to_left, &j.right, r),
+                    (r, &mut to_right, &j.left, l),
+                ] {
+                    if filtered_table(dimension) {
+                        side.push(self.reductions.len());
+                        self.reductions.push(Reduction {
+                            key: key.clone(),
+                            dimension: dimension.as_ref().clone(),
+                            dimension_key: dimension_key.clone(),
+                            applied: false,
+                        });
+                    }
+                }
+            }
+        }
+        self.active = to_left;
+        let left = self.plan(&j.left).await;
+        self.active = to_right;
+        let right = self.plan(&j.right).await;
+        self.active = inherited.clone();
+        let (left, right) = (left?, right?);
         if j.join_type == DfJoinType::Full {
             return self.full_join(j, left, right);
         }
-        let nulls_equal = j.null_equality == NullEquality::NullEqualsNull;
+        // The probe side is the larger input of an inner join; reductions
+        // above apply to the other.
+        let inner_probe_left = left.rows >= right.rows;
+        let (left, right) = match (inner, inner_probe_left) {
+            (true, true) => (left, self.reduce(right, j.right.schema(), &inherited).await?),
+            (true, false) => (self.reduce(left, j.left.schema(), &inherited).await?, right),
+            (false, _) => (left, right),
+        };
         let (lw, rw) = (left.columns.len(), right.columns.len());
         let (lkeys, rkeys): (Vec<Expr>, Vec<Expr>) = j.on.iter().cloned().unzip();
         let (left, lk) = self.computed(&lkeys, j.left.schema(), left)?;
         let (right, rk) = self.computed(&rkeys, j.right.schema(), right)?;
-        use DfJoinType as D;
         // The probe side is the side whose rows the join keeps or extends.
         let (probe_left, join_type) = match j.join_type {
-            D::Inner => (left.rows >= right.rows, JoinType::Inner),
+            D::Inner => (inner_probe_left, JoinType::Inner),
             D::Left => (true, JoinType::Left),
             D::Right => (false, JoinType::Left),
             D::LeftSemi => (true, JoinType::Semi),
@@ -541,6 +669,57 @@ impl Translator<'_> {
             columns,
             rows,
         })
+    }
+
+    /// The rows of a join's build side, semi-joined with the dimension of
+    /// each reduction in `reductions` that is over its rows and not taken by
+    /// a build side below.
+    async fn reduce(&mut self, mut rel: Rel, schema: &DFSchema, reductions: &[usize]) -> Result<Rel> {
+        for &i in reductions {
+            let r = &self.reductions[i];
+            let Ok(at) = schema.index_of_column(&r.key) else {
+                continue;
+            };
+            if r.applied {
+                continue;
+            }
+            let dimension = r.dimension.clone();
+            let Ok(dimension_at) = dimension.schema().index_of_column(&r.dimension_key) else {
+                continue;
+            };
+            self.reductions[i].applied = true;
+            // The dimension is read again, without reductions of its own;
+            // only a smaller one pays for that.
+            let active = std::mem::take(&mut self.active);
+            let dim = self.plan(&dimension).await;
+            self.active = active;
+            let dim = dim?;
+            if dim.rows >= rel.rows {
+                continue;
+            }
+            let key = dim.columns[dimension_at];
+            let kept = rel
+                .columns
+                .iter()
+                .map(|c| (*c, self.renamed(*c)))
+                .collect::<Vec<_>>();
+            let stored = vec![(key, self.renamed(key))];
+            let semi = JoinOperator::try_new(
+                JoinType::Semi,
+                vec![(rel.columns[at], key)],
+                false,
+                kept.clone(),
+                stored,
+                None,
+                None,
+            )?;
+            rel = Rel {
+                node: OperatorTreeNode::new(semi, vec![rel.node, dim.node]),
+                columns: kept.into_iter().map(|c| c.1).collect(),
+                rows: rel.rows * 0.5,
+            };
+        }
+        Ok(rel)
     }
 
     /// FULL JOIN as the left join of both sides, then the right rows
@@ -774,7 +953,10 @@ impl Translator<'_> {
             if !s.outer_ref_columns.is_empty() {
                 return Err(unsupported("correlated scalar subqueries"));
             }
-            let sub = self.plan(&s.subquery).await?;
+            let active = std::mem::take(&mut self.active);
+            let sub = self.plan(&s.subquery).await;
+            self.active = active;
+            let sub = sub?;
             if sub.columns.len() != 1 {
                 return Err(Error::invalid_plan(
                     "a scalar subquery has one column".into(),
