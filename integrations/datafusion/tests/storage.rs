@@ -31,7 +31,7 @@ use datafusion::{
 use futures::{Stream, future::try_join_all, task::ArcWake};
 use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 use roc::{
-    error::Error,
+    error::ErrorKind,
     operator::{ScanConsumer, ScanRequest, ScanStorage},
 };
 use roc_datafusion::{DataFusionScan, DataFusionStorage};
@@ -226,8 +226,14 @@ async fn parquet_read_failure_is_not_end_of_stream() {
         ))
         .unwrap();
     let error = handle.consumer().next().await.unwrap_err();
-    assert!(matches!(error, Error::Execution(_)));
-    assert!(error.to_string().contains("DataFusion scan partition"));
+    assert_eq!(error.kind(), ErrorKind::External, "{error:?}");
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .is::<DataFusionError>()
+    );
+    let context = error.frames()[0].context.as_ref().unwrap();
+    assert_eq!(context.operation, "datafusion.scan");
     assert!(handle.finish().await.is_err());
 }
 
@@ -466,7 +472,7 @@ fn caller_shutdown_wakes_reads_and_releases_datafusion_stream() {
     assert!(counter.0.load(Ordering::SeqCst) > 0);
     assert!(matches!(
         next.as_mut().poll(&mut cx),
-        Poll::Ready(Err(Error::Cancelled))
+        Poll::Ready(Err(ref error)) if error.kind() == ErrorKind::Cancelled
     ));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     drop(next);
@@ -494,13 +500,13 @@ fn caller_shutdown_wins_when_a_pending_stream_becomes_ready() {
     assert!(counter.0.load(Ordering::SeqCst) > 0);
     assert!(matches!(
         next.as_mut().poll(&mut cx),
-        Poll::Ready(Err(Error::Cancelled))
+        Poll::Ready(Err(ref error)) if error.kind() == ErrorKind::Cancelled
     ));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     drop(next);
     assert!(matches!(
         futures::executor::block_on(handle.finish()),
-        Err(Error::Cancelled)
+        Err(ref error) if error.kind() == ErrorKind::Cancelled
     ));
     drop((consumer, handle));
     futures::executor::block_on(shutdown);
@@ -517,9 +523,12 @@ fn execution_and_stream_errors_survive_finalization() {
             ))
             .unwrap();
         let error = futures::executor::block_on(handle.consumer().next()).unwrap_err();
-        assert!(error.to_string().contains("failed"));
+        assert_eq!(error.kind(), ErrorKind::External, "{error:?}");
+        let source = std::error::Error::source(&error).unwrap().to_string();
+        assert!(source.contains("failed"), "{error:?}");
         let final_error = futures::executor::block_on(handle.finish()).unwrap_err();
-        assert_eq!(error.to_string(), final_error.to_string());
+        assert_eq!(error.kind(), final_error.kind());
+        assert_eq!(error.message(), final_error.message());
     }
 }
 
@@ -531,7 +540,7 @@ fn already_cancelled_request_never_starts_scan() {
         test_scan(Mode::ResetError, Arc::new(AtomicUsize::new(0))),
         guard,
     ));
-    assert!(matches!(result, Err(Error::Cancelled)));
+    assert!(matches!(result, Err(ref error) if error.kind() == ErrorKind::Cancelled));
 }
 
 #[tokio::test]
@@ -543,8 +552,8 @@ async fn reset_failure_is_reported_and_releases_shutdown_guard() {
     ));
     assert!(matches!(
         result,
-        Err(Error::Execution(message)) if message.contains("DataFusion scan reset")
-            && message.contains("reset failed")
+        Err(ref error) if error.message() == "DataFusion scan reset failed"
+            && std::error::Error::source(error).unwrap().to_string().contains("reset failed")
     ));
     assert!(!guard.is_shutdown_requested());
     drop(guard);

@@ -16,7 +16,7 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
     column::{ColumnContext, ColumnId},
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     exec::{SinkExec, SourceExec},
     operator::{Operator, OperatorTree, OperatorTreeNode},
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
@@ -30,7 +30,7 @@ impl SourceExec for NoopExec {
         _: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<arrow::record_batch::RecordBatch>>> {
         Box::pin(async {
-            Err(Error::Execution(
+            Err(Error::internal(
                 "not executed in graph construction tests".into(),
             ))
         })
@@ -187,11 +187,9 @@ fn invalid_project_reports_operator_and_reason() {
         let sink = OperatorTreeNode::new(CustomSink, vec![barrier]);
 
         let error = build_pipeline_graph(&OperatorTree::new(columns, sink)).unwrap_err();
-        let Error::InvalidPlan(message) = error else {
-            panic!("expected InvalidPlan, got {error:?}");
-        };
+        assert_eq!(error.kind(), ErrorKind::InvalidPlan, "{error:?}");
         assert_eq!(
-            message,
+            error.message(),
             format!("project operator requires exactly 1 child, got {child_count}"),
         );
     }

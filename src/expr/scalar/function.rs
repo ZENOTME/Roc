@@ -15,7 +15,7 @@
 use super::{ScalarExprRef, build_input};
 use crate::arrow::datatypes::DataType;
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use crate::kernel::{
     ColumnVariableBinding, KernelBuilder, KernelError, PendingErrors, ScalarFunction, VariableId,
     scalar,
@@ -88,25 +88,37 @@ impl FunctionExpression {
         &self,
         builder: &mut KernelBuilder<'_>,
     ) -> Result<(ColumnVariableBinding, PendingErrors)> {
+        self.lower_function(builder).with_context(|| {
+            ErrorContext::new("function.bind")
+                .field("function", format_args!("{:?}", self.function))
+        })
+    }
+
+    fn lower_function(
+        &self,
+        builder: &mut KernelBuilder<'_>,
+    ) -> Result<(ColumnVariableBinding, PendingErrors)> {
         use FunctionKind::*;
         let mut errors = vec![];
         let mut inputs = vec![];
         let mut types = vec![];
-        for argument in &self.arguments {
-            let (binding, e) = build_input(builder, argument)?;
+        for (index, argument) in self.arguments.iter().enumerate() {
+            let (binding, e) = build_input(builder, argument).with_context(|| {
+                ErrorContext::new("function.bind_argument").field("argument", index)
+            })?;
             errors.extend(e);
             inputs.push(binding);
             types.push(builder.column_type(argument.output())?.data_type.clone());
         }
         let f = self.function;
-        let signature = || Error::InvalidPlan(format!("unsupported signature: {f:?}{types:?}"));
+        let signature = || Error::unsupported(format!("unsupported signature: {f:?}{types:?}"));
         let t = &types[0];
         let unary = matches!(f, Negate | IsNull | IsNotNull);
         if unary != (inputs.len() == 1) || (!unary && inputs.len() != 2) {
-            return Err(Error::InvalidPlan("invalid function arity".into()));
+            return Err(Error::invalid_plan("invalid function arity".into()));
         }
         if !unary && types[0] != types[1] {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "operand types differ; insert an explicit cast".into(),
             ));
         }
@@ -284,27 +296,27 @@ mod tests {
                 };
                 let output = t.column(output_type.clone(), true);
                 let expr = FunctionExpression::binary(function, left, right, output).into_ref();
-                let baseline =
-                    |left: &ArrayRef, right: &ArrayRef| -> crate::error::Result<ArrayRef> {
-                        use ::arrow::compute::kernels::{cmp, numeric};
-                        use FunctionKind::*;
-                        Ok(match function {
-                            Add => numeric::add(left, right)?,
-                            Subtract => numeric::sub(left, right)?,
-                            Multiply => numeric::mul(left, right)?,
-                            Divide => numeric::div(left, right)?,
-                            Remainder => numeric::rem(left, right)?,
-                            Equal => Arc::new(cmp::eq(left, right)?),
-                            NotEqual => Arc::new(cmp::neq(left, right)?),
-                            LessThan => Arc::new(cmp::lt(left, right)?),
-                            LessThanOrEqual => Arc::new(cmp::lt_eq(left, right)?),
-                            GreaterThan => Arc::new(cmp::gt(left, right)?),
-                            GreaterThanOrEqual => Arc::new(cmp::gt_eq(left, right)?),
-                            IsDistinctFrom => Arc::new(cmp::distinct(left, right)?),
-                            IsNotDistinctFrom => Arc::new(cmp::not_distinct(left, right)?),
-                            _ => unreachable!(),
-                        })
-                    };
+                type Oracle = std::result::Result<ArrayRef, crate::arrow::error::ArrowError>;
+                let baseline = |left: &ArrayRef, right: &ArrayRef| -> Oracle {
+                    use ::arrow::compute::kernels::{cmp, numeric};
+                    use FunctionKind::*;
+                    Ok(match function {
+                        Add => numeric::add(left, right)?,
+                        Subtract => numeric::sub(left, right)?,
+                        Multiply => numeric::mul(left, right)?,
+                        Divide => numeric::div(left, right)?,
+                        Remainder => numeric::rem(left, right)?,
+                        Equal => Arc::new(cmp::eq(left, right)?),
+                        NotEqual => Arc::new(cmp::neq(left, right)?),
+                        LessThan => Arc::new(cmp::lt(left, right)?),
+                        LessThanOrEqual => Arc::new(cmp::lt_eq(left, right)?),
+                        GreaterThan => Arc::new(cmp::gt(left, right)?),
+                        GreaterThanOrEqual => Arc::new(cmp::gt_eq(left, right)?),
+                        IsDistinctFrom => Arc::new(cmp::distinct(left, right)?),
+                        IsNotDistinctFrom => Arc::new(cmp::not_distinct(left, right)?),
+                        _ => unreachable!(),
+                    })
+                };
                 let expected = if left_scalar {
                     baseline(&broadcast, &array)
                 } else {
@@ -319,10 +331,13 @@ mod tests {
                         assert_eq!(actual.to_data(), expected.to_data(), "{context}")
                     }
                     (Err(actual), Err(expected)) => {
-                        assert!(
-                            matches!(actual, crate::error::Error::Arrow(_)),
-                            "{context}: {actual:?}; oracle: {expected:?}"
-                        )
+                        use crate::{arrow::error::ArrowError, error::ErrorKind};
+                        let kind = match expected {
+                            ArrowError::DivideByZero => ErrorKind::DivisionByZero,
+                            ArrowError::ArithmeticOverflow(_) => ErrorKind::ArithmeticOverflow,
+                            _ => panic!("{context}: unexpected oracle error {expected:?}"),
+                        };
+                        assert_eq!(actual.kind(), kind, "{context}: {actual:?}");
                     }
                     (actual, expected) => {
                         panic!("{context}: actual={actual:?}, expected={expected:?}")

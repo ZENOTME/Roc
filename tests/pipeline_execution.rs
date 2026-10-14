@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 use asyncband::shutdown::ShutdownGuard;
 use futures::{channel::oneshot, future::BoxFuture};
 use roc::{
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     exec::{SinkExec, SourceExec},
     kernel::Program,
     pipeline::{Executor, Pipeline, PipelineExecutionConfig, PipelineGraph, PipelineGraphExecutor},
@@ -84,7 +84,7 @@ impl SourceExec for EmptySource {
             .required_finishes
             .is_some_and(|n| self.prior_finishes.load(Ordering::SeqCst) != n)
         {
-            return Err(Error::Execution(
+            return Err(Error::internal(
                 "dependent pipeline started too early".into(),
             ));
         }
@@ -109,7 +109,7 @@ impl SourceExec for WaitForCancelSource {
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             guard.shutdown_requested().await;
-            Err(Error::Cancelled)
+            Err(Error::cancelled())
         })
     }
 }
@@ -119,7 +119,7 @@ impl SourceExec for FailingSource {
         &'a mut self,
         _: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
-        Box::pin(async { Err(Error::Execution("source failed".into())) })
+        Box::pin(async { Err(Error::new(ErrorKind::External, "source failed")) })
     }
 }
 struct CountingSink(Arc<AtomicUsize>);
@@ -182,7 +182,9 @@ fn caller_can_cancel_execution_without_a_tokio_runtime() {
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();
     shutdown.request_shutdown();
-    assert!(matches!(running.join().unwrap(), Err(Error::Cancelled)));
+    assert!(
+        matches!(running.join().unwrap(), Err(ref error) if error.kind() == ErrorKind::Cancelled)
+    );
     futures::executor::block_on(shutdown);
 }
 
@@ -203,7 +205,9 @@ fn source_failure_does_not_combine_or_request_shutdown() {
             PipelineExecutionConfig::default(),
             2,
         ));
-    assert!(matches!(result, Err(Error::Execution(message)) if message == "source failed"));
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::External);
+    assert_eq!(error.message(), "source failed");
     assert!(!observer.is_shutdown_requested());
     drop(observer);
     futures::executor::block_on(shutdown);
@@ -232,7 +236,12 @@ fn graph_failure_leaves_other_pipelines_for_caller_to_cancel() {
             .with_parallelism(2);
     let shutdown = executor.shutdown();
     let result = futures::executor::block_on(executor.execute());
-    assert!(matches!(result, Err(Error::Execution(message)) if message == "source failed"));
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::External);
+    assert_eq!(error.message(), "source failed");
+    let context = error.frames().last().unwrap().context.as_ref().unwrap();
+    assert_eq!(context.operation, "pipeline.execute");
+    assert_eq!(context.fields, [("pipeline", "0".to_string())]);
     let observer = observed_start
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();

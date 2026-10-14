@@ -97,7 +97,7 @@ impl ColumnContext {
     pub fn get(&self, id: ColumnId) -> Result<&Column> {
         self.columns
             .get(id.0)
-            .ok_or_else(|| Error::InvalidPlan(format!("undefined column {}", id.0)))
+            .ok_or_else(|| Error::invalid_plan(format!("undefined column {}", id.0)))
     }
 
     pub fn column_type(&self, id: ColumnId) -> Result<&ColumnType> {

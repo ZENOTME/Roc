@@ -15,6 +15,7 @@
 use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use asyncband::shutdown::ShutdownGuard;
 use datafusion::{
+    error::DataFusionError,
     execution::TaskContext,
     physical_plan::{
         ExecutionPlan, ExecutionPlanProperties, SendableRecordBatchStream,
@@ -23,7 +24,7 @@ use datafusion::{
 };
 use futures::{future::BoxFuture, task::AtomicWaker};
 use roc::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, ErrorKind, Result},
     operator::{ScanConsumer, ScanHandle, ScanRequest, ScanStorage},
 };
 use std::{
@@ -84,12 +85,13 @@ impl ScanStorage for DataFusionStorage {
     fn start_scan(&self, request: ScanRequest<DataFusionScan>) -> Result<Arc<dyn ScanHandle>> {
         let (mut source, shutdown_guard) = request.into_parts();
         if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
         // DataSourceExec itself has a shared, mutable file queue. New execute()
         // calls alone do not restore files consumed by an earlier execution.
-        source.plan = reset_plan_states(source.plan)
-            .map_err(|error| Error::Execution(format!("DataFusion scan reset: {error}")))?;
+        source.plan = reset_plan_states(source.plan).map_err(|source| {
+            Error::new(classify(&source), "DataFusion scan reset failed").with_source(source)
+        })?;
         Ok(Arc::new(Handle {
             shared: Arc::new(Shared {
                 source,
@@ -108,18 +110,20 @@ struct Shared {
     shutdown_guard: ShutdownGuard,
     next_partition: AtomicUsize,
     stopped: AtomicBool,
-    error: Mutex<Option<Error>>,
+    /// The kind and message of the first failure. The consumer that observed
+    /// it returns the error itself; the others report a failure of that kind.
+    error: Mutex<Option<(ErrorKind, String)>>,
     consumers: Mutex<Vec<Weak<ConsumerSlot>>>,
 }
 
 impl Shared {
     /// Clear idle as well as pending streams. The registry keeps only weak
     /// references, so dropping a consumer immediately releases its stream.
-    fn stop(&self, error: Option<Error>) {
+    fn stop(&self, error: Option<&Error>) {
         {
             let mut first_error = self.error.lock().unwrap();
             if first_error.is_none() {
-                *first_error = error;
+                *first_error = error.map(|error| (error.kind(), error.message().to_owned()));
             }
             self.stopped.store(true, Ordering::Release);
         }
@@ -132,7 +136,7 @@ impl Shared {
 
     fn terminal_result(&self) -> Result<Option<RecordBatch>> {
         match self.error.lock().unwrap().clone() {
-            Some(error) => Err(error),
+            Some((kind, message)) => Err(Error::new(kind, message)),
             None => Ok(None),
         }
     }
@@ -207,7 +211,7 @@ impl Consumer {
                     Err(error) => {
                         let error = scan_error(partition, error);
                         drop(current);
-                        self.shared.stop(Some(error.clone()));
+                        self.shared.stop(Some(&error));
                         return Poll::Ready(Err(error));
                     }
                 }
@@ -222,7 +226,7 @@ impl Consumer {
                 Poll::Ready(Some(Err(error))) => {
                     let error = scan_error(*partition, error);
                     drop(current);
-                    self.shared.stop(Some(error.clone()));
+                    self.shared.stop(Some(&error));
                     return Poll::Ready(Err(error));
                 }
             }
@@ -240,8 +244,8 @@ impl ScanConsumer for Consumer {
                 // Check on every poll so cancellation still wins when data and
                 // shutdown both become ready after a previous Pending result.
                 if shared.shutdown_guard.is_shutdown_requested() {
-                    shared.stop(Some(Error::Cancelled));
-                    return Poll::Ready(Err(Error::Cancelled));
+                    shared.stop(Some(&Error::cancelled()));
+                    return Poll::Ready(Err(Error::cancelled()));
                 }
                 match self.poll_next(cx) {
                     Poll::Ready(result) => Poll::Ready(result),
@@ -250,8 +254,8 @@ impl ScanConsumer for Consumer {
                         // latch, so shutdown cannot be lost during registration.
                         match cancelled.as_mut().poll(cx) {
                             Poll::Ready(()) => {
-                                shared.stop(Some(Error::Cancelled));
-                                Poll::Ready(Err(Error::Cancelled))
+                                shared.stop(Some(&Error::cancelled()));
+                                Poll::Ready(Err(Error::cancelled()))
                             }
                             Poll::Pending => Poll::Pending,
                         }
@@ -263,6 +267,17 @@ impl ScanConsumer for Consumer {
     }
 }
 
-fn scan_error(partition: usize, error: datafusion::error::DataFusionError) -> Error {
-    Error::Execution(format!("DataFusion scan partition {partition}: {error}"))
+fn scan_error(partition: usize, source: DataFusionError) -> Error {
+    Error::new(classify(&source), "DataFusion scan failed")
+        .with_source(source)
+        .with_context(ErrorContext::new("datafusion.scan").field("partition", partition))
+}
+
+/// DataFusion reports most failures without a stable classification.
+fn classify(error: &DataFusionError) -> ErrorKind {
+    match error.find_root() {
+        DataFusionError::ResourcesExhausted(_) => ErrorKind::ResourceExhausted,
+        DataFusionError::NotImplemented(_) => ErrorKind::Unsupported,
+        _ => ErrorKind::External,
+    }
 }

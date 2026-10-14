@@ -66,7 +66,7 @@ impl Drop for Jit {
 }
 
 fn error(e: impl std::fmt::Display) -> Error {
-    Error::Execution(format!("LLVM: {e}"))
+    Error::internal(format!("LLVM code generation failed: {e}"))
 }
 
 thread_local! {

@@ -44,7 +44,7 @@ fn program(barrier: bool) -> Result<Program> {
     Program::compile(builder.finish(Some(&[expression.output()]))?)
 }
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let rows = 1_048_576;
     let batch_rows = 8192;
     let samples = 21;

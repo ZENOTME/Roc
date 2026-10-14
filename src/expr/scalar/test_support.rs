@@ -68,7 +68,11 @@ impl TestPlan {
             self.columns.schema(&self.inputs)?,
             input.to_vec(),
             &RecordBatchOptions::new().with_row_count(Some(rows)),
-        )?;
+        )
+        .map_err(|source| {
+            crate::error::Error::invalid_input("test input does not match its columns".into())
+                .with_source(source)
+        })?;
         let (_shutdown, guard) = asyncband::shutdown::new();
         let run = |mode| {
             let program = self.program_with(exprs, mode)?;

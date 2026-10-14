@@ -86,7 +86,7 @@ where
         graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         if !current_node.children().is_empty() {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "scan operator requires 0 children, got {}",
                 current_node.children().len(),
             )));

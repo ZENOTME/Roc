@@ -125,7 +125,7 @@ impl<'plan> KernelBuilder<'plan> {
     /// Only the root or a domain already produced by a DomainKernel.
     pub fn set_current_domain(&mut self, domain: DomainId) -> Result<()> {
         if !self.domain_defined.get(domain.0).copied().unwrap_or(false) {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "domain {} has no producer",
                 domain.0
             )));
@@ -161,7 +161,7 @@ impl<'plan> KernelBuilder<'plan> {
     pub fn variable(&self, id: VariableId) -> Result<&Variable> {
         self.variables
             .get(id.0)
-            .ok_or_else(|| Error::InvalidPlan(format!("undefined variable {}", id.0)))
+            .ok_or_else(|| Error::invalid_plan(format!("undefined variable {}", id.0)))
     }
 
     pub fn variable_type(&self, id: VariableId) -> Result<VariableType> {
@@ -176,7 +176,7 @@ impl<'plan> KernelBuilder<'plan> {
     fn domain(&self, id: DomainId) -> Result<&RowDomain> {
         self.domains
             .get(id.0)
-            .ok_or_else(|| Error::InvalidPlan(format!("undefined domain {}", id.0)))
+            .ok_or_else(|| Error::invalid_plan(format!("undefined domain {}", id.0)))
     }
 
     /// Whether `ancestor` is `domain` or one of its ancestors.
@@ -195,13 +195,13 @@ impl<'plan> KernelBuilder<'plan> {
     fn check_visible(&self, id: VariableId) -> Result<VariableType> {
         let v = self.variable(id)?;
         if !self.defined[id.0] {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "variable {} is used before its producer",
                 id.0
             )));
         }
         if !self.is_ancestor(v.domain, self.current) {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "variable {} is not visible in domain {}",
                 id.0, self.current.0
             )));
@@ -212,19 +212,19 @@ impl<'plan> KernelBuilder<'plan> {
     fn define(&mut self, id: VariableId, ty: VariableType) -> Result<()> {
         let v = *self.variable(id)?;
         if v.domain != self.current {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "output variable {} does not belong to the current domain",
                 id.0
             )));
         }
         if v.ty != ty {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "output variable {} is {:?}, expected {ty:?}",
                 id.0, v.ty
             )));
         }
         if std::mem::replace(&mut self.defined[id.0], true) {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "variable {} has more than one producer",
                 id.0
             )));
@@ -239,7 +239,7 @@ impl<'plan> KernelBuilder<'plan> {
         if let Some(validity) = binding.validity()
             && self.variable_type(validity)? != VariableType::Boolean
         {
-            return Err(Error::InvalidPlan("validity must be Boolean".into()));
+            return Err(Error::invalid_plan("validity must be Boolean".into()));
         }
         let expected = match binding {
             ColumnVariableBinding::Null { .. } => vec![],
@@ -254,7 +254,7 @@ impl<'plan> KernelBuilder<'plan> {
             .map(|v| self.variable_type(v))
             .collect::<Result<Vec<_>>>()?;
         if actual != expected {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "binding variables {actual:?} do not match {binding:?}"
             )));
         }
@@ -271,7 +271,7 @@ impl<'plan> KernelBuilder<'plan> {
             .collect::<Result<Vec<_>>>()?;
         for state in kernel.states() {
             if state.0 >= self.states.len() {
-                return Err(Error::InvalidPlan(format!("undefined state {}", state.0)));
+                return Err(Error::invalid_plan(format!("undefined state {}", state.0)));
             }
         }
         let outputs: Vec<VariableType> = match &kernel {
@@ -281,7 +281,7 @@ impl<'plan> KernelBuilder<'plan> {
             } => {
                 let types = function.output_types(&inputs)?;
                 if types.len() != outputs.len() {
-                    return Err(Error::InvalidPlan(format!(
+                    return Err(Error::invalid_plan(format!(
                         "{function:?} produces {} outputs, got {}",
                         types.len(),
                         outputs.len()
@@ -291,7 +291,7 @@ impl<'plan> KernelBuilder<'plan> {
             }
             ScalarKernel::Select { .. } => {
                 if inputs[0] != VariableType::Boolean || inputs[1] != inputs[2] {
-                    return Err(Error::InvalidPlan(format!(
+                    return Err(Error::invalid_plan(format!(
                         "invalid Select operands {inputs:?}"
                     )));
                 }
@@ -299,7 +299,7 @@ impl<'plan> KernelBuilder<'plan> {
             }
             ScalarKernel::RaiseIf { .. } => {
                 if inputs[0] != VariableType::Boolean {
-                    return Err(Error::InvalidPlan("RaiseIf requires a Boolean".into()));
+                    return Err(Error::invalid_plan("RaiseIf requires a Boolean".into()));
                 }
                 vec![]
             }
@@ -313,7 +313,7 @@ impl<'plan> KernelBuilder<'plan> {
                 group, arguments, ..
             } => {
                 if self.variable_type(*group)? != VariableType::UInt64 {
-                    return Err(Error::InvalidPlan("group ID must be UInt64".into()));
+                    return Err(Error::invalid_plan("group ID must be UInt64".into()));
                 }
                 for argument in arguments {
                     self.check_binding(argument)?;
@@ -332,18 +332,18 @@ impl<'plan> KernelBuilder<'plan> {
     /// child of the current domain. Does not switch the current domain.
     pub fn add_domain_kernel(&mut self, kernel: DomainKernel) -> Result<()> {
         let DomainKernel::Filter { predicate, output } = &kernel else {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "only Filter domain kernels are supported".into(),
             ));
         };
         if self.check_visible(*predicate)? != VariableType::Boolean {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "filter predicate must be Boolean".into(),
             ));
         }
         let domain = *self.domain(*output)?;
         if domain.parent != Some(self.current) || self.domain_defined[output.0] {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "filter must produce a new child of the current domain".into(),
             ));
         }
@@ -492,14 +492,14 @@ impl<'plan> KernelBuilder<'plan> {
             .get(column.index())
             .and_then(Option::as_ref)
             .ok_or_else(|| {
-                Error::InvalidPlan(format!(
+                Error::invalid_plan(format!(
                     "column {} is not available in this pipeline",
                     column.index()
                 ))
             })?;
         for v in bound.binding.variables() {
             if !self.is_ancestor(self.variables[v.0].domain, self.current) {
-                return Err(Error::InvalidPlan(format!(
+                return Err(Error::invalid_plan(format!(
                     "column {} is not visible in the current domain",
                     column.index()
                 )));
@@ -535,7 +535,7 @@ impl<'plan> KernelBuilder<'plan> {
     ) -> Result<()> {
         let ty = self.column_type(column)?;
         if !binding_matches(&binding, &ty.data_type) {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "column {} of type {} cannot be bound to {binding:?}",
                 column.index(),
                 ty.data_type
@@ -547,7 +547,7 @@ impl<'plan> KernelBuilder<'plan> {
         }
         let slot = &mut self.bindings[column.index()];
         if slot.is_some() {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "column {} is defined more than once",
                 column.index()
             )));
@@ -560,7 +560,7 @@ impl<'plan> KernelBuilder<'plan> {
     /// of the chunk carries `columns[i]`.
     pub fn bind_inputs(&mut self, columns: &[ColumnId]) -> Result<()> {
         if !self.inputs.is_empty() {
-            return Err(Error::InvalidPlan("pipeline input is bound twice".into()));
+            return Err(Error::invalid_plan("pipeline input is bound twice".into()));
         }
         let saved = std::mem::replace(&mut self.current, DomainId::ROOT);
         let result = (|| {
@@ -604,7 +604,7 @@ impl<'plan> KernelBuilder<'plan> {
             });
         }
         let vt = VariableType::of(&ty.data_type).ok_or_else(|| {
-            Error::InvalidPlan(format!("unsupported column type: {}", ty.data_type))
+            Error::unsupported(format!("unsupported column type: {}", ty.data_type))
         })?;
         ColumnVariableBinding::fixed(vt, input(self, vt)?, validity)
     }

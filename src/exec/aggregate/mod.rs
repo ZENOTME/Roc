@@ -25,7 +25,7 @@ use crate::expr::agg::accumulator::Accumulator;
 use crate::kernel::{LocalState, StateId};
 use crate::operator::Operator;
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::AggregateOperator,
 };
 use asyncband::shutdown::ShutdownGuard;
@@ -74,8 +74,10 @@ impl AggregateMergeState {
     fn new(operator: &AggregateOperator, columns: &ColumnContext) -> Result<Self> {
         let schema = columns.schema(&operator.group_columns())?;
         let mut accumulators = Vec::new();
-        for aggregate in operator.aggregates() {
-            let mut accumulator = aggregate.accumulator(columns)?;
+        for (index, aggregate) in operator.aggregates().iter().enumerate() {
+            let mut accumulator = aggregate
+                .accumulator(columns)
+                .with_context(|| ErrorContext::new("aggregate.bind").field("aggregate", index))?;
             if schema.fields().is_empty() {
                 accumulator.resize(1);
             }
@@ -104,7 +106,7 @@ impl AggregateMergeState {
                         })
                 })
         {
-            return Err(Error::Execution("invalid aggregate partial state".into()));
+            return Err(Error::internal("invalid aggregate partial state".into()));
         }
         if partial.num_rows() == 0 {
             return Ok(());
@@ -114,23 +116,36 @@ impl AggregateMergeState {
             partial.num_rows(),
             &mut self.group_ids,
         )?;
-        for (accumulator, state) in self.accumulators.iter_mut().zip(&partial.states) {
+        for (index, (accumulator, state)) in self
+            .accumulators
+            .iter_mut()
+            .zip(&partial.states)
+            .enumerate()
+        {
             accumulator.resize(self.index.len());
-            accumulator.merge(state, &self.group_ids)?;
+            accumulator
+                .merge(state, &self.group_ids)
+                .with_context(|| ErrorContext::new("aggregate.merge").field("aggregate", index))?;
         }
         Ok(())
     }
     fn finish(self) -> Result<RecordBatch> {
         let count = self.index.len();
         let mut columns = self.index.columns()?;
-        for accumulator in self.accumulators {
-            columns.push(accumulator.evaluate()?);
+        for (index, accumulator) in self.accumulators.into_iter().enumerate() {
+            columns.push(accumulator.evaluate().with_context(|| {
+                ErrorContext::new("aggregate.evaluate").field("aggregate", index)
+            })?);
         }
-        Ok(RecordBatch::try_new_with_options(
+        RecordBatch::try_new_with_options(
             self.output_schema,
             columns,
             &RecordBatchOptions::new().with_row_count(Some(count)),
-        )?)
+        )
+        .map_err(|source| {
+            Error::invalid_plan("aggregate output does not match its declared schema".into())
+                .with_source(source)
+        })
     }
 }
 
@@ -191,10 +206,10 @@ impl SinkExec for AggregateSinkExec {
             let merge = self
                 .merge
                 .as_mut()
-                .ok_or_else(|| Error::Execution("aggregate already finished".into()))?;
+                .ok_or_else(|| Error::internal("aggregate already finished".into()))?;
             for offset in (0..partial.num_rows()).step_by(AGGREGATE_MORSEL_ROWS) {
                 if guard.is_shutdown_requested() {
-                    return Err(Error::Cancelled);
+                    return Err(Error::cancelled());
                 }
                 merge.merge(&partial.slice(
                     offset,
@@ -208,24 +223,24 @@ impl SinkExec for AggregateSinkExec {
     fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             let batch = self
                 .merge
                 .take()
-                .ok_or_else(|| Error::Execution("aggregate already finished".into()))?
+                .ok_or_else(|| Error::internal("aggregate already finished".into()))?
                 .finish()?;
             self.result
                 .finalized
                 .set(batch)
-                .map_err(|_| Error::Execution("aggregate result already published".into()))
+                .map_err(|_| Error::internal("aggregate result already published".into()))
         })
     }
 }
 impl SourceExec for AggregateSourceExec {
     fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
         if self.result.finalized.get().is_none() {
-            return Err(Error::Execution(
+            return Err(Error::internal(
                 "aggregate source started before sink finished".into(),
             ));
         }
@@ -237,13 +252,13 @@ impl SourceExec for AggregateSourceExec {
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
             if guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             let batch = self
                 .result
                 .finalized
                 .get()
-                .ok_or_else(|| Error::Execution("aggregate result is not ready".into()))?;
+                .ok_or_else(|| Error::internal("aggregate result is not ready".into()))?;
             if self.next_row >= batch.num_rows() {
                 return Ok(None);
             }
@@ -263,6 +278,7 @@ mod tests {
         datatypes::DataType,
     };
     use crate::column::ColumnId;
+    use crate::error::ErrorKind;
     use crate::expr::{
         agg::{AggregateExpression, AggregateFunction},
         scalar::{
@@ -1047,16 +1063,17 @@ mod tests {
             aggregate(&mut plan, Count, vec![], DataType::Int64, false).with_distinct(),
             aggregate(&mut plan, Min, vec![], DataType::Utf8, true),
             aggregate(&mut plan, Max, vec![], DataType::Utf8, true),
-            // Only COUNT keeps a DISTINCT set; the others would silently drop it.
-            aggregate(&mut plan, Sum, vec![v.clone()], DataType::Float64, true).with_distinct(),
         ] {
             let operator = AggregateOperator::try_new(vec![], vec![Arc::new(expr)])
                 .expect("operator construction does not validate aggregates");
-            assert!(matches!(
-                AggregateState::new(&plan, &operator),
-                Err(Error::InvalidPlan(_))
-            ));
+            let error = AggregateState::new(&plan, &operator).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::InvalidPlan, "{error:?}");
         }
+        // Only COUNT keeps a DISTINCT set; the others would silently drop it.
+        let sum = aggregate(&mut plan, Sum, vec![v], DataType::Float64, true).with_distinct();
+        let operator = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
+        let error = AggregateState::new(&plan, &operator).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported, "{error:?}");
     }
 
     #[test]
@@ -1085,10 +1102,8 @@ mod tests {
             aggregate(&mut plan, Count, vec![], DataType::Float64, false),
         ] {
             let operator = AggregateOperator::try_new(vec![], vec![Arc::new(expr)]).unwrap();
-            assert!(matches!(
-                AggregateState::new(&plan, &operator),
-                Err(Error::InvalidPlan(_))
-            ));
+            let error = AggregateState::new(&plan, &operator).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::InvalidPlan, "{error:?}");
         }
 
         // SUM inserts a TRY cast; unparseable text becomes NULL.
@@ -1105,10 +1120,8 @@ mod tests {
         // A filter must evaluate to Boolean before rows can be selected.
         let rows = aggregate(&mut plan, Count, vec![], DataType::Int64, false).with_filter(v);
         let operator = AggregateOperator::try_new(vec![], vec![Arc::new(rows)]).unwrap();
-        assert!(matches!(
-            AggregateState::new(&plan, &operator),
-            Err(Error::InvalidPlan(_))
-        ));
+        let error = AggregateState::new(&plan, &operator).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::InvalidPlan, "{error:?}");
     }
 
     #[test]
@@ -1124,10 +1137,13 @@ mod tests {
             true,
         );
         let operator = AggregateOperator::try_new(vec![], vec![Arc::new(sum)]).unwrap();
-        assert!(matches!(
-            AggregateState::new(&plan, &operator),
-            Err(Error::InvalidPlan(_))
-        ));
+        let error = AggregateState::new(&plan, &operator).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(error.message(), "unsupported sum result type: Utf8");
+        assert_eq!(
+            error.frames()[0].context.as_ref().unwrap().operation,
+            "aggregate.bind"
+        );
     }
 
     #[test]

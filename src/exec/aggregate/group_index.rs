@@ -32,7 +32,7 @@ impl GroupIndex {
             .map(|f| f.data_type().clone())
             .collect::<Vec<_>>();
         if types.iter().any(|t| !scalar::supported(t)) {
-            return Err(Error::InvalidPlan("unsupported group key type".into()));
+            return Err(Error::unsupported("unsupported group key type".into()));
         }
         let encoders = types.iter().map(scalar::bind_key).collect::<Result<_>>()?;
         let owners = types.iter().map(scalar::bind_owner).collect();

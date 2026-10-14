@@ -14,7 +14,7 @@
 
 use super::{ScalarExprRef, build_input};
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, ResultExt};
 use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
 
 #[derive(Clone, Debug)]
@@ -38,9 +38,9 @@ impl NotExpression {
         &self,
         builder: &mut KernelBuilder<'_>,
     ) -> Result<(ColumnVariableBinding, PendingErrors)> {
-        let (input, errors) = build_input(builder, &self.input)?;
+        let (input, errors) = build_input(builder, &self.input).with_location()?;
         let ColumnVariableBinding::Boolean { value, validity } = input else {
-            return Err(Error::InvalidPlan("NOT requires a Boolean input".into()));
+            return Err(Error::invalid_plan("NOT requires a Boolean input".into()));
         };
         let value = builder.not(value)?;
         Ok((ColumnVariableBinding::Boolean { value, validity }, errors))

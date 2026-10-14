@@ -18,7 +18,7 @@ use crate::column::ColumnId;
 use crate::expr::scalar::ScalarExprRef;
 use crate::kernel::KernelBuilder;
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, ResultExt},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
@@ -45,13 +45,15 @@ impl FilterOperator {
         let column = self.predicate.output();
         let ty = builder.columns().column_type(column)?;
         if ty.data_type != DataType::Boolean {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "filter predicate must be Boolean, got {}",
                 ty.data_type
             )));
         }
-        let errors = self.predicate.build_kernels(builder)?;
-        builder.raise(errors)?;
+        self.predicate
+            .build_kernels(builder)
+            .and_then(|errors| builder.raise(errors))
+            .with_location()?;
         let binding = builder.column_binding(column)?;
         let predicate = builder.predicate(&binding)?;
         let domain = builder.filter(predicate)?;
@@ -75,7 +77,7 @@ impl Operator for FilterOperator {
         graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "filter operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

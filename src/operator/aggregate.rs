@@ -19,7 +19,7 @@ use crate::expr::agg::AggregateExpression;
 use crate::expr::scalar::ScalarExprRef;
 use crate::kernel::{KernelBuilder, StateBuilder, StateId, aggregation::GroupState};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
@@ -39,7 +39,7 @@ impl AggregateOperator {
         aggregates: Vec<Arc<AggregateExpression>>,
     ) -> Result<Self> {
         if aggregates.is_empty() && groups.is_empty() {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "aggregate needs a group or function".into(),
             ));
         }
@@ -70,15 +70,21 @@ impl AggregateOperator {
             })
         }));
         let mut keys = Vec::with_capacity(self.groups.len());
-        for group in &self.groups {
-            let errors = group.build_kernels(builder)?;
-            builder.raise(errors)?;
-            keys.push(builder.column_binding(group.output())?);
+        for (index, group) in self.groups.iter().enumerate() {
+            let key = group
+                .build_kernels(builder)
+                .and_then(|errors| builder.raise(errors))
+                .and_then(|()| builder.column_binding(group.output()))
+                .with_context(|| ErrorContext::new("aggregate.bind_group").field("group", index))?;
+            keys.push(key);
         }
         let ids = builder.group_lookup(grouping, keys)?;
         let mut states = vec![grouping];
-        for aggregate in &self.aggregates {
-            states.push(aggregate.build_kernels(builder, ids, self.groups.is_empty())?);
+        for (index, aggregate) in self.aggregates.iter().enumerate() {
+            let state = aggregate
+                .build_kernels(builder, ids, self.groups.is_empty())
+                .with_context(|| ErrorContext::new("aggregate.bind").field("aggregate", index))?;
+            states.push(state);
         }
         Ok(states)
     }
@@ -102,7 +108,7 @@ impl Operator for AggregateOperator {
         graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "aggregate operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

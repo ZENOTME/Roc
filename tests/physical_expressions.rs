@@ -23,7 +23,7 @@ use arrow::{
 use futures::future::BoxFuture;
 use roc::{
     column::{ColumnContext, ColumnId, ColumnType},
-    error::Result,
+    error::{Error, ErrorKind, Result},
     exec::{ScanExec, SinkExec, SinkStatus, SourceExec},
     expr::{
         agg::{AggregateExpression, AggregateFunction},
@@ -143,7 +143,9 @@ impl ScanStorage for MemoryStorage {
         request: ScanRequest<Self::StorageTaskDesc>,
     ) -> Result<Arc<dyn ScanHandle>> {
         assert_eq!(request.source(), &[2, 0]);
-        let batch = self.0.project(request.source())?;
+        let batch = self.0.project(request.source()).map_err(|source| {
+            Error::invalid_input("invalid scan columns".into()).with_source(source)
+        })?;
         Ok(Arc::new(MemoryScan(Arc::new(Mutex::new(Some(batch))))))
     }
 }
@@ -433,7 +435,13 @@ fn preserves_arrow_kernel_errors() {
         .unwrap()
         .execute(&batch)
         .unwrap_err();
-    assert!(matches!(error, roc::error::Error::Arrow(_)));
+    assert_eq!(error.kind(), ErrorKind::DivisionByZero);
+    assert!(matches!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<arrow::error::ArrowError>(),
+        Some(arrow::error::ArrowError::DivideByZero)
+    ));
 }
 
 #[test]
@@ -443,7 +451,7 @@ fn filter_rejects_non_boolean_results() {
     for predicate in [reference(v), int(&mut columns, Some(1))] {
         assert!(matches!(
             filter_program(&columns, &[v], predicate),
-            Err(roc::error::Error::InvalidPlan(_))
+            Err(ref error) if error.kind() == ErrorKind::InvalidPlan
         ));
     }
 }
@@ -483,13 +491,13 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
     shutdown.request_shutdown();
     assert!(matches!(
         exec.next_batch(&shutdown_guard).await,
-        Err(roc::error::Error::Cancelled)
+        Err(ref error) if error.kind() == ErrorKind::Cancelled
     ));
     exec.finish(&shutdown_guard).await.unwrap();
 }
 
 struct MemoryExchange {
-    input: Result<Option<RecordBatch>>,
+    input: Mutex<Result<Option<RecordBatch>>>,
     output: Collector,
     schema: arrow::datatypes::SchemaRef,
     created_sinks: std::sync::atomic::AtomicUsize,
@@ -502,9 +510,8 @@ impl roc::operator::ExchangeService for MemoryExchange {
         _shutdown_guard: &ShutdownGuard,
     ) -> Result<Arc<dyn roc::operator::ExchangeHandle>> {
         assert_eq!(exchange, 7);
-        Ok(Arc::new(MemoryExchangeInput(Arc::new(Mutex::new(
-            self.input.clone(),
-        )))))
+        let input = std::mem::replace(&mut *self.input.lock().unwrap(), Ok(None));
+        Ok(Arc::new(MemoryExchangeInput(Arc::new(Mutex::new(input)))))
     }
 
     fn create_sink(
@@ -533,12 +540,7 @@ impl roc::operator::ExchangeHandle for MemoryExchangeInput {
 
 impl roc::operator::ExchangeConsumer for MemoryExchangeInput {
     fn next(&mut self) -> BoxFuture<'_, Result<Option<RecordBatch>>> {
-        Box::pin(async {
-            match &mut *self.0.lock().unwrap() {
-                Ok(batch) => Ok(batch.take()),
-                Err(error) => Err(error.clone()),
-            }
-        })
+        Box::pin(async { std::mem::replace(&mut *self.0.lock().unwrap(), Ok(None)) })
     }
 }
 
@@ -565,7 +567,7 @@ async fn exchange_relays_batches_and_opens_sinks_once_even_for_empty_input() {
         RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))]).unwrap();
     for (input, parallelism) in [(Some(batch.clone()), 1), (Some(batch), 3), (None, 3)] {
         let service = Arc::new(MemoryExchange {
-            input: Ok(input.clone()),
+            input: Mutex::new(Ok(input.clone())),
             output: Collector::default(),
             schema: schema.clone(),
             created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -612,7 +614,11 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
     ));
     let collector = Collector::default();
     let service = Arc::new(MemoryExchange {
-        input: Err(roc::error::Error::Io(read_error.clone())),
+        input: Mutex::new(Err(Error::new(
+            ErrorKind::Unavailable,
+            "exchange read failed",
+        )
+        .with_source(read_error.clone()))),
         output: collector.clone(),
         schema: Arc::new(Schema::empty()),
         created_sinks: std::sync::atomic::AtomicUsize::new(0),
@@ -630,6 +636,27 @@ async fn exchange_read_errors_reach_the_caller_without_becoming_end_of_input() {
         .execute()
         .await
         .unwrap_err();
-    assert!(matches!(error, roc::error::Error::Io(actual) if Arc::ptr_eq(&actual, &read_error)));
+    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    let actual = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<Arc<std::io::Error>>()
+        .unwrap();
+    assert!(Arc::ptr_eq(actual, &read_error));
+    let contexts = error
+        .frames()
+        .iter()
+        .filter_map(|frame| frame.context.as_ref())
+        .collect::<Vec<_>>();
+    assert!(
+        contexts
+            .iter()
+            .any(|context| context.operation == "exchange.next"
+                && context.fields.contains(&("exchange", "7".into())))
+    );
+    assert!(
+        contexts
+            .iter()
+            .any(|context| context.operation == "pipeline.execute")
+    );
     assert!(collector.0.lock().unwrap().is_empty());
 }

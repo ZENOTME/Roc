@@ -23,7 +23,7 @@ use arrow::{
 };
 use roc::{
     column::{ColumnContext, ColumnType},
-    error::Result,
+    error::{ErrorKind, Result},
     expr::scalar::*,
     kernel::*,
 };
@@ -92,12 +92,15 @@ fn the_first_failing_row_wins_across_kernels_and_windows() {
         let b: ArrayRef = Arc::new(Int64Array::from_iter_values(
             (0..rows).map(|i| if i == zero { 0 } else { 1 }),
         ));
-        let error = p.evaluate(&TestInput::new(&[a, b], rows)).unwrap_err().to_string();
-        if zero < max {
-            assert!(error.contains("Divide by zero"), "{zero} {max}: {error}");
+        let error = p.evaluate(&TestInput::new(&[a, b], rows)).unwrap_err();
+        let kind = if zero < max {
+            ErrorKind::DivisionByZero
         } else {
-            assert!(error.contains("overflow"), "{zero} {max}: {error}");
-        }
+            ErrorKind::ArithmeticOverflow
+        };
+        assert_eq!(error.kind(), kind, "{zero} {max}: {error:?}");
+        let context = error.frames()[0].context.as_ref().unwrap();
+        assert_eq!(context.fields, [("row", zero.min(max).to_string())], "{error:?}");
     }
 }
 
@@ -111,7 +114,9 @@ fn rare_errors_are_found_in_every_part_of_a_window() {
                 (0..n).map(|i| if i == bad { Some(i64::MAX) } else { Some(i as i64) }),
             ));
             let error = p.evaluate(&TestInput::new(std::slice::from_ref(&input), n)).unwrap_err();
-            assert!(error.to_string().contains("overflow"), "{n} {bad}: {error}");
+            assert_eq!(error.kind(), ErrorKind::ArithmeticOverflow, "{n} {bad}: {error:?}");
+            let context = error.frames()[0].context.as_ref().unwrap();
+            assert_eq!(context.fields, [("row", bad.to_string())], "{error:?}");
             // The same row is NULL: nothing fails.
             let nulled: ArrayRef = Arc::new(Int64Array::from_iter(
                 (0..n).map(|i| if i == bad { None } else { Some(i as i64) }),
@@ -247,7 +252,8 @@ fn every_chunk_of_a_schema_with_nullable_fields_is_checked_for_nulls() {
         let nulls = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![Some(1), None]))]).unwrap();
         assert_eq!(program.run(&clean, &mut local, &guard).unwrap().unwrap().num_rows(), 2);
         let error = program.run(&nulls, &mut local, &guard).unwrap_err();
-        assert!(error.to_string().contains("non-nullable"), "{mode:?}: {error}");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{mode:?}: {error:?}");
+        assert!(error.message().contains("non-nullable"), "{mode:?}: {error:?}");
     }
 }
 

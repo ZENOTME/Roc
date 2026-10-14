@@ -15,7 +15,7 @@
 use super::{SinkExec, SinkStatus, SourceExec};
 use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::ExchangeId,
     operator::{ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink},
 };
@@ -50,9 +50,14 @@ impl ExchangeSourceExec {
 impl SourceExec for ExchangeSourceExec {
     fn start(&mut self, guard: &ShutdownGuard) -> Result<()> {
         if self.handle.is_some() {
-            return Err(Error::Execution("exchange source already started".into()));
+            return Err(Error::internal("exchange source already started".into()));
         }
-        let handle = self.service.start_input(self.exchange, guard)?;
+        let handle = self
+            .service
+            .start_input(self.exchange, guard)
+            .with_context(|| {
+                ErrorContext::new("exchange.start").field("exchange", self.exchange)
+            })?;
         self.consumer = Some(handle.consumer());
         self.handle = Some(handle);
         Ok(())
@@ -61,7 +66,9 @@ impl SourceExec for ExchangeSourceExec {
         Box::pin(async move {
             self.consumer.take();
             if let Some(handle) = self.handle.take() {
-                handle.finish().await?;
+                handle.finish().await.with_context(|| {
+                    ErrorContext::new("exchange.finish").field("exchange", self.exchange)
+                })?;
             }
             Ok(())
         })
@@ -75,15 +82,15 @@ impl SourceExec for ExchangeSourceExec {
             let next = self
                 .consumer
                 .as_mut()
-                .ok_or_else(|| Error::Execution("exchange source is not started".into()))?
+                .ok_or_else(|| Error::internal("exchange source is not started".into()))?
                 .next()
                 .fuse();
             futures::pin_mut!(cancelled, next);
             futures::select_biased! {
                 _ = cancelled => {
-                    Err(Error::Cancelled)
+                    Err(Error::cancelled())
                 },
-                batch = next => batch,
+                batch = next => batch.with_context(|| ErrorContext::new("exchange.next").field("exchange", self.exchange)),
             }
         })
     }
@@ -107,12 +114,18 @@ impl ExchangeSinkExec {
 impl SinkExec for ExchangeSinkExec {
     fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
         if !self.outputs.is_empty() {
-            return Err(Error::Execution("exchange sink already started".into()));
+            return Err(Error::internal("exchange sink already started".into()));
         }
         self.outputs = self
             .exchanges
             .iter()
-            .map(|id| self.service.create_sink(*id, &self.schema))
+            .map(|exchange| {
+                self.service
+                    .create_sink(*exchange, &self.schema)
+                    .with_context(|| {
+                        ErrorContext::new("exchange.create_sink").field("exchange", exchange)
+                    })
+            })
             .collect::<Result<_>>()?;
         Ok(())
     }
@@ -122,8 +135,10 @@ impl SinkExec for ExchangeSinkExec {
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<SinkStatus>> {
         Box::pin(async move {
-            for output in &mut self.outputs {
-                output.send(&chunk, guard).await?;
+            for (exchange, output) in self.exchanges.iter().zip(&mut self.outputs) {
+                output.send(&chunk, guard).await.with_context(|| {
+                    ErrorContext::new("exchange.send").field("exchange", exchange)
+                })?;
             }
             Ok(SinkStatus::Continue)
         })

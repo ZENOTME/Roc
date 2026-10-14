@@ -14,7 +14,7 @@
 
 use super::{ScalarExprRef, build_input};
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, ResultExt};
 use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors, VariableId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,10 +58,10 @@ impl ConjunctionExpression {
         let mut errors = vec![];
         let mut result: Option<(VariableId, Option<VariableId>)> = None;
         for argument in &self.arguments {
-            let (binding, e) = build_input(builder, argument)?;
+            let (binding, e) = build_input(builder, argument).with_location()?;
             errors.extend(e);
             let ColumnVariableBinding::Boolean { value, validity } = binding else {
-                return Err(Error::InvalidPlan(
+                return Err(Error::invalid_plan(
                     "AND / OR require Boolean arguments".into(),
                 ));
             };

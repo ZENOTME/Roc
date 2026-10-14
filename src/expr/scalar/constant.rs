@@ -33,7 +33,7 @@ pub struct ConstantExpression {
 impl ConstantExpression {
     pub fn try_new(value: ArrayRef, output: ColumnId) -> Result<Self> {
         if value.len() != 1 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "constant must contain exactly one value".into(),
             ));
         }
@@ -83,7 +83,7 @@ impl ConstantExpression {
     ) -> Result<(ColumnVariableBinding, PendingErrors)> {
         let data_type = self.value.data_type();
         if !scalar::supported(data_type) {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::unsupported(format!(
                 "unsupported constant type: {data_type}"
             )));
         }
@@ -106,7 +106,7 @@ impl ConstantExpression {
             ));
         }
         let ty = VariableType::of(data_type)
-            .ok_or_else(|| Error::InvalidPlan(format!("unsupported constant type: {data_type}")))?;
+            .ok_or_else(|| Error::unsupported(format!("unsupported constant type: {data_type}")))?;
         let value = builder.constant(ConstantValue::from_bits(ty, cell.bits))?;
         Ok((ColumnVariableBinding::fixed(ty, value, None)?, vec![]))
     }

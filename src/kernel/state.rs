@@ -88,5 +88,5 @@ impl State {
 }
 
 fn mismatch() -> Error {
-    Error::Execution("state binding type mismatch".into())
+    Error::internal("state binding type mismatch".into())
 }

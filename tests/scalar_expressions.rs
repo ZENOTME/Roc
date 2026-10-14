@@ -21,7 +21,7 @@ use arrow::{
     datatypes::{DataType, Field, Schema},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
-use roc::{error::Error, expr::scalar::ScalarExprRef, expr::scalar::*};
+use roc::{error::ErrorKind, expr::scalar::ScalarExprRef, expr::scalar::*};
 use std::sync::Arc;
 
 mod support;
@@ -103,7 +103,7 @@ fn input_binding_retains_shared_arrays_and_releases_replaced_input() {
     let evaluation = reference(0).prepare_test().unwrap();
     let mut executor = TestInput::default();
     assert!(
-        matches!(evaluation.evaluate(&executor), Err(Error::Execution(message)) if message.contains("input"))
+        matches!(evaluation.evaluate(&executor), Err(ref error) if error.kind() == ErrorKind::InvalidInput)
     );
 
     let (first_result, first_input) = {
@@ -747,7 +747,7 @@ fn typed_kernels_downcast_used_columns_without_validating_the_input_layout() {
     ))
     .unwrap();
     assert!(
-        matches!(addition.evaluate(&TestInput::new(columns, num_rows)), Err(Error::Execution(message)) if message == "source column type Int32 differs from column type Int64")
+        matches!(addition.evaluate(&TestInput::new(columns, num_rows)), Err(ref error) if error.kind() == ErrorKind::InvalidInput && error.message() == "source column type Int32 differs from column type Int64")
     );
 }
 
@@ -1353,7 +1353,7 @@ fn lowering_validates_variable_types_before_execution() {
     // description while selecting a kernel.
     assert!(matches!(
         call(FunctionKind::Add, vec![reference(0)], DataType::Int64, true).prepare_test(),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
     // The binary entry point likewise rejects a unary-only kind.
     let binary_is_null = FunctionExpression::binary(
@@ -1364,13 +1364,13 @@ fn lowering_validates_variable_types_before_execution() {
     );
     assert!(matches!(
         binary_is_null.prepare_test(),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
 
     // COALESCE has no value without at least one argument.
     assert!(matches!(
         CoalesceExpression::new(vec![], output_column(DataType::Int64, true)).prepare_test(),
-        Err(Error::InvalidPlan(message)) if message.contains("coalesce")
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan && error.message().contains("coalesce")
     ));
 
     // A constant still has to hold exactly one value.
@@ -1386,7 +1386,7 @@ fn lowering_validates_variable_types_before_execution() {
         NotExpression::new(reference(0), output_column(DataType::Boolean, true)).into_ref();
     assert!(matches!(
         TestProgram::try_new(not_integer),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
 
     // Operand types must agree; the host can insert an explicit cast.
@@ -1398,7 +1398,7 @@ fn lowering_validates_variable_types_before_execution() {
     );
     assert!(matches!(
         TestProgram::try_new(mismatched_operands),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
 
     // CASE conditions must be Boolean.
@@ -1410,7 +1410,7 @@ fn lowering_validates_variable_types_before_execution() {
     .into_ref();
     assert!(matches!(
         TestProgram::try_new(non_boolean_condition),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
 
     // CASE branch types must agree with the declared result.
@@ -1425,7 +1425,7 @@ fn lowering_validates_variable_types_before_execution() {
     .into_ref();
     assert!(matches!(
         TestProgram::try_new(mixed_branches),
-        Err(Error::InvalidPlan(_))
+        Err(ref error) if error.kind() == ErrorKind::InvalidPlan
     ));
 }
 
@@ -1458,10 +1458,10 @@ fn batches_spanning_many_windows_keep_branch_rows_and_the_first_failing_row() {
     assert_eq!(ints(&evaluate(quotient, &batch)), expected);
     // MIN / -1 overflows and MIN / 0 divides by zero; the lower row wins in
     // every execution mode, wherever the rows fall within the batch.
-    for (minus_one, zero, error) in [
-        (1500, 4900, "Arithmetic overflow"),
-        (4900, 1500, "Divide by zero"),
-        (2047, 2048, "Arithmetic overflow"),
+    for (minus_one, zero, kind) in [
+        (1500, 4900, ErrorKind::ArithmeticOverflow),
+        (4900, 1500, ErrorKind::DivisionByZero),
+        (2047, 2048, ErrorKind::ArithmeticOverflow),
     ] {
         let mut divisors = vec![Some(1); rows];
         divisors[minus_one] = Some(-1);
@@ -1474,10 +1474,16 @@ fn batches_spanning_many_windows_keep_branch_rows_and_the_first_failing_row() {
         ))
         .unwrap();
         let batch = integers(divisors);
-        let message = program
+        let error = program
             .evaluate(&TestInput::new(batch.columns(), rows))
-            .unwrap_err()
-            .to_string();
-        assert!(message.contains(error), "{message}");
+            .unwrap_err();
+        assert_eq!(error.kind(), kind, "{error:?}");
+        let context = error.frames()[0].context.as_ref().unwrap();
+        assert_eq!(context.operation, "kernel.raise");
+        assert_eq!(
+            context.fields,
+            [("row", minus_one.min(zero).to_string())],
+            "{error:?}"
+        );
     }
 }

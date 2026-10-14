@@ -15,7 +15,7 @@
 use super::SourceExec;
 use crate::arrow::record_batch::RecordBatch;
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, ResultExt},
     operator::{ScanConsumer, ScanHandle, ScanOperator, ScanRequest},
 };
 use asyncband::shutdown::ShutdownGuard;
@@ -44,12 +44,16 @@ where
 {
     fn start(&mut self, guard: &ShutdownGuard) -> Result<()> {
         if self.handle.is_some() {
-            return Err(Error::Execution("scan already started".into()));
+            return Err(Error::internal("scan already started".into()));
         }
-        let handle = self.operator.storage().start_scan(ScanRequest::new(
-            self.operator.source().clone(),
-            guard.clone(),
-        ))?;
+        let handle = self
+            .operator
+            .storage()
+            .start_scan(ScanRequest::new(
+                self.operator.source().clone(),
+                guard.clone(),
+            ))
+            .with_location()?;
         self.consumer = Some(handle.consumer());
         self.handle = Some(handle);
         Ok(())
@@ -58,7 +62,7 @@ where
         Box::pin(async move {
             self.consumer.take();
             if let Some(handle) = self.handle.take() {
-                handle.finish().await?;
+                handle.finish().await.with_location()?;
             }
             Ok(())
         })
@@ -72,22 +76,22 @@ where
             let next = self
                 .consumer
                 .as_mut()
-                .ok_or_else(|| Error::Execution("scan is not started".into()))?
+                .ok_or_else(|| Error::internal("scan is not started".into()))?
                 .next();
             futures::pin_mut!(cancelled, next);
             futures::future::poll_fn(|cx| {
                 // Preserve cancellation priority on every poll, including when
                 // both the previously pending read and shutdown become ready.
                 if shutdown_guard.is_shutdown_requested() {
-                    return Poll::Ready(Err(Error::Cancelled));
+                    return Poll::Ready(Err(Error::cancelled()));
                 }
                 match next.as_mut().poll(cx) {
-                    Poll::Ready(result) => Poll::Ready(result),
+                    Poll::Ready(result) => Poll::Ready(result.with_location()),
                     Poll::Pending => {
                         // Register only when the read blocks. Polling the wait
                         // also rechecks shutdown, closing the registration race.
                         match cancelled.as_mut().poll(cx) {
-                            Poll::Ready(()) => Poll::Ready(Err(Error::Cancelled)),
+                            Poll::Ready(()) => Poll::Ready(Err(Error::cancelled())),
                             Poll::Pending => Poll::Pending,
                         }
                     }
@@ -166,7 +170,7 @@ mod tests {
         shutdown.request_shutdown();
         assert!(matches!(
             next.as_mut().poll(&mut cx),
-            Poll::Ready(Err(Error::Cancelled))
+            Poll::Ready(Err(ref error)) if error.kind() == crate::error::ErrorKind::Cancelled
         ));
         assert_eq!(polls.load(Ordering::SeqCst), 1);
     }
@@ -184,7 +188,7 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         assert!(matches!(
             next.as_mut().poll(&mut cx),
-            Poll::Ready(Err(Error::Cancelled))
+            Poll::Ready(Err(ref error)) if error.kind() == crate::error::ErrorKind::Cancelled
         ));
         assert_eq!(polls.load(Ordering::SeqCst), 1);
     }

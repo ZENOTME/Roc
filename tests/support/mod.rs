@@ -182,7 +182,7 @@ impl TestProgram {
         let columns = input
             .columns
             .as_deref()
-            .ok_or_else(|| Error::Execution("input columns are not set".into()))?;
+            .ok_or_else(|| Error::invalid_input("input columns are not set".into()))?;
         // Empty inputs may omit columns; nothing reads them.
         let arrays = self
             .inputs
@@ -190,7 +190,9 @@ impl TestProgram {
             .map(|(p, t)| match columns.get(*p) {
                 Some(array) => Ok(array.clone()),
                 None if input.num_rows == 0 => Ok(arrow::array::new_empty_array(t)),
-                None => Err(Error::Execution(format!("column index {p} out of bounds"))),
+                None => Err(Error::invalid_input(format!(
+                    "column index {p} out of bounds"
+                ))),
             })
             .collect::<Result<Vec<_>>>()?;
         let fields = arrays
@@ -202,13 +204,14 @@ impl TestProgram {
             Arc::new(Schema::new(fields)),
             arrays,
             &RecordBatchOptions::new().with_row_count(Some(input.num_rows)),
-        )?;
+        )
+        .map_err(|source| Error::invalid_input("invalid test input".into()).with_source(source))?;
         let (_shutdown, guard) = asyncband::shutdown::new();
         let mut results = self.programs.iter().map(|program| {
             let mut local = program.new_local()?;
             let output = program
                 .run(&batch, &mut local, &guard)?
-                .ok_or_else(|| Error::Execution("program has no output".into()))?;
+                .ok_or_else(|| Error::internal("program has no output".into()))?;
             Ok::<_, Error>(output.columns().to_vec())
         });
         let first = results.next().unwrap();
@@ -216,7 +219,7 @@ impl TestProgram {
             match (&first, &other) {
                 (Ok(a), Ok(b)) => assert!(a == b, "{mode:?} differs: {a:?} vs {b:?}"),
                 (Err(a), Err(b)) => {
-                    assert_eq!(a.to_string(), b.to_string(), "{mode:?} error differs")
+                    assert_eq!(format!("{a:?}"), format!("{b:?}"), "{mode:?} error differs")
                 }
                 (a, b) => panic!("{mode:?} disagrees with Compile: {a:?} vs {b:?}"),
             }
@@ -244,7 +247,7 @@ pub fn select_true(array: ArrayRef) -> Result<Vec<usize>> {
     let array = array
         .as_any()
         .downcast_ref::<arrow::array::BooleanArray>()
-        .ok_or_else(|| Error::Execution("predicate is not Boolean".into()))?;
+        .ok_or_else(|| Error::invalid_input("predicate is not Boolean".into()))?;
     Ok((0..array.len())
         .filter(|&i| arrow::array::Array::is_valid(array, i) && array.value(i))
         .collect())

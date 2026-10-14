@@ -16,6 +16,7 @@
 use super::bits::{self, BitState};
 use super::run::Frame;
 use super::*;
+use crate::error::ErrorKind;
 use crate::expr::agg::accumulator::{self as agg, Accumulator, RowKernel};
 use crate::kernel::scalar::Cell;
 use std::sync::LazyLock;
@@ -32,8 +33,9 @@ static SUMS: LazyLock<[KernelFn; 2]> = LazyLock::new(|| {
     })
 });
 
+#[track_caller]
 fn overflow() -> Error {
-    Error::Execution("aggregate arithmetic overflow".into())
+    Error::new(ErrorKind::ArithmeticOverflow, "aggregate arithmetic overflow")
 }
 
 /// The rows below `n` set in every bitmap: the domain mask, validity.

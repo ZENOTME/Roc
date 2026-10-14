@@ -51,14 +51,13 @@ use arrow::{
 };
 use roc::{
     column::{ColumnContext, ColumnType},
-    error::Result,
     expr::scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression},
     kernel::{KernelBuilder, Program},
     operator::FilterOperator,
 };
 use std::sync::Arc;
 
-fn main() -> Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The host describes typed columns and expressions; no variables yet.
     let mut columns = ColumnContext::new();
     let int = ColumnType::new(DataType::Int64, false);

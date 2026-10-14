@@ -73,7 +73,7 @@ impl KernelBuilder<'_> {
                 Some(v) => self.and(*value, *v)?,
                 None => *value,
             }),
-            _ => Err(Error::InvalidPlan("predicate must be Boolean".into())),
+            _ => Err(Error::invalid_plan("predicate must be Boolean".into())),
         }
     }
 
@@ -152,7 +152,7 @@ impl KernelBuilder<'_> {
             });
         }
         let ty = VariableType::of(data_type)
-            .ok_or_else(|| Error::InvalidPlan(format!("unsupported type: {data_type}")))?;
+            .ok_or_else(|| Error::unsupported(format!("unsupported type: {data_type}")))?;
         let value = self.constant(ConstantValue::zero(ty))?;
         ColumnVariableBinding::fixed(ty, value, validity)
     }
@@ -191,11 +191,11 @@ impl KernelBuilder<'_> {
             },
             _ => {
                 let (Some(a), Some(b)) = (then.value(), otherwise.value()) else {
-                    return Err(Error::InvalidPlan("CASE branch types differ".into()));
+                    return Err(Error::invalid_plan("CASE branch types differ".into()));
                 };
                 let ty = self.variable_type(a)?;
                 if self.variable_type(b)? != ty {
-                    return Err(Error::InvalidPlan("CASE branch types differ".into()));
+                    return Err(Error::invalid_plan("CASE branch types differ".into()));
                 }
                 let value = self.select(cond, a, b)?;
                 B::fixed(ty, value, validity)?
@@ -219,7 +219,7 @@ impl KernelBuilder<'_> {
             return Ok((self.null_binding(to)?, vec![]));
         }
         let validity = input.validity();
-        let unsupported = || Error::InvalidPlan(format!("unsupported cast from {from} to {to}"));
+        let unsupported = || Error::unsupported(format!("unsupported cast from {from} to {to}"));
         // Returns the output validity and errors for an `invalid` flag.
         let checked = |b: &mut Self,
                        invalid: VariableId,

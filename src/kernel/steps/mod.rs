@@ -429,7 +429,7 @@ impl Builder {
             }
             _ if inputs.len() == 4 => {
                 let Some(Func::Compare(pred)) = lowered(function) else {
-                    return Err(Error::InvalidPlan(format!("unsupported {function:?}")));
+                    return Err(Error::unsupported(format!("unsupported {function:?}")));
                 };
                 self.steps.push(Step::Text {
                     text: Text::Compare {
@@ -444,7 +444,7 @@ impl Builder {
             _ => {}
         }
         let func = lowered(function)
-            .ok_or_else(|| Error::InvalidPlan(format!("unsupported {function:?}")))?;
+            .ok_or_else(|| Error::unsupported(format!("unsupported {function:?}")))?;
         let t = ty(&inputs[0]);
         let scalars = inputs
             .iter()
@@ -626,7 +626,7 @@ impl Steps {
                         })
                     }
                     Kernel::Domain(_) => {
-                        return Err(Error::InvalidPlan(
+                        return Err(Error::invalid_plan(
                             "only Filter domain kernels are supported".into(),
                         ));
                     }

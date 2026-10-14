@@ -16,7 +16,7 @@ use arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use asyncband::shutdown::ShutdownGuard;
 use futures::{executor::block_on, future::BoxFuture, poll};
 use roc::{
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     exec::{ExchangeSourceExec, ScanExec, SourceExec},
     operator::{
         ExchangeConsumer, ExchangeHandle, ExchangeService, ExchangeSink, ScanConsumer, ScanHandle,
@@ -42,7 +42,7 @@ impl Service {
     fn start(&self, shutdown_guard: ShutdownGuard) -> Result<Arc<Handle>> {
         self.guards.lock().unwrap().push(shutdown_guard.clone());
         if self.fail_start {
-            return Err(Error::Execution("start failed".into()));
+            return Err(Error::new(ErrorKind::Unavailable, "start failed"));
         }
         Ok(Arc::new(Handle {
             _shutdown_guard: shutdown_guard,
@@ -153,7 +153,7 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
             assert!(!service.guard(2).is_shutdown_requested());
             assert!(matches!(
                 poll!(&mut next),
-                std::task::Poll::Ready(Err(Error::Cancelled))
+                std::task::Poll::Ready(Err(ref error)) if error.kind() == ErrorKind::Cancelled
             ));
         });
         service.guards.lock().unwrap().clear();
@@ -212,7 +212,7 @@ fn failed_source_initialization_does_not_request_shutdown_or_leak_guards() {
         });
         let mut source = source(exchange, service.clone());
         assert!(
-            matches!(source.start(&guard), Err(Error::Execution(message)) if message == "start failed")
+            matches!(source.start(&guard), Err(ref error) if error.kind() == ErrorKind::Unavailable && error.message() == "start failed")
         );
         assert!(!service.guard(0).is_shutdown_requested());
         service.guards.lock().unwrap().clear();

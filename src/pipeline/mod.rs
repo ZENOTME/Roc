@@ -70,7 +70,7 @@ impl<'plan> PipelineBuilder<'plan> {
     /// Sets the source; its chunks bind `columns` in order.
     pub fn set_source(&mut self, source: Box<dyn SourceExec>, columns: &[ColumnId]) -> Result<()> {
         if self.source.is_some() {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "pipeline has more than one source".into(),
             ));
         }
@@ -88,7 +88,9 @@ impl<'plan> PipelineBuilder<'plan> {
         outputs: Option<Vec<ColumnId>>,
     ) -> Result<()> {
         if self.sink.is_some() {
-            return Err(Error::InvalidPlan("pipeline has more than one sink".into()));
+            return Err(Error::invalid_plan(
+                "pipeline has more than one sink".into(),
+            ));
         }
         self.sink = Some((sink, outputs));
         Ok(())
@@ -97,10 +99,10 @@ impl<'plan> PipelineBuilder<'plan> {
     pub(super) fn finish(self, mode: ExecutionMode) -> Result<Pipeline> {
         let (sink, outputs) = self
             .sink
-            .ok_or_else(|| Error::InvalidPlan("pipeline has no sink".into()))?;
+            .ok_or_else(|| Error::invalid_plan("pipeline has no sink".into()))?;
         let source = self
             .source
-            .ok_or_else(|| Error::InvalidPlan("pipeline has no source".into()))?;
+            .ok_or_else(|| Error::invalid_plan("pipeline has no source".into()))?;
         let program = Program::new(self.kernels.finish(outputs.as_deref())?, mode)?;
         Ok(Pipeline::new(source, program, sink))
     }

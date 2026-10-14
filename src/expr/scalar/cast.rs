@@ -14,7 +14,7 @@
 
 use super::{ScalarExprRef, build_input};
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors, cast_supported, scalar};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,13 +55,17 @@ impl CastExpression {
         &self,
         builder: &mut KernelBuilder<'_>,
     ) -> Result<(ColumnVariableBinding, PendingErrors)> {
-        let (input, mut errors) = build_input(builder, &self.input)?;
+        let (input, mut errors) = build_input(builder, &self.input).with_location()?;
         let from = &builder.column_type(self.input.output())?.data_type;
         let to = &builder.column_type(self.output)?.data_type;
         if !scalar::supported(from) || !scalar::supported(to) || !cast_supported(from, to) {
-            return Err(Error::InvalidPlan(format!(
-                "unsupported cast from {from} to {to}"
-            )));
+            return Err(
+                Error::unsupported(format!("unsupported cast from {from} to {to}")).with_context(
+                    ErrorContext::new("cast.bind")
+                        .field("from", from)
+                        .field("to", to),
+                ),
+            );
         }
         let (binding, cast_errors) = builder.cast_binding(&input, from, to, self.mode)?;
         errors.extend(cast_errors);

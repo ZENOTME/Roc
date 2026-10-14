@@ -15,7 +15,7 @@
 //! Variables, row domains and kernels.
 use super::StateId;
 use crate::arrow::datatypes::DataType;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorKind, Result};
 use std::sync::Arc;
 
 /// Meaningful only within its KernelBuilder; independent of ColumnId.
@@ -464,7 +464,7 @@ impl ScalarFunction {
         use ScalarFunction::*;
         use VariableType as T;
         let invalid = || {
-            Error::InvalidPlan(format!(
+            Error::unsupported(format!(
                 "unsupported kernel signature: {self:?}({inputs:?})"
             ))
         };
@@ -522,26 +522,33 @@ pub enum KernelError {
 }
 
 impl KernelError {
+    /// Classifies a raised row failure. The Arrow error is the source Arrow's
+    /// own kernels would report for the same row.
     pub(crate) fn to_error(self, args: &[u64]) -> Error {
         use crate::arrow::error::ArrowError;
         match self {
             Self::ArithmeticOverflow => {
-                ArrowError::ArithmeticOverflow("generated integer arithmetic".into()).into()
+                Error::new(ErrorKind::ArithmeticOverflow, "arithmetic overflow").with_source(
+                    ArrowError::ArithmeticOverflow("generated integer arithmetic".into()),
+                )
             }
-            Self::DivideByZero => ArrowError::DivideByZero.into(),
-            Self::InvalidCast => match args {
-                [ptr, len] => {
-                    // SAFETY: RaiseIf passes a pointer output, valid on every row.
-                    let text =
-                        unsafe { std::slice::from_raw_parts(*ptr as *const u8, *len as usize) };
-                    Error::Execution(format!(
-                        "invalid scalar cast: '{}'",
-                        String::from_utf8_lossy(text)
-                    ))
-                }
-                _ => Error::Execution("invalid scalar cast".into()),
-            },
-            Self::InvalidUtf8 => Error::Execution("invalid UTF-8 cast".into()),
+            Self::DivideByZero => Error::new(ErrorKind::DivisionByZero, "division by zero")
+                .with_source(ArrowError::DivideByZero),
+            Self::InvalidCast => {
+                let message = match args {
+                    [ptr, len] => {
+                        // SAFETY: RaiseIf passes a pointer output, valid on every row.
+                        let text =
+                            unsafe { std::slice::from_raw_parts(*ptr as *const u8, *len as usize) };
+                        format!("invalid scalar cast: '{}'", String::from_utf8_lossy(text))
+                    }
+                    _ => "invalid scalar cast".into(),
+                };
+                Error::invalid_input("cast failed".into())
+                    .with_source(ArrowError::CastError(message))
+            }
+            Self::InvalidUtf8 => Error::invalid_input("cast failed".into())
+                .with_source(ArrowError::CastError("invalid UTF-8 cast".into())),
         }
     }
 }
@@ -646,7 +653,7 @@ impl ColumnVariableBinding {
                 match ty {
                     $(VariableType::$v => Self::$v { value, validity },)*
                     _ => {
-                        return Err(Error::InvalidPlan(format!(
+                        return Err(Error::invalid_plan(format!(
                             "{ty:?} is not a column value type"
                         )));
                     }

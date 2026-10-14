@@ -14,7 +14,7 @@
 
 use super::{ScalarExprRef, build_input};
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
 
 /// The first non-NULL argument. An argument is evaluated only when every
@@ -42,7 +42,7 @@ impl CoalesceExpression {
     ) -> Result<(ColumnVariableBinding, PendingErrors)> {
         let ty = builder.column_type(self.output)?.data_type.clone();
         if self.arguments.is_empty() {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "coalesce requires at least one argument".into(),
             ));
         }
@@ -50,11 +50,13 @@ impl CoalesceExpression {
         // True on rows where every earlier argument is NULL; None is true.
         let mut all_null = None;
         let mut args = vec![];
-        for argument in &self.arguments {
+        for (index, argument) in self.arguments.iter().enumerate() {
+            let context = || ErrorContext::new("coalesce.bind_argument").field("argument", index);
             if builder.column_type(argument.output())?.data_type != ty {
-                return Err(Error::InvalidPlan("coalesce argument types differ".into()));
+                return Err(Error::invalid_plan("coalesce argument types differ".into())
+                    .with_context(context()));
             }
-            let (binding, e) = build_input(builder, argument)?;
+            let (binding, e) = build_input(builder, argument).with_context(context)?;
             errors.extend(builder.guard_errors(e, all_null)?);
             args.push(binding);
             let Some(valid) = binding.validity() else {

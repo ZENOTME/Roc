@@ -17,7 +17,7 @@ use crate::column::ColumnId;
 use crate::expr::scalar::ScalarExprRef;
 use crate::kernel::KernelBuilder;
 use crate::{
-    error::{Error, Result},
+    error::{Error, ErrorContext, Result, ResultExt},
     operator::OperatorTreeNode,
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_on_node},
 };
@@ -39,9 +39,11 @@ impl ProjectOperator {
     }
 
     pub fn build_kernels(&self, builder: &mut KernelBuilder<'_>) -> Result<()> {
-        for expression in &self.expressions {
-            let errors = expression.build_kernels(builder)?;
-            builder.raise(errors)?;
+        for (column, expression) in self.expressions.iter().enumerate() {
+            expression
+                .build_kernels(builder)
+                .and_then(|errors| builder.raise(errors))
+                .with_context(|| ErrorContext::new("projection.bind").field("column", column))?;
         }
         Ok(())
     }
@@ -63,7 +65,7 @@ impl Operator for ProjectOperator {
         graph: &mut PipelineGraphBuilder<'_>,
     ) -> Result<()> {
         let [child] = current_node.children() else {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "project operator requires exactly 1 child, got {}",
                 current_node.children().len(),
             )));

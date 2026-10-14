@@ -53,7 +53,7 @@ pub(crate) fn kernel(key: &Key) -> Result<KernelFn> {
     let name = key.name();
     let i = table::NAMES
         .binary_search(&name.as_str())
-        .map_err(|_| Error::InvalidPlan(format!("no precompiled kernel {name}")))?;
+        .map_err(|_| Error::unsupported(format!("no precompiled kernel {name}")))?;
     Ok(table::TABLES[*VARIANT][i])
 }
 

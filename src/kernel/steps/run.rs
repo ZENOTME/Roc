@@ -20,6 +20,7 @@ use crate::arrow::{
     array::{Array, ArrayRef, AsArray},
     record_batch::RecordBatch,
 };
+use crate::error::ErrorContext;
 use crate::kernel::aggregation::{AccumulatorState, GroupState};
 use crate::kernel::runtime::{self, TextNumber};
 use crate::kernel::scalar::Cell;
@@ -315,7 +316,7 @@ impl Frame<'_> {
     fn windows(&mut self, rows: usize, guard: &ShutdownGuard) -> Result<()> {
         while self.start < rows {
             if guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             self.n = WINDOW.min(rows - self.start);
             self.limit = self.n;
@@ -564,7 +565,10 @@ impl Frame<'_> {
                 }
                 if let Some(r) = bits::first(&[self.words(*cond), mask], self.limit) {
                     let values = args.iter().map(|v| self.get(*v, r)).collect::<Vec<_>>();
-                    self.raised = Some(error.to_error(&values));
+                    // The row is relative to the chunk passed to Program::run.
+                    self.raised = Some(error.to_error(&values).with_context(
+                        ErrorContext::new("kernel.raise").field("row", self.start + r),
+                    ));
                     self.limit = r;
                 }
             }

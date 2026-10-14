@@ -128,7 +128,7 @@ impl AggregateExpression {
     /// A fresh accumulator for this aggregate.
     pub(crate) fn accumulator(&self, columns: &ColumnContext) -> Result<Accumulator> {
         if self.distinct && self.function != AggregateFunction::Count {
-            return Err(Error::InvalidPlan(
+            return Err(Error::unsupported(
                 "DISTINCT is supported only for COUNT".into(),
             ));
         }
@@ -177,7 +177,7 @@ impl AggregateExpression {
         if let Some(filter) = &self.filter {
             let ty = &columns.column_type(filter.output())?.data_type;
             if ty != &DataType::Boolean {
-                return Err(Error::InvalidPlan(format!(
+                return Err(Error::invalid_plan(format!(
                     "aggregate FILTER must be Boolean, got {ty}"
                 )));
             }
@@ -205,7 +205,7 @@ impl AggregateExpression {
                 DataType::Int64 => AggregateUpdateKind::SumI64,
                 DataType::UInt64 => AggregateUpdateKind::SumU64,
                 DataType::Float64 => AggregateUpdateKind::SumF64,
-                _ => return Err(Error::InvalidPlan("unsupported SUM output".into())),
+                _ => return Err(Error::internal("unsupported SUM output".into())),
             },
             AggregateFunction::Avg => AggregateUpdateKind::Avg,
             AggregateFunction::CovarPop => AggregateUpdateKind::CovarPop,

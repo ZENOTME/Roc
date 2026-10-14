@@ -2,13 +2,17 @@
 //! bound once when the state is constructed; helpers never receive a batch.
 use crate::{
     arrow::{array::*, datatypes::*},
-    error::{Error, Result},
+    error::{Error, ErrorKind, Result},
     expr::agg::AggregateFunction,
     kernel::scalar::{self, Cell, OwnedCell},
 };
 use std::{collections::HashSet, sync::Arc};
+#[track_caller]
 fn overflow() -> Error {
-    Error::Execution("aggregate arithmetic overflow".into())
+    Error::new(
+        ErrorKind::ArithmeticOverflow,
+        "aggregate arithmetic overflow",
+    )
 }
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Covariance {
@@ -86,16 +90,29 @@ impl Accumulator {
         output: &DataType,
     ) -> Result<Self> {
         use AggregateFunction::*;
-        if distinct && (function != Count || inputs.len() != 1) {
-            return Err(Error::InvalidPlan("DISTINCT requires COUNT(expr)".into()));
+        if distinct && function != Count {
+            return Err(Error::unsupported(
+                "DISTINCT is supported only for COUNT".into(),
+            ));
+        }
+        if distinct && inputs.len() != 1 {
+            return Err(Error::invalid_plan("DISTINCT requires COUNT(expr)".into()));
         }
         let arity = match function {
             Count => inputs.len() <= 1,
             CovarPop => inputs.len() == 2,
             _ => inputs.len() == 1,
         };
-        if !arity || inputs.iter().any(|t| !scalar::supported(t)) {
-            return Err(Error::InvalidPlan("unsupported aggregate arguments".into()));
+        if !arity {
+            return Err(Error::invalid_plan(format!(
+                "{function:?} does not take {} arguments",
+                inputs.len()
+            )));
+        }
+        if let Some(t) = inputs.iter().find(|t| !scalar::supported(t)) {
+            return Err(Error::unsupported(format!(
+                "unsupported aggregate argument type: {t}"
+            )));
         }
         let valid_output = match function {
             Count => output == &DataType::Int64,
@@ -104,7 +121,7 @@ impl Accumulator {
             Sum => true,
         };
         if !valid_output {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "aggregate output type does not match its kernel".into(),
             ));
         }
@@ -114,8 +131,8 @@ impl Accumulator {
                 DataType::Int64 | DataType::UInt64 | DataType::Float64
             )
         {
-            return Err(Error::InvalidPlan(format!(
-                "unsupported SUM output type: {output}"
+            return Err(Error::unsupported(format!(
+                "unsupported sum result type: {output}"
             )));
         }
         #[cfg(test)]
@@ -231,7 +248,7 @@ impl Accumulator {
     }
     #[cfg(test)]
     fn unsupported_sum_row(&mut self, _id: usize, _values: &[Cell]) -> Result<()> {
-        Err(Error::Execution(format!(
+        Err(Error::internal(format!(
             "unsupported sum result type: {}",
             self.output
         )))
@@ -326,7 +343,7 @@ impl Accumulator {
                     self.output,
                     DataType::Int64 | DataType::UInt64 | DataType::Float64
                 ) {
-                    return Err(Error::Execution(format!(
+                    return Err(Error::internal(format!(
                         "unsupported sum result type: {}",
                         self.output
                     )));

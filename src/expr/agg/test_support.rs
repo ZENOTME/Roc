@@ -93,7 +93,7 @@ impl AccumulatorTestHarness {
     }
     pub fn update(&mut self, input: &RecordBatch, ids: &[usize], groups: usize) -> Result<()> {
         if ids.len() != input.num_rows() || ids.iter().any(|&id| id >= groups) {
-            return Err(Error::Execution(
+            return Err(Error::invalid_input(
                 "aggregate group IDs do not match input".into(),
             ));
         }
@@ -133,7 +133,8 @@ impl AccumulatorTestHarness {
         for &row in &rows {
             keep[row] = true;
         }
-        let input = filter_record_batch(input, &BooleanArray::from(keep))?;
+        let input = filter_record_batch(input, &BooleanArray::from(keep))
+            .map_err(|source| Error::internal("FILTER mask failed".into()).with_source(source))?;
         Ok((input, Some(rows)))
     }
     fn evaluate_arguments(&mut self, input: &RecordBatch) -> Result<Vec<ArrayRef>> {
@@ -155,7 +156,7 @@ impl AccumulatorTestHarness {
                 .zip(types)
                 .any(|(a, t)| a.len() != ids.len() || a.data_type() != &t)
         {
-            return Err(Error::Execution(format!(
+            return Err(Error::invalid_input(format!(
                 "invalid partial state for {:?}",
                 self.expression.function()
             )));

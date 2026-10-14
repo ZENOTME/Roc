@@ -14,7 +14,7 @@
 
 use super::{ScalarExprRef, build_input};
 use crate::column::ColumnId;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result, ResultExt};
 use crate::kernel::{ColumnVariableBinding, KernelBuilder, PendingErrors};
 
 /// Searched CASE. Branch values and ELSE have the output type. A condition is
@@ -56,7 +56,7 @@ impl CaseExpression {
         let ty = builder.column_type(self.output)?.data_type.clone();
         let check = |builder: &KernelBuilder<'_>, e: &ScalarExprRef| {
             if builder.column_type(e.output())?.data_type != ty {
-                return Err(Error::InvalidPlan("CASE branch types differ".into()));
+                return Err(Error::invalid_plan("CASE branch types differ".into()));
             }
             Ok(())
         };
@@ -64,23 +64,27 @@ impl CaseExpression {
         // True on rows where no earlier condition matched; None is true.
         let mut none_before = None;
         let mut arms = vec![];
-        for (cond, value) in &self.branches {
-            let (c, e) = build_input(builder, cond)?;
+        for (branch, (cond, value)) in self.branches.iter().enumerate() {
+            let (c, e) = build_input(builder, cond).with_context(|| {
+                ErrorContext::new("case.bind_condition").field("branch", branch)
+            })?;
             if !matches!(c, ColumnVariableBinding::Boolean { .. }) {
-                return Err(Error::InvalidPlan("CASE condition must be Boolean".into()));
+                return Err(Error::invalid_plan("CASE condition must be Boolean".into()));
             }
             errors.extend(builder.guard_errors(e, none_before)?);
             let p = builder.predicate(&c)?;
             let selected = builder.and_validity(none_before, Some(p))?;
-            check(builder, value)?;
-            let (v, e) = build_input(builder, value)?;
+            let (v, e) = check(builder, value)
+                .and_then(|()| build_input(builder, value))
+                .with_context(|| ErrorContext::new("case.bind_result").field("branch", branch))?;
             errors.extend(builder.guard_errors(e, selected)?);
             arms.push((p, v));
             let not_p = builder.not(p)?;
             none_before = builder.and_validity(none_before, Some(not_p))?;
         }
-        check(builder, &self.else_expr)?;
-        let (mut result, e) = build_input(builder, &self.else_expr)?;
+        let (mut result, e) = check(builder, &self.else_expr)
+            .and_then(|()| build_input(builder, &self.else_expr))
+            .with_location()?;
         errors.extend(builder.guard_errors(e, none_before)?);
         for (p, v) in arms.into_iter().rev() {
             result = builder.select_binding(p, &v, &result)?;

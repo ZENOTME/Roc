@@ -44,19 +44,23 @@ pub(crate) fn partial(
 ) -> Result<(RecordBatch, Vec<Vec<ArrayRef>>)> {
     let grouping = local
         .take_state(states[0])
-        .ok_or_else(|| Error::Execution("missing group state".into()))?
+        .ok_or_else(|| Error::internal("missing group state".into()))?
         .into_inner::<GroupState>()?;
     let groups = RecordBatch::try_new_with_options(
         grouping.schema,
         grouping.index.columns()?,
         &RecordBatchOptions::new().with_row_count(Some(grouping.index.len())),
-    )?;
+    )
+    .map_err(|source| {
+        Error::internal("partial group columns do not match their schema".into())
+            .with_source(source)
+    })?;
     let values = states[1..]
         .iter()
         .map(|&id| {
             let mut state = local
                 .take_state(id)
-                .ok_or_else(|| Error::Execution("missing accumulator state".into()))?
+                .ok_or_else(|| Error::internal("missing accumulator state".into()))?
                 .into_inner::<AccumulatorState>()?;
             state.accumulator.resize(groups.num_rows());
             state.accumulator.state()

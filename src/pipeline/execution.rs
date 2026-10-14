@@ -19,7 +19,7 @@ use crate::exec::{SinkExec, SinkStatus};
 use crate::kernel::{LocalState, Program};
 use crate::{
     Shutdown,
-    error::{Error, Result},
+    error::{Error, ErrorContext, ErrorKind, Result, ResultExt},
 };
 use asyncband::shutdown::ShutdownGuard;
 use futures::{
@@ -31,7 +31,7 @@ use std::future::Future;
 use std::{collections::VecDeque, sync::Arc};
 
 pub trait Executor: Send + Sync + 'static {
-    type JoinError: std::fmt::Display + Send + 'static;
+    type JoinError: std::error::Error + Send + Sync + 'static;
     type Handle<T>: Future<Output = std::result::Result<T, Self::JoinError>> + Send + 'static
     where
         T: Send + 'static;
@@ -62,7 +62,7 @@ impl Default for PipelineExecutionConfig {
 impl PipelineExecutionConfig {
     fn validate(self) -> Result<()> {
         if self.batch_rows == 0 || self.yield_batches == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "batch and yield sizes must be positive".into(),
             ));
         }
@@ -138,24 +138,29 @@ impl Pipeline {
     ) -> Result<()> {
         config.validate()?;
         if parallelism == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "task parallelism must be positive".into(),
             ));
         }
         if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
-        self.sink.start(&shutdown_guard)?;
-        self.source.start(&shutdown_guard)?;
+        self.sink.start(&shutdown_guard).with_location()?;
+        self.source.start(&shutdown_guard).with_location()?;
         // A single worker has no CPU parallelism to schedule, so run inline
         // and yield after bounded work instead of dispatching each batch.
         if parallelism == 1 {
             let mut local = self.program.new_local()?;
             let mut completed = 0;
             let mut stop = false;
-            while let Some(batch) = self.source.next_batch(&shutdown_guard).await? {
+            while let Some(batch) = self
+                .source
+                .next_batch(&shutdown_guard)
+                .await
+                .with_location()?
+            {
                 if shutdown_guard.is_shutdown_requested() {
-                    return Err(Error::Cancelled);
+                    return Err(Error::cancelled());
                 }
                 for offset in (0..batch.num_rows()).step_by(config.batch_rows) {
                     let rows = config.batch_rows.min(batch.num_rows() - offset);
@@ -186,11 +191,14 @@ impl Pipeline {
                 }
             }
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
-            self.sink.combine(local, &shutdown_guard).await?;
-            self.source.finish(&shutdown_guard).await?;
-            return self.sink.finish(&shutdown_guard).await;
+            self.sink
+                .combine(local, &shutdown_guard)
+                .await
+                .with_location()?;
+            self.source.finish(&shutdown_guard).await.with_location()?;
+            return self.sink.finish(&shutdown_guard).await.with_location();
         }
         let source_guard = &shutdown_guard;
         let mut source = Box::pin(futures::stream::try_unfold(
@@ -199,7 +207,8 @@ impl Pipeline {
                 Ok::<_, Error>(
                     source
                         .next_batch(source_guard)
-                        .await?
+                        .await
+                        .with_location()?
                         .map(|batch| (batch, source)),
                 )
             },
@@ -217,7 +226,7 @@ impl Pipeline {
         let mut completed = 0;
         loop {
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             if !stop
                 && let Some(input) = &morsel
@@ -299,7 +308,7 @@ impl Pipeline {
                     )
                     .await
                     {
-                        Either::Left(_) => return Err(Error::Cancelled),
+                        Either::Left(_) => return Err(Error::cancelled()),
                         Either::Right((event, _)) => event,
                     };
                     match event {
@@ -337,7 +346,7 @@ impl Pipeline {
                 let local = match select(Box::pin(shutdown_guard.shutdown_requested()), jobs.next())
                     .await
                 {
-                    Either::Left(_) => return Err(Error::Cancelled),
+                    Either::Left(_) => return Err(Error::cancelled()),
                     Either::Right((local, _)) => local.expect("pending CPU work")?,
                 };
                 stop = return_local(self.sink.as_mut(), local, &mut idle, stop, &shutdown_guard)
@@ -354,14 +363,17 @@ impl Pipeline {
         // Combine only after every CPU job succeeds. Empty input still combines
         // fresh local states, which is required for a global COUNT = 0.
         for local in idle {
-            self.sink.combine(local, &shutdown_guard).await?;
+            self.sink
+                .combine(local, &shutdown_guard)
+                .await
+                .with_location()?;
         }
         if shutdown_guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
         drop(source);
-        self.source.finish(&shutdown_guard).await?;
-        self.sink.finish(&shutdown_guard).await
+        self.source.finish(&shutdown_guard).await.with_location()?;
+        self.sink.finish(&shutdown_guard).await.with_location()
     }
 }
 
@@ -377,7 +389,12 @@ fn run_inline(
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         program.run(batch, local, guard)
     }))
-    .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())))
+    .unwrap_or_else(|_| Err(panicked()))
+}
+
+#[cold]
+fn panicked() -> Error {
+    Error::new(ErrorKind::TaskFailed, "CPU task panicked")
 }
 
 /// Passes a non-empty chunk to the sink. Returns whether the sink finished.
@@ -388,7 +405,7 @@ async fn consume(
 ) -> Result<bool> {
     match chunk {
         Some(chunk) if chunk.num_rows() != 0 => {
-            Ok(sink.consume(chunk, guard).await? == SinkStatus::Finished)
+            Ok(sink.consume(chunk, guard).await.with_location()? == SinkStatus::Finished)
         }
         _ => Ok(false),
     }
@@ -421,11 +438,15 @@ fn on_cpu<E: Executor, T: Send + 'static, W: FnOnce() -> Result<T> + Send + 'sta
 ) -> impl Future<Output = Result<T>> + use<E, T, W> {
     let task = executor.spawn(async move {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-            .unwrap_or_else(|_| Err(Error::Execution("CPU task panicked".into())))
+            .unwrap_or_else(|_| Err(panicked()))
     });
     async move {
         task.await
-            .map_err(|e| Error::Execution(format!("CPU task did not return its state: {e}")))?
+            .map_err(|source| {
+                Error::new(ErrorKind::TaskFailed, "CPU task did not return its state")
+                    .with_source(source)
+            })
+            .and_then(|result| result)
     }
 }
 
@@ -452,7 +473,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         self.config.validate()?;
         let task_executor = Arc::new(self.task_executor);
         if self.parallelism == 0 {
-            return Err(Error::InvalidPlan(
+            return Err(Error::invalid_plan(
                 "task parallelism must be positive".into(),
             ));
         }
@@ -473,7 +494,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
         let mut running = FuturesUnordered::new();
         loop {
             if shutdown_guard.is_shutdown_requested() {
-                return Err(Error::Cancelled);
+                return Err(Error::cancelled());
             }
             while let Some(id) = ready.pop_front() {
                 let pipeline = pipelines[id].take().expect("pipeline started once");
@@ -489,7 +510,7 @@ impl<E: Executor> PipelineGraphExecutor<E> {
                 return if finished == pipelines.len() {
                     Ok(())
                 } else {
-                    Err(Error::Execution(
+                    Err(Error::internal(
                         "pipeline graph has no runnable pipeline".into(),
                     ))
                 };
@@ -500,11 +521,16 @@ impl<E: Executor> PipelineGraphExecutor<E> {
             )
             .await
             {
-                Either::Left(_) => return Err(Error::Cancelled),
+                Either::Left(_) => return Err(Error::cancelled()),
                 Either::Right((completed, _)) => completed,
             };
             let (id, result) = completed.expect("running pipeline exists");
-            result.map_err(|error| Error::Execution(format!("task failed: {error}")))??;
+            result
+                .map_err(|source| {
+                    Error::new(ErrorKind::TaskFailed, "pipeline task failed").with_source(source)
+                })
+                .and_then(|result| result)
+                .with_context(|| ErrorContext::new("pipeline.execute").field("pipeline", id))?;
             finished += 1;
             for &dependent in &graph.dependents[id] {
                 let remaining = &mut remaining_dependencies[dependent];
@@ -764,7 +790,7 @@ mod tests {
         shutdown.request_shutdown();
         assert!(matches!(
             block_on(exec.execute(Arc::new(ThreadTaskExecutor), guard, config(), 1)),
-            Err(Error::Cancelled)
+            Err(ref error) if error.kind() == ErrorKind::Cancelled
         ));
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 0);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
@@ -797,7 +823,7 @@ mod tests {
                             .take()
                             .expect("one persistent read")
                             .await
-                            .map_err(|_| Error::Execution("lost consume notification".into()))?;
+                            .map_err(|_| Error::internal("lost consume notification".into()))?;
                         Ok(Some(batch(&[2])))
                     }
                     _ => Ok(None),
@@ -942,6 +968,6 @@ mod tests {
         let result = block_on(on_cpu(&ThreadTaskExecutor, || -> Result<()> {
             panic!("intentional worker panic")
         }));
-        assert!(matches!(result, Err(Error::Execution(_))));
+        assert!(matches!(result, Err(ref error) if error.kind() == ErrorKind::TaskFailed));
     }
 }

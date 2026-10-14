@@ -253,7 +253,7 @@ impl Outputs {
                     if array.data_type() == t {
                         array
                     } else {
-                        make_array(array.into_data().into_builder().data_type(t.clone()).build()?)
+                        make_array(array.into_data().into_builder().data_type(t.clone()).build().map_err(invalid_output)?)
                     }
                 }
                 Values::Bytes { ptrs, lens, .. } => {
@@ -272,21 +272,29 @@ impl Outputs {
                     }
                     let bytes = Buffer::from(bytes);
                     match t {
-                        DataType::Utf8 => Arc::new(StringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)?),
+                        DataType::Utf8 => Arc::new(StringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
                         DataType::LargeUtf8 => {
-                            Arc::new(LargeStringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)?)
+                            Arc::new(LargeStringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?)
                         }
-                        DataType::Binary => Arc::new(BinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)?),
-                        _ => Arc::new(LargeBinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)?),
+                        DataType::Binary => Arc::new(BinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
+                        _ => Arc::new(LargeBinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
                     }
                 }
             };
             arrays.push(array);
         }
-        Ok(RecordBatch::try_new_with_options(
+        RecordBatch::try_new_with_options(
             output.schema.clone(),
             arrays,
             &RecordBatchOptions::new().with_row_count(Some(rows)),
-        )?)
+        )
+        .map_err(invalid_output)
     }
+}
+
+/// Output arrays are built from the declared column types and validated
+/// values, so Arrow rejecting one violates an execution invariant.
+#[cold]
+fn invalid_output(source: crate::arrow::error::ArrowError) -> Error {
+    Error::internal("output does not match its declared columns".into()).with_source(source)
 }

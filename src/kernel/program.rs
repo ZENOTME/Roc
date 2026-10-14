@@ -50,7 +50,9 @@ pub(crate) fn agree<T>(
     for (mode, other) in results {
         match (&first, &other) {
             (Ok(a), Ok(b)) => assert!(eq(a, b), "{mode:?} differs from {:?}", MODES[0]),
-            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{mode:?} error differs"),
+            (Err(a), Err(b)) => {
+                assert_eq!(format!("{a:?}"), format!("{b:?}"), "{mode:?} error differs")
+            }
             (Ok(_), Err(e)) => panic!("{mode:?} failed alone: {e}"),
             (Err(e), Ok(_)) => panic!("{mode:?} succeeded where {:?} failed: {e}", MODES[0]),
         }
@@ -97,7 +99,7 @@ impl LocalState {
         self.states
             .get_mut(id.0)
             .and_then(Option::as_mut)
-            .ok_or_else(|| Error::Execution("state is not available".into()))
+            .ok_or_else(|| Error::internal("state is not available".into()))
     }
 }
 
@@ -176,17 +178,17 @@ impl Program {
     fn check(&self, batch: &RecordBatch) -> Result<()> {
         for input in &self.inputs {
             let array = batch.columns().get(input.position).ok_or_else(|| {
-                Error::Execution(format!("column index {} out of bounds", input.position))
+                Error::invalid_input(format!("column index {} out of bounds", input.position))
             })?;
             if array.data_type() != &input.ty.data_type {
-                return Err(Error::Execution(format!(
+                return Err(Error::invalid_input(format!(
                     "source column type {} differs from column type {}",
                     array.data_type(),
                     input.ty.data_type
                 )));
             }
             if !input.ty.nullable && !input.binding.is_null_type() && array.null_count() != 0 {
-                return Err(Error::Execution(
+                return Err(Error::invalid_input(
                     "NULL in a non-nullable source column".into(),
                 ));
             }
@@ -201,7 +203,7 @@ impl Program {
         guard: &ShutdownGuard,
     ) -> Result<Option<RecordBatch>> {
         if guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
+            return Err(Error::cancelled());
         }
         // A chunk's columns have the types of its schema's fields and no
         // NULLs in non-nullable ones, so a schema that satisfies the input

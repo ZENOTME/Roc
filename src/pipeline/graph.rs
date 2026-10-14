@@ -50,7 +50,7 @@ impl<'plan> PipelineGraphBuilder<'plan> {
 
     pub fn new_dependency(&mut self, dependent: PipelineId) -> Result<PipelineId> {
         if dependent >= self.pipelines.len() {
-            return Err(Error::InvalidPlan(format!("unknown pipeline {dependent}")));
+            return Err(Error::invalid_plan(format!("unknown pipeline {dependent}")));
         }
         let id = self.pipelines.len();
         self.pipelines.push(PipelineBuilder::new(self.columns));
@@ -62,7 +62,7 @@ impl<'plan> PipelineGraphBuilder<'plan> {
     pub fn pipeline_mut(&mut self, id: PipelineId) -> Result<&mut PipelineBuilder<'plan>> {
         self.pipelines
             .get_mut(id)
-            .ok_or_else(|| Error::InvalidPlan(format!("unknown pipeline {id}")))
+            .ok_or_else(|| Error::invalid_plan(format!("unknown pipeline {id}")))
     }
 
     pub fn finish(self) -> Result<PipelineGraph> {
@@ -83,7 +83,7 @@ impl<'plan> PipelineGraphBuilder<'plan> {
             .map(|inputs| inputs.into_iter().map(|id| count - 1 - id).collect())
             .collect();
         PipelineGraph::new(pipelines, dependencies)
-            .map_err(|error| Error::InvalidPlan(error.to_string()))
+            .map_err(|error| Error::invalid_plan(error.to_string()))
     }
 }
 
@@ -252,7 +252,7 @@ mod tests {
             _: &'a ShutdownGuard,
         ) -> BoxFuture<'a, Result<Option<crate::arrow::record_batch::RecordBatch>>> {
             Box::pin(async {
-                Err(Error::Execution(
+                Err(Error::internal(
                     "not executed in graph construction tests".into(),
                 ))
             })

@@ -151,7 +151,7 @@ pub(crate) fn decode(a: &ArrayRef) -> Result<Vec<Cell>> {
         DataType::Binary => bytes!(BinaryArray),
         DataType::LargeBinary => bytes!(LargeBinaryArray),
         t => {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::unsupported(format!(
                 "unsupported generated value type: {t}"
             )));
         }
@@ -208,7 +208,10 @@ pub(crate) fn encode(t: &DataType, cells: &[Cell]) -> Result<ArrayRef> {
                     } else {
                         std::str::from_utf8(unsafe { c.as_bytes() })
                             .map(Some)
-                            .map_err(|e| Error::Execution(e.to_string()))
+                            .map_err(|source| {
+                                Error::internal("stored string is not UTF-8".into())
+                                    .with_source(source)
+                            })
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -229,7 +232,7 @@ pub(crate) fn encode(t: &DataType, cells: &[Cell]) -> Result<ArrayRef> {
                 .map(|c| (c.valid != 0).then(|| unsafe { c.as_bytes() })),
         )),
         _ => {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::unsupported(format!(
                 "unsupported generated output type: {t}"
             )));
         }
@@ -260,7 +263,7 @@ pub(crate) fn bind_owner(ty: &DataType) -> OwnValue {
 }
 pub(crate) fn bind_key(ty: &DataType) -> Result<KeyEncoder> {
     if !supported(ty) {
-        return Err(Error::InvalidPlan(format!("unsupported key type: {ty}")));
+        return Err(Error::unsupported(format!("unsupported key type: {ty}")));
     }
     Ok(if bytes_type(ty) {
         key_bytes
@@ -317,7 +320,7 @@ pub(crate) fn bind_float(ty: &DataType) -> Result<fn(Cell) -> f64> {
         _ if signed(ty) => |c| c.bits as i64 as f64,
         _ if numeric(ty) || *ty == DataType::Boolean => |c| c.bits as f64,
         _ => {
-            return Err(Error::InvalidPlan(format!(
+            return Err(Error::invalid_plan(format!(
                 "non-numeric aggregate input: {ty}"
             )));
         }
