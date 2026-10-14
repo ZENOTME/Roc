@@ -226,11 +226,14 @@ fn group(steps: &Steps, run: &[Step], later: &[bool]) -> Run {
     }
 }
 
-/// The slot of a variable, if it has one: `(is a bitmap slot, index)`.
-fn slot(place: Place) -> Option<(bool, usize)> {
-    match place {
-        Place::Value(s) | Place::InputBytes { slot: s, .. } => Some((false, s)),
-        Place::Bits(s) | Place::InputBits { slot: s, .. } => Some((true, s)),
+/// The slots of a variable, if it has any: `(is a bitmap slot, first, count)`.
+/// A 128-bit value takes two consecutive value slots.
+fn slots(var: &Var) -> Option<(bool, usize, usize)> {
+    let wide = 1 + (var.ty == Ty::I128) as usize;
+    match var.place {
+        Place::Value(s) => Some((false, s, wide)),
+        Place::InputBytes { slot: s, .. } => Some((false, s, 1)),
+        Place::Bits(s) | Place::InputBits { slot: s, .. } => Some((true, s, 1)),
         _ => None,
     }
 }
@@ -245,22 +248,26 @@ fn separate(steps: &mut Steps, run: &Run) {
     let read = operands
         .clone()
         .filter_map(|(arg, op)| match (arg, op) {
-            (Arg::Column(_) | Arg::Bitmap, Operand::Var(v)) => slot(steps.vars[v.0].place),
+            (Arg::Column(_) | Arg::Bitmap, Operand::Var(v)) => slots(&steps.vars[v.0]),
             _ => None,
         })
         .collect::<Vec<_>>();
+    let overlaps = |(bits, first, count): (bool, usize, usize)| {
+        read.iter()
+            .any(|&(b, f, c)| b == bits && first < f + c && f < first + count)
+    };
     for (arg, op) in operands {
         let (Arg::Output(_) | Arg::OutputBitmap, Operand::Var(v)) = (arg, op) else {
             continue;
         };
-        let place = &mut steps.vars[v.0].place;
-        match *place {
-            Place::Value(s) if read.contains(&(false, s)) => {
-                *place = Place::Value(steps.value_slots);
-                steps.value_slots += 1;
+        let var = steps.vars[v.0];
+        match (var.place, slots(&var)) {
+            (Place::Value(_), Some(at)) if overlaps(at) => {
+                steps.vars[v.0].place = Place::Value(steps.value_slots);
+                steps.value_slots += at.2;
             }
-            Place::Bits(s) if read.contains(&(true, s)) => {
-                *place = Place::Bits(steps.bit_slots);
+            (Place::Bits(_), Some(at)) if overlaps(at) => {
+                steps.vars[v.0].place = Place::Bits(steps.bit_slots);
                 steps.bit_slots += 1;
             }
             _ => {}

@@ -422,3 +422,106 @@ fn errors_after_an_expansion_report_the_probe_row() {
         );
     }
 }
+
+/// Gathered build decimals live in window slots and die inside one fused
+/// run: `(b1 * 3) + 1` and `(b2 * 5) + 1`. Each sum may take a slot pair its
+/// product's input just freed, so each 128-bit output must be moved to a
+/// slot pair of its own.
+#[test]
+fn fused_runs_over_gathered_decimals_keep_their_slots() {
+    use arrow::array::Decimal128Array;
+    use roc::expr::scalar::ConstantExpression;
+    let t = DataType::Decimal128(18, 2);
+    let mut columns = ColumnContext::new();
+    let pk = columns.allocate_named(ColumnType::new(DataType::Int64, true), "pk");
+    let bk = columns.allocate_named(ColumnType::new(DataType::Int64, true), "bk");
+    let b1 = columns.allocate_named(ColumnType::new(t.clone(), true), "b1");
+    let b2 = columns.allocate_named(ColumnType::new(t.clone(), true), "b2");
+    let probe_keys = (0..2500i64).map(|i| i % 50).collect::<Vec<_>>();
+    let probe = scan(
+        batches(
+            vec![("pk", Arc::new(Int64Array::from(probe_keys.clone())))],
+            1000,
+        ),
+        vec![pk],
+    );
+    let v1 = (0..50i128).map(|k| k * 1_000_003 - 77).collect::<Vec<_>>();
+    let v2 = (0..50i128)
+        .map(|k| 9_999_999_999 - k * 13)
+        .collect::<Vec<_>>();
+    let decimal = |v: &[i128]| -> ArrayRef {
+        Arc::new(
+            Decimal128Array::from_iter_values(v.iter().copied())
+                .with_precision_and_scale(18, 2)
+                .unwrap(),
+        )
+    };
+    let build = scan(
+        batches(
+            vec![
+                ("bk", Arc::new(Int64Array::from_iter_values(0..50))),
+                ("b1", decimal(&v1)),
+                ("b2", decimal(&v2)),
+            ],
+            50,
+        ),
+        vec![bk, b1, b2],
+    );
+    let out = [b1, b2].map(|_| columns.allocate(ColumnType::new(t.clone(), true)));
+    let k_out = columns.allocate(ColumnType::new(DataType::Int64, true));
+    let bk_out = columns.allocate(ColumnType::new(DataType::Int64, true));
+    let join = JoinOperator::try_new(
+        JoinType::Inner,
+        vec![(pk, bk)],
+        false,
+        vec![(pk, k_out)],
+        vec![(bk, bk_out), (b1, out[0]), (b2, out[1])],
+        None,
+        None,
+    )
+    .unwrap();
+    let join = OperatorTreeNode::new(join, vec![probe, build]);
+    let mut exprs = vec![];
+    for (c, factor) in [(out[0], 300), (out[1], 500)] {
+        let f = columns.allocate(ColumnType::new(t.clone(), false));
+        let product = columns.allocate(ColumnType::new(DataType::Decimal128(37, 4), true));
+        let product = FunctionExpression::binary(
+            FunctionKind::Multiply,
+            reference(c),
+            ConstantExpression::try_new(decimal(&[factor]), f)
+                .unwrap()
+                .into_ref(),
+            product,
+        )
+        .into_ref();
+        let one = columns.allocate(ColumnType::new(DataType::Decimal128(37, 4), false));
+        let one = ConstantExpression::try_new(
+            Arc::new(
+                Decimal128Array::from_iter_values([10_000i128])
+                    .with_precision_and_scale(37, 4)
+                    .unwrap(),
+            ),
+            one,
+        )
+        .unwrap()
+        .into_ref();
+        let sum = columns.allocate(ColumnType::new(DataType::Decimal128(38, 4), true));
+        exprs.push(FunctionExpression::binary(FunctionKind::Add, product, one, sum).into_ref());
+    }
+    let node = OperatorTreeNode::new(ProjectOperator::new(exprs), vec![join]);
+    let mut rows = execute_all(&columns, &node).unwrap();
+    let show = |v: i128| {
+        let sign = if v < 0 { "-" } else { "" };
+        format!("{sign}{}.{:04}", v.abs() / 10_000, v.abs() % 10_000)
+    };
+    let mut expected = probe_keys
+        .iter()
+        .map(|&k| {
+            let k = k as usize;
+            vec![show(v1[k] * 300 + 10_000), show(v2[k] * 500 + 10_000)]
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    expected.sort();
+    assert_eq!(rows, expected);
+}
