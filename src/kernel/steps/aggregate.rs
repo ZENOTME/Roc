@@ -42,7 +42,7 @@ fn overflow() -> Error {
 }
 
 /// The rows below `n` set in every bitmap: the domain mask, validity.
-struct Rows {
+pub(super) struct Rows {
     set: Set,
     n: usize,
 }
@@ -56,7 +56,7 @@ enum Set {
 }
 
 impl Rows {
-    fn new(masks: &[(&[u64], BitState)], n: usize) -> Option<Self> {
+    pub(super) fn new(masks: &[(&[u64], BitState)], n: usize) -> Option<Self> {
         if n == 0 || masks.iter().any(|(_, s)| *s == BitState::AllFalse) {
             return None;
         }
@@ -83,7 +83,7 @@ impl Rows {
         Some(Self { set, n })
     }
 
-    fn all(&self) -> bool {
+    pub(super) fn all(&self) -> bool {
         matches!(self.set, Set::All)
     }
 
@@ -117,7 +117,7 @@ impl Rows {
     }
 
     #[inline(always)]
-    fn each(&self, mut f: impl FnMut(usize)) {
+    pub(super) fn each(&self, mut f: impl FnMut(usize)) {
         if self.all() {
             (0..self.n).for_each(f);
             return;
@@ -233,6 +233,11 @@ fn lookup_words<T: Word>(
 }
 
 impl Frame<'_> {
+    /// The window rows of a domain, below the limit or not.
+    pub(super) fn selected(&self, domain: DomainId) -> Option<Rows> {
+        Rows::new(&[self.mask(domain)], self.n)
+    }
+
     fn rows(&self, domain: DomainId, validity: Option<VariableId>) -> Option<Rows> {
         let mask = self.mask(domain);
         match validity {

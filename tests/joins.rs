@@ -220,42 +220,43 @@ fn residual_filters_select_matches() {
         JoinType::Mark,
     ] {
         let mut plan = Plan::new(probe_rows(2500), build_rows());
-        // v % 3 != 0 AND w > 'b2'
-        let (join, _, _) = plan.join(join_type, |plan, out| {
-            let three = plan.column("three", DataType::Int64);
-            let three = roc::expr::scalar::ConstantExpression::int64(Some(3), three).into_ref();
-            let rem = plan.column("rem", DataType::Int64);
-            let rem =
-                FunctionExpression::binary(FunctionKind::Remainder, reference(out[1]), three, rem)
-                    .into_ref();
-            let zero = plan.column("zero", DataType::Int64);
-            let zero = roc::expr::scalar::ConstantExpression::int64(Some(0), zero).into_ref();
-            let a = plan.column("a", DataType::Boolean);
-            let a = FunctionExpression::binary(FunctionKind::NotEqual, rem, zero, a).into_ref();
-            let b2 = plan.column("b2", DataType::Utf8);
-            let b2 = roc::expr::scalar::ConstantExpression::string(Some("b2"), b2).into_ref();
-            let b = plan.column("b", DataType::Boolean);
-            let b = FunctionExpression::binary(FunctionKind::GreaterThan, reference(out[3]), b2, b)
-                .into_ref();
-            let both = plan.column("both", DataType::Boolean);
-            Some(
-                roc::expr::scalar::ConjunctionExpression::new(
-                    roc::expr::scalar::Conjunction::And,
-                    vec![a, b],
-                    both,
-                )
-                .into_ref(),
-            )
-        });
+        let (join, _, _) = plan.join(join_type, |plan, out| Some(residual(plan, out)));
         let rows = execute_all(&plan.columns, &join).unwrap();
-        let filter =
-            |p: &(Option<i64>, i64), b: &(Option<i64>, String)| p.1 % 3 != 0 && b.1.as_str() > "b2";
         assert_eq!(
             sorted(rows),
-            expected(&plan, join_type, filter),
+            expected(&plan, join_type, passes_residual),
             "{join_type:?}"
         );
     }
+}
+
+/// `v % 3 != 0 AND w > 'b2'` over the join columns.
+fn residual(plan: &mut Plan, out: [ColumnId; 4]) -> ScalarExprRef {
+    let three = plan.column("three", DataType::Int64);
+    let three = roc::expr::scalar::ConstantExpression::int64(Some(3), three).into_ref();
+    let rem = plan.column("rem", DataType::Int64);
+    let rem = FunctionExpression::binary(FunctionKind::Remainder, reference(out[1]), three, rem)
+        .into_ref();
+    let zero = plan.column("zero", DataType::Int64);
+    let zero = roc::expr::scalar::ConstantExpression::int64(Some(0), zero).into_ref();
+    let a = plan.column("a", DataType::Boolean);
+    let a = FunctionExpression::binary(FunctionKind::NotEqual, rem, zero, a).into_ref();
+    let b2 = plan.column("b2", DataType::Utf8);
+    let b2 = roc::expr::scalar::ConstantExpression::string(Some("b2"), b2).into_ref();
+    let b = plan.column("b", DataType::Boolean);
+    let b =
+        FunctionExpression::binary(FunctionKind::GreaterThan, reference(out[3]), b2, b).into_ref();
+    let both = plan.column("both", DataType::Boolean);
+    roc::expr::scalar::ConjunctionExpression::new(
+        roc::expr::scalar::Conjunction::And,
+        vec![a, b],
+        both,
+    )
+    .into_ref()
+}
+
+fn passes_residual(p: &(Option<i64>, i64), b: &(Option<i64>, String)) -> bool {
+    p.1 % 3 != 0 && b.1.as_str() > "b2"
 }
 
 #[test]
@@ -387,6 +388,67 @@ fn nested_joins_import_through_every_level() {
                     if c.0 == b.0 {
                         expected.push(vec![p.1.to_string(), b.1.clone(), show(c.0), c.1.clone()]);
                     }
+                }
+            }
+        }
+    }
+    assert_eq!(sorted(rows), sorted(expected));
+}
+
+/// The second join runs on the rows passing the first join's filter: its
+/// keys, the probe value and the first build string are copied and gathered
+/// only for those rows.
+#[test]
+fn work_after_a_residual_filter_sees_only_its_rows() {
+    let mut plan = Plan::new(probe_rows(3000), build_rows());
+    let (inner, out, _) = plan.join(JoinType::Inner, |plan, out| Some(residual(plan, out)));
+    let b_k = plan.column("bk_second", DataType::Int64);
+    let b_w = plan.column("bw_second", DataType::Utf8);
+    let keep = [
+        plan.column("v_out", DataType::Int64),
+        plan.column("w_out", DataType::Utf8),
+    ];
+    let second_out = [
+        plan.column("bk3", DataType::Int64),
+        plan.column("w2", DataType::Utf8),
+    ];
+    let second = JoinOperator::try_new(
+        JoinType::Left,
+        vec![(out[2], b_k)],
+        false,
+        vec![(out[1], keep[0]), (out[3], keep[1])],
+        vec![(b_k, second_out[0]), (b_w, second_out[1])],
+        None,
+        None,
+    )
+    .unwrap();
+    // Second build rows: keys 0..20 only, so some first matches find none.
+    let second_build = plan
+        .build
+        .iter()
+        .filter(|r| r.0.is_some_and(|k| k < 20))
+        .cloned()
+        .collect::<Vec<_>>();
+    let build2 = {
+        let k = Int64Array::from(second_build.iter().map(|r| r.0).collect::<Vec<_>>());
+        let w = StringArray::from(second_build.iter().map(|r| r.1.as_str()).collect::<Vec<_>>());
+        scan(
+            batches(vec![("bk", Arc::new(k)), ("bw", Arc::new(w))], 7),
+            vec![b_k, b_w],
+        )
+    };
+    let node = OperatorTreeNode::new(second, vec![inner, build2]);
+    let rows = execute_all(&plan.columns, &node).unwrap();
+    let mut expected = vec![];
+    for p in &plan.probe {
+        for b in &plan.build {
+            if p.0.is_some() && p.0 == b.0 && passes_residual(p, b) {
+                let matches = second_build.iter().filter(|c| c.0 == b.0).collect::<Vec<_>>();
+                for c in &matches {
+                    expected.push(vec![p.1.to_string(), b.1.clone(), show(c.0), c.1.clone()]);
+                }
+                if matches.is_empty() {
+                    expected.push(vec![p.1.to_string(), b.1.clone(), "NULL".into(), "NULL".into()]);
                 }
             }
         }

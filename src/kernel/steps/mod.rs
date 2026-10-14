@@ -25,7 +25,9 @@
 //! Each step runs over the whole window, in plan order. Kernels call the
 //! precompiled library; `Compile` programs replace runs of kernels by one
 //! fused function (see `fuse`), which defers to the steps it replaces in a
-//! window where it may raise.
+//! window where it may raise. Steps that read rows at random — gathers from
+//! tables and imports from the enclosing window — read only the rows of
+//! their domain.
 mod aggregate;
 pub(crate) mod bits;
 mod expand;
@@ -269,12 +271,20 @@ pub(crate) enum Step {
     Output {
         domain: DomainId,
     },
-    /// A TableGather.
+    /// A TableGather of the rows of `domain`.
     Gather {
         state: StateId,
         row: VariableId,
         column: usize,
         output: ColumnVariableBinding,
+        domain: DomainId,
+    },
+    /// Copies the enclosing-block variable `from` to the rows of `domain`,
+    /// by their enclosing row.
+    Import {
+        from: VariableId,
+        to: VariableId,
+        domain: DomainId,
     },
     Expand(Box<ExpandStep>),
     /// Generated code for `fallback`, a range of `Steps::fallback`.
@@ -295,7 +305,8 @@ pub(crate) struct ExpandStep {
     pub input: DomainId,
     pub row: VariableId,
     pub block: usize,
-    /// Enclosing-block variables the block reads, with their copies.
+    /// Enclosing-block variables the block reads, with their copies; the
+    /// block's Import steps copy them.
     pub imports: Vec<(VariableId, VariableId)>,
     pub reduces: Vec<ReduceStep>,
 }
@@ -334,6 +345,8 @@ pub(crate) struct ReduceStep {
 /// The steps of one row space, run over its windows.
 pub(crate) struct Block {
     pub steps: Vec<Step>,
+    /// The placement domain of each step.
+    pub at: Vec<DomainId>,
     /// The domain of every row of the block's windows.
     pub dense: DomainId,
     /// The other domains of the space; their masks start empty.
@@ -829,6 +842,7 @@ impl Builder {
                     row: *row,
                     column: *column,
                     output: *output,
+                    domain,
                 }),
             },
         }
@@ -902,6 +916,8 @@ fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
             vec![],
         ),
         Step::Gather { row, output, .. } => (vec![*row], output.variables()),
+        // The source is a variable of the enclosing block.
+        Step::Import { to, .. } => (vec![], vec![*to]),
         Step::Expand(e) => {
             let mut reads = match &e.kind {
                 ExpandStepKind::Lookup { keys, .. } => {
@@ -1010,6 +1026,7 @@ fn rename(step: &mut Step, map: &HashMap<VariableId, VariableId>) {
             }
         }
         Step::Gather { row, .. } => r(row),
+        Step::Import { .. } => {}
         Step::Expand(e) => {
             if let ExpandStepKind::Lookup { keys, .. } = &mut e.kind {
                 keys.iter_mut().for_each(|k| rename_binding(k, map));
@@ -1044,6 +1061,7 @@ impl Steps {
                 block_of.insert(*space, blocks.len());
                 blocks.push(Block {
                     steps: vec![],
+                    at: vec![],
                     dense: *space,
                     domains: vec![],
                     windowed: vec![],
@@ -1061,6 +1079,7 @@ impl Steps {
         for &(item, domain) in &plan.items {
             let target = block(domain);
             std::mem::swap(&mut b.steps, &mut blocks[target].steps);
+            let before = b.steps.len();
             let result = (|| -> Result<()> {
                 match item {
                     Item::Output => {
@@ -1107,7 +1126,9 @@ impl Steps {
                     _ => {}
                 }
             }
+            let added = b.steps.len() - before;
             std::mem::swap(&mut b.steps, &mut blocks[target].steps);
+            blocks[target].at.extend(std::iter::repeat_n(domain, added));
             result?;
         }
         for (child, reduce) in reduces {
@@ -1185,6 +1206,24 @@ impl Steps {
                     }
                 }
                 e.imports = imports;
+            }
+        }
+        // Inner blocks first: the enclosing block's steps have not moved.
+        for k in (1..blocks.len()).rev() {
+            let (parent, at) = expands[&k];
+            let Step::Expand(e) = &blocks[parent].steps[at] else {
+                unreachable!("expands index their steps")
+            };
+            let (imports, reduces) = (e.imports.clone(), e.reduces.clone());
+            let outputs = (output_block == k).then_some(&output_bindings);
+            place_imports(&mut blocks[k], graph, &vars, &imports, &reduces, outputs);
+        }
+        expands.clear();
+        for (b, block) in blocks.iter().enumerate() {
+            for (s, step) in block.steps.iter().enumerate() {
+                if let Step::Expand(e) = step {
+                    expands.insert(e.block, (b, s));
+                }
             }
         }
 
@@ -1308,14 +1347,13 @@ impl Steps {
                     output_reads.iter().for_each(|v| last[v.0] = Some(s));
                 }
             }
-            // The rows and imports of a child block exist from its start;
-            // reductions read their Booleans after its last step.
+            // The rows of a child block exist from its start; reductions
+            // read their Booleans after its last step.
             let mut initial = vec![];
             if k > 0 {
                 let (parent, at) = expands[&k];
                 if let Step::Expand(e) = &blocks[parent].steps[at] {
                     initial.push(e.row);
-                    initial.extend(e.imports.iter().map(|(_, copy)| *copy));
                     for r in &e.reduces {
                         for (v, _) in &r.any {
                             last[v.0] = Some(steps.len());
@@ -1404,6 +1442,100 @@ impl Steps {
             .flat_map(|b| b.steps.iter())
             .chain(&self.fallback)
     }
+}
+
+/// Adds an Import step for each import of a child block. It copies the rows
+/// of the lowest domain containing every read of the copy, right after the
+/// step that creates that domain, so imports do not split runs of fusable
+/// steps.
+fn place_imports(
+    block: &mut Block,
+    graph: &KernelGraph,
+    vars: &[Var],
+    imports: &[(VariableId, VariableId)],
+    reduces: &[ReduceStep],
+    outputs: Option<&Vec<ColumnVariableBinding>>,
+) {
+    let parent = |d: DomainId| graph.domains[d.0].parent;
+    let depth = |mut d: DomainId| {
+        let mut n = 0;
+        while let Some(p) = parent(d) {
+            d = p;
+            n += 1;
+        }
+        n
+    };
+    let lca = |a: DomainId, b: DomainId| {
+        let (mut a, mut b) = (a, b);
+        while depth(a) > depth(b) {
+            a = parent(a).unwrap();
+        }
+        while depth(b) > depth(a) {
+            b = parent(b).unwrap();
+        }
+        while a != b {
+            a = parent(a).unwrap();
+            b = parent(b).unwrap();
+        }
+        a
+    };
+    let mut placed: Vec<(usize, VariableId, VariableId, DomainId)> = vec![];
+    for &(from, to) in imports {
+        let mut domain: Option<DomainId> = None;
+        let mut read = |d: DomainId| domain = Some(domain.map_or(d, |a| lca(a, d)));
+        for (step, &at) in block.steps.iter().zip(&block.at) {
+            if access(step).0.contains(&to) {
+                read(at);
+            }
+        }
+        for step in &block.steps {
+            if let (Step::Output { domain: d }, Some(bindings)) = (step, outputs)
+                && bindings.iter().any(|b| b.variables().contains(&to))
+            {
+                read(*d);
+            }
+        }
+        for r in reduces {
+            if r.any.iter().any(|(v, _)| *v == to) {
+                read(r.descendant);
+            }
+        }
+        // Pointers and lengths are valid on every row, which kernels reading
+        // bytes rely on.
+        let vt = vars[to.0].vt;
+        let domain = match domain {
+            _ if matches!(vt, VariableType::BytePointer | VariableType::Usize) => block.dense,
+            Some(d) => d,
+            None => continue,
+        };
+        let position = block
+            .steps
+            .iter()
+            .position(|step| match step {
+                Step::Filter { domain: d, .. } => *d == domain,
+                Step::Expand(e) => e.reduces.iter().any(|r| r.domain == domain),
+                _ => false,
+            })
+            .map_or(0, |s| s + 1);
+        placed.push((position, from, to, domain));
+    }
+    // Stable: imports at one position keep their order.
+    placed.sort_by_key(|p| p.0);
+    let old = std::mem::take(&mut block.steps);
+    let old_at = std::mem::take(&mut block.at);
+    let mut placed = placed.into_iter().peekable();
+    let import = |block: &mut Block, (_, from, to, domain): (usize, VariableId, VariableId, DomainId)| {
+        block.steps.push(Step::Import { from, to, domain });
+        block.at.push(domain);
+    };
+    for (s, (step, at)) in old.into_iter().zip(old_at).enumerate() {
+        while let Some(p) = placed.next_if(|p| p.0 == s) {
+            import(block, p);
+        }
+        block.steps.push(step);
+        block.at.push(at);
+    }
+    placed.for_each(|p| import(block, p));
 }
 
 #[derive(Default)]

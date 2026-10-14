@@ -16,11 +16,12 @@
 //!
 //! An Expand lists the `(enclosing row, table row)` pairs of the rows of its
 //! input domain below the limit, then runs its block over windows of those
-//! pairs. A window first copies the enclosing variables the block reads,
-//! gathered by enclosing row; reductions OR their Booleans into the
-//! enclosing window after each window. A raise in the block stops the
-//! expansion: the enclosing window then only sees rows before the failing
-//! row's enclosing row, like after any raise.
+//! pairs. The block's Import steps copy the enclosing variables it reads,
+//! by enclosing row; reductions OR their Booleans into the enclosing window
+//! after each window. A raise in the block stops the expansion: the
+//! enclosing window then only sees rows before the failing row's enclosing
+//! row, like after any raise.
+use super::aggregate::Rows;
 use super::bits::{self, BitState};
 use super::run::Frame;
 use super::*;
@@ -116,9 +117,6 @@ impl Frame<'_> {
                 unsafe { *rows.add(i) = *t as u64 };
             }
             self.ptrs[e.row.0] = self.home[e.row.0];
-            for &(from, to) in &e.imports {
-                self.import(from, to);
-            }
             for step in &steps.blocks[e.block].steps {
                 self.step(step)?;
             }
@@ -174,27 +172,29 @@ impl Frame<'_> {
         Ok(())
     }
 
-    /// Copies an enclosing variable to the rows of this window.
-    fn import(&mut self, from: VariableId, to: VariableId) {
-        let n = self.n;
+    /// Copies an enclosing variable to the rows of `domain` in this window.
+    pub(super) fn import(&mut self, from: VariableId, to: VariableId, domain: DomainId) {
         let ty = self.steps.vars[to.0].ty;
+        let Some(rows) = self.selected(domain) else {
+            if ty == Ty::Bool {
+                self.set_state(to, BitState::AllFalse);
+            }
+            return;
+        };
         let parents = &self.parents;
         if ty == Ty::Bool {
             match self.states[from.0] {
                 s @ (BitState::AllTrue | BitState::AllFalse) => self.set_state(to, s),
                 BitState::Mixed => {
                     let src = self.ptrs[from.0] as *const u64;
-                    let out = self.home[to.0] as *mut u64;
-                    for w in 0..bits::words(n) {
-                        let mut word = 0u64;
-                        for i in 0..64.min(n - w * 64) {
-                            let p = parents[w * 64 + i] as usize;
-                            // SAFETY: both cover a window bitmap.
-                            word |= (unsafe { *src.add(p / 64) } >> (p % 64) & 1) << i;
-                        }
-                        // SAFETY: as above.
-                        unsafe { *out.add(w) = word };
-                    }
+                    let mut words = [0u64; WORDS];
+                    rows.each(|i| {
+                        let p = parents[i] as usize;
+                        // SAFETY: the source covers a window bitmap.
+                        words[i / 64] |= (unsafe { *src.add(p / 64) } >> (p % 64) & 1) << (i % 64);
+                    });
+                    // SAFETY: Boolean slots hold a window bitmap.
+                    unsafe { *(self.home[to.0] as *mut [u64; WORDS]) = words };
                     self.ptrs[to.0] = self.home[to.0];
                     self.settle(to);
                 }
@@ -205,23 +205,30 @@ impl Frame<'_> {
         // SAFETY: values cover the enclosing window; the slot covers this one.
         unsafe {
             match ty.bytes() {
-                1 => gather_rows(src, out, parents),
-                2 => gather_rows(src as *const u16, out as *mut u16, parents),
-                4 => gather_rows(src as *const u32, out as *mut u32, parents),
-                8 => gather_rows(src as *const u64, out as *mut u64, parents),
-                _ => gather_rows(src as *const [u64; 2], out as *mut [u64; 2], parents),
+                1 => copy_rows(src, out, &rows, |i| parents[i] as usize),
+                2 => copy_rows(src as *const u16, out as *mut u16, &rows, |i| parents[i] as usize),
+                4 => copy_rows(src as *const u32, out as *mut u32, &rows, |i| parents[i] as usize),
+                8 => copy_rows(src as *const u64, out as *mut u64, &rows, |i| parents[i] as usize),
+                _ => copy_rows(
+                    src as *const [u64; 2],
+                    out as *mut [u64; 2],
+                    &rows,
+                    |i| parents[i] as usize,
+                ),
             }
         }
         self.ptrs[to.0] = out;
     }
 
-    /// A TableGather of the rows of this window.
+    /// A TableGather of the rows of `domain` in this window. Other rows are
+    /// NULL; their byte pointers are valid and their values unspecified.
     pub(super) fn gather(
         &mut self,
         state: StateId,
         row: VariableId,
         column: usize,
         output: &ColumnVariableBinding,
+        domain: DomainId,
     ) {
         let n = self.n;
         let read = self.tables[state.0]
@@ -235,11 +242,17 @@ impl Frame<'_> {
         let rows = self.ptrs[row.0] as *const u64;
         // SAFETY: row slots hold a window of words.
         let at = |i: usize| unsafe { *rows.add(i) } as usize;
-        let valid = |t: usize| t < len && input.nulls.as_ref().is_none_or(|n| n.is_valid(t));
+        let selected = self.selected(domain);
         let validity = output.validity().unwrap();
         let mut words = [0u64; WORDS];
-        for i in 0..n {
-            words[i / 64] |= (valid(at(i)) as u64) << (i % 64);
+        if let Some(sel) = &selected {
+            match &input.nulls {
+                None => sel.each(|i| words[i / 64] |= ((at(i) < len) as u64) << (i % 64)),
+                Some(nulls) => sel.each(|i| {
+                    let t = at(i);
+                    words[i / 64] |= ((t < len && nulls.is_valid(t)) as u64) << (i % 64);
+                }),
+            }
         }
         // SAFETY: Boolean slots hold a window bitmap.
         unsafe { *(self.home[validity.0] as *mut [u64; WORDS]) = words };
@@ -253,18 +266,26 @@ impl Frame<'_> {
                     self.home[ptr.0] as *mut u64,
                     self.home[length.0] as *mut u64,
                 );
-                for i in 0..n {
-                    let t = at(i);
-                    let (address, size) = if t < len {
-                        input.bytes(t)
-                    } else {
-                        (std::ptr::NonNull::<u8>::dangling().as_ptr() as u64, 0)
-                    };
-                    // SAFETY: value slots hold a window of words.
-                    unsafe {
-                        *p.add(i) = address;
-                        *l.add(i) = size;
+                let empty = std::ptr::NonNull::<u8>::dangling().as_ptr() as u64;
+                if !selected.as_ref().is_some_and(Rows::all) {
+                    for i in 0..n {
+                        // SAFETY: value slots hold a window of words.
+                        unsafe {
+                            *p.add(i) = empty;
+                            *l.add(i) = 0;
+                        }
                     }
+                }
+                if let Some(sel) = &selected {
+                    sel.each(|i| {
+                        let t = at(i);
+                        let (address, size) = if t < len { input.bytes(t) } else { (empty, 0) };
+                        // SAFETY: as above.
+                        unsafe {
+                            *p.add(i) = address;
+                            *l.add(i) = size;
+                        }
+                    });
                 }
                 self.ptrs[ptr.0] = self.home[ptr.0];
                 self.ptrs[length.0] = self.home[length.0];
@@ -272,9 +293,11 @@ impl Frame<'_> {
             ColumnVariableBinding::Boolean { value, .. } => {
                 let bools = input.bools.as_ref().unwrap();
                 let mut words = [0u64; WORDS];
-                for i in 0..n {
-                    let t = at(i);
-                    words[i / 64] |= ((t < len && bools.value(t)) as u64) << (i % 64);
+                if let Some(sel) = &selected {
+                    sel.each(|i| {
+                        let t = at(i);
+                        words[i / 64] |= ((t < len && bools.value(t)) as u64) << (i % 64);
+                    });
                 }
                 // SAFETY: Boolean slots hold a window bitmap.
                 unsafe { *(self.home[value.0] as *mut [u64; WORDS]) = words };
@@ -283,21 +306,24 @@ impl Frame<'_> {
             }
             _ => {
                 let value = output.value().unwrap();
-                let w = input.width;
                 let out = self.home[value.0];
-                for i in 0..n {
-                    let t = at(i);
-                    // SAFETY: the column has `len` values of `w` bytes; the
+                if let Some(sel) = &selected {
+                    let values = input.values;
+                    // SAFETY: the column has `len` values of its width; the
                     // slot covers the window.
                     unsafe {
-                        if t < len {
-                            std::ptr::copy_nonoverlapping(
-                                input.values.add(t * w),
-                                out.add(i * w),
-                                w,
-                            );
-                        } else {
-                            std::ptr::write_bytes(out.add(i * w), 0, w);
+                        match input.width {
+                            1 => gather_values(values, out, sel, at, len),
+                            2 => gather_values(values as *const u16, out as *mut u16, sel, at, len),
+                            4 => gather_values(values as *const u32, out as *mut u32, sel, at, len),
+                            8 => gather_values(values as *const u64, out as *mut u64, sel, at, len),
+                            _ => gather_values(
+                                values as *const [u64; 2],
+                                out as *mut [u64; 2],
+                                sel,
+                                at,
+                                len,
+                            ),
                         }
                     }
                 }
@@ -307,10 +333,27 @@ impl Frame<'_> {
     }
 }
 
-/// `out[i] = src[parents[i]]`.
-unsafe fn gather_rows<T: Copy>(src: *const T, out: *mut T, parents: &[u32]) {
-    for (i, &p) in parents.iter().enumerate() {
+/// `out[i] = src[row(i)]` for the selected rows `i`.
+#[inline(always)]
+unsafe fn copy_rows<T: Copy>(src: *const T, out: *mut T, rows: &Rows, row: impl Fn(usize) -> usize) {
+    rows.each(|i| {
         // SAFETY: the caller's bounds.
-        unsafe { *out.add(i) = *src.add(p as usize) };
-    }
+        unsafe { *out.add(i) = *src.add(row(i)) };
+    });
+}
+
+/// `out[i] = src[at(i)]` for the selected rows `i`, or zero past `len`.
+#[inline(always)]
+unsafe fn gather_values<T: Copy + Default>(
+    src: *const T,
+    out: *mut T,
+    rows: &Rows,
+    at: impl Fn(usize) -> usize,
+    len: usize,
+) {
+    rows.each(|i| {
+        let t = at(i);
+        // SAFETY: the caller's bounds.
+        unsafe { *out.add(i) = if t < len { *src.add(t) } else { T::default() } };
+    });
 }

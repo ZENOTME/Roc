@@ -757,7 +757,9 @@ impl Frame<'_> {
                 row,
                 column,
                 output,
-            } => self.gather(*state, *row, *column, output),
+                domain,
+            } => self.gather(*state, *row, *column, output, *domain),
+            Step::Import { from, to, domain } => self.import(*from, *to, *domain),
             Step::Output { domain } => {
                 if self.raised.is_none() {
                     let mut outputs = self.outputs.take().unwrap();
