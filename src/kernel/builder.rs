@@ -745,7 +745,8 @@ impl<'plan> KernelBuilder<'plan> {
     }
 
     /// Binds the columns of every input chunk to new root variables. Position i
-    /// of the chunk carries `columns[i]`.
+    /// of the chunk carries `columns[i]`; a column may be listed more than
+    /// once.
     pub fn bind_inputs(&mut self, columns: &[ColumnId]) -> Result<()> {
         if !self.inputs.is_empty() {
             return Err(Error::invalid_plan("pipeline input is bound twice".into()));
@@ -753,6 +754,11 @@ impl<'plan> KernelBuilder<'plan> {
         let saved = std::mem::replace(&mut self.current, DomainId::ROOT);
         let result = (|| {
             for (position, &column) in columns.iter().enumerate() {
+                // A column at several positions carries the same values at
+                // each; the first binds it.
+                if columns[..position].contains(&column) {
+                    continue;
+                }
                 let ty = self.column_type(column)?.clone();
                 let binding = self.input_binding(&ty)?;
                 self.bind_column(column, binding, vec![])?;
