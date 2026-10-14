@@ -79,7 +79,11 @@ pub(crate) enum Place {
         slot: usize,
     },
     /// The row pointers or lengths of a byte input.
-    InputBytes { input: usize, len: bool, slot: usize },
+    InputBytes {
+        input: usize,
+        len: bool,
+        slot: usize,
+    },
     Value(usize),
     Bits(usize),
     /// An output column of the root domain, written in place.
@@ -356,13 +360,23 @@ impl Builder {
         // SAFETY: every argument is one row: a value or a bitmap word.
         unsafe { f(args.as_ptr(), 1) };
         for (v, bits) in outputs.iter().zip(results) {
-            let bits = if self.vars[v.0].ty == Ty::Bool { bits & 1 } else { bits };
+            let bits = if self.vars[v.0].ty == Ty::Bool {
+                bits & 1
+            } else {
+                bits
+            };
             self.constant(*v, bits);
         }
         Ok(())
     }
 
-    fn call(&mut self, function: ScalarFunction, inputs: &[VariableId], outputs: &[VariableId], domain: DomainId) -> Result<()> {
+    fn call(
+        &mut self,
+        function: ScalarFunction,
+        inputs: &[VariableId],
+        outputs: &[VariableId],
+        domain: DomainId,
+    ) -> Result<()> {
         use ScalarFunction as S;
         let ty = |v: &VariableId| self.vars[v.0].ty;
         let constant = inputs.iter().all(|v| self.value(*v).is_some());
@@ -462,7 +476,11 @@ impl Builder {
         if let (Func::Div | Func::Rem, Some(d)) = (func, inputs.get(1).and_then(|v| self.value(*v)))
             && let Some(m) = ir::magic(t, d)
         {
-            let kind = if func == Func::Div { Kind::DivMagic } else { Kind::RemMagic };
+            let kind = if func == Func::Div {
+                Kind::DivMagic
+            } else {
+                Kind::RemMagic
+            };
             let mut args = vec![Operand::Var(inputs[0]), Operand::Var(inputs[1])];
             for c in m {
                 args.push(self.pool(c));
@@ -472,7 +490,11 @@ impl Builder {
                 self.constant(*flag, 0);
             }
             self.steps.push(Step::Kernel {
-                f: library::kernel(&Key { kind, ty: t, scalars: 0 })?,
+                f: library::kernel(&Key {
+                    kind,
+                    ty: t,
+                    scalars: 0,
+                })?,
                 args,
                 reports: vec![],
                 call: Call {
@@ -486,7 +508,13 @@ impl Builder {
         self.kernel(key, inputs, outputs, func)
     }
 
-    fn kernel(&mut self, key: Key, inputs: &[VariableId], outputs: &[VariableId], func: Func) -> Result<()> {
+    fn kernel(
+        &mut self,
+        key: Key,
+        inputs: &[VariableId],
+        outputs: &[VariableId],
+        func: Func,
+    ) -> Result<()> {
         let mut args = inputs.iter().map(|v| Operand::Var(*v)).collect::<Vec<_>>();
         args.extend(outputs.iter().map(|v| Operand::Var(*v)));
         let reports = outputs
@@ -507,7 +535,13 @@ impl Builder {
         Ok(())
     }
 
-    fn select(&mut self, cond: VariableId, then: VariableId, otherwise: VariableId, output: VariableId) -> Result<()> {
+    fn select(
+        &mut self,
+        cond: VariableId,
+        then: VariableId,
+        otherwise: VariableId,
+        output: VariableId,
+    ) -> Result<()> {
         let inputs = [cond, then, otherwise];
         if self.vars[then.0].ty == Ty::Bool {
             if inputs.iter().all(|v| self.value(*v).is_some()) {
@@ -524,7 +558,8 @@ impl Builder {
             }
             return Ok(());
         }
-        let scalars = (self.value(then).is_some() as u8) | (self.value(otherwise).is_some() as u8) << 1;
+        let scalars =
+            (self.value(then).is_some() as u8) | (self.value(otherwise).is_some() as u8) << 1;
         let key = Key {
             kind: Kind::Func(Func::Select),
             ty: self.vars[then.0].ty,
@@ -551,7 +586,14 @@ fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
         Step::Kernel { args, call, .. } => {
             let mut reads = call.inputs.clone();
             reads.retain(|v| vars(args).contains(v));
-            (reads, call.outputs.iter().copied().filter(|v| vars(args).contains(v)).collect())
+            (
+                reads,
+                call.outputs
+                    .iter()
+                    .copied()
+                    .filter(|v| vars(args).contains(v))
+                    .collect(),
+            )
         }
         Step::Bits { a, b, output, .. } => (vec![*a, *b], vec![*output]),
         Step::SelectBits {
@@ -573,15 +615,21 @@ fn access(step: &Step) -> (Vec<VariableId>, Vec<VariableId>) {
             Text::Validate { ptr, len, invalid } => (vec![*ptr, *len], vec![*invalid]),
         },
         Step::Filter { predicate, .. } => (vec![*predicate], vec![]),
-        Step::RaiseIf { cond, args, .. } => {
-            (std::iter::once(*cond).chain(args.iter().copied()).collect(), vec![])
-        }
-        Step::GroupLookup { keys, output, .. } => {
-            (keys.iter().flat_map(|k| k.variables()).collect(), vec![*output])
-        }
+        Step::RaiseIf { cond, args, .. } => (
+            std::iter::once(*cond).chain(args.iter().copied()).collect(),
+            vec![],
+        ),
+        Step::GroupLookup { keys, output, .. } => (
+            keys.iter().flat_map(|k| k.variables()).collect(),
+            vec![*output],
+        ),
         Step::Aggregates { group, updates, .. } => (
             std::iter::once(*group)
-                .chain(updates.iter().flat_map(|u| u.arguments.iter().flat_map(|a| a.variables())))
+                .chain(
+                    updates
+                        .iter()
+                        .flat_map(|u| u.arguments.iter().flat_map(|a| a.variables())),
+                )
                 .collect(),
             vec![],
         ),
@@ -764,7 +812,14 @@ impl Steps {
         // Root outputs are written in place by the step defining them.
         let mut defined = vec![false; vars.len()];
         for step in &steps {
-            if matches!(step, Step::Kernel { .. } | Step::Text { text: Text::Parse { .. }, .. }) {
+            if matches!(
+                step,
+                Step::Kernel { .. }
+                    | Step::Text {
+                        text: Text::Parse { .. },
+                        ..
+                    }
+            ) {
                 access(step).1.iter().for_each(|v| defined[v.0] = true);
             }
         }
@@ -838,7 +893,11 @@ impl Steps {
             .filter(|v| {
                 matches!(
                     vars[v.0].place,
-                    Place::Bits(_) | Place::Input(_) | Place::Output(_) | Place::InputBits { .. } | Place::InputBytes { .. }
+                    Place::Bits(_)
+                        | Place::Input(_)
+                        | Place::Output(_)
+                        | Place::InputBits { .. }
+                        | Place::InputBytes { .. }
                 )
             })
             .collect();

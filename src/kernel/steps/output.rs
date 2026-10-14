@@ -81,7 +81,13 @@ unsafe fn compact<T: Copy>(src: *const T, mask: &[u64], n: usize, dst: *mut T) -
     k
 }
 
-unsafe fn compact_width(width: usize, src: *const u8, mask: &[u64], n: usize, dst: *mut u8) -> usize {
+unsafe fn compact_width(
+    width: usize,
+    src: *const u8,
+    mask: &[u64],
+    n: usize,
+    dst: *mut u8,
+) -> usize {
     unsafe {
         match width {
             1 => compact(src, mask, n, dst),
@@ -92,7 +98,14 @@ unsafe fn compact_width(width: usize, src: *const u8, mask: &[u64], n: usize, ds
     }
 }
 
-fn append_bits(frame: &Frame<'_>, v: VariableId, mask: &[u64], state: BitState, selected: usize, out: &mut BitBuilder) {
+fn append_bits(
+    frame: &Frame<'_>,
+    v: VariableId,
+    mask: &[u64],
+    state: BitState,
+    selected: usize,
+    out: &mut BitBuilder,
+) {
     let n = frame.n;
     match frame.states[v.0] {
         BitState::AllTrue => out.fill(true, selected),
@@ -140,7 +153,9 @@ impl Outputs {
                 };
                 let validity = match values {
                     Values::Alias | Values::Null => None,
-                    _ => binding.validity().map(|v| (v, BitBuilder::with_capacity(rows))),
+                    _ => binding
+                        .validity()
+                        .map(|v| (v, BitBuilder::with_capacity(rows))),
                 };
                 Column { values, validity }
             })
@@ -191,8 +206,15 @@ impl Outputs {
                         }
                     }
                 }
-                Values::Bool { value, bits } => append_bits(frame, *value, mask, state, selected, bits),
-                Values::Bytes { ptr, len, ptrs, lens } => {
+                Values::Bool { value, bits } => {
+                    append_bits(frame, *value, mask, state, selected, bits)
+                }
+                Values::Bytes {
+                    ptr,
+                    len,
+                    ptrs,
+                    lens,
+                } => {
                     for (v, out) in [(*ptr, ptrs), (*len, lens)] {
                         // SAFETY: as for fixed-width values, in words.
                         unsafe {
@@ -253,31 +275,61 @@ impl Outputs {
                     if array.data_type() == t {
                         array
                     } else {
-                        make_array(array.into_data().into_builder().data_type(t.clone()).build().map_err(invalid_output)?)
+                        make_array(
+                            array
+                                .into_data()
+                                .into_builder()
+                                .data_type(t.clone())
+                                .build()
+                                .map_err(invalid_output)?,
+                        )
                     }
                 }
                 Values::Bytes { ptrs, lens, .. } => {
-                    let lengths = lens
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &l)| if nulls.as_ref().is_some_and(|n| n.is_null(i)) { 0 } else { l as usize });
+                    let lengths = lens.iter().enumerate().map(|(i, &l)| {
+                        if nulls.as_ref().is_some_and(|n| n.is_null(i)) {
+                            0
+                        } else {
+                            l as usize
+                        }
+                    });
                     let total = lengths.clone().sum();
                     let mut bytes = MutableBuffer::with_capacity(total);
                     for (&p, l) in ptrs.iter().zip(lengths.clone()) {
                         if l != 0 {
                             // SAFETY: pointers refer to input arrays, retained
                             // constants or formatted strings, all alive here.
-                            bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(p as *const u8, l) });
+                            bytes.extend_from_slice(unsafe {
+                                std::slice::from_raw_parts(p as *const u8, l)
+                            });
                         }
                     }
                     let bytes = Buffer::from(bytes);
                     match t {
-                        DataType::Utf8 => Arc::new(StringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
-                        DataType::LargeUtf8 => {
-                            Arc::new(LargeStringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?)
-                        }
-                        DataType::Binary => Arc::new(BinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
-                        _ => Arc::new(LargeBinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls).map_err(invalid_output)?),
+                        DataType::Utf8 => Arc::new(
+                            StringArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)
+                                .map_err(invalid_output)?,
+                        ),
+                        DataType::LargeUtf8 => Arc::new(
+                            LargeStringArray::try_new(
+                                OffsetBuffer::from_lengths(lengths),
+                                bytes,
+                                nulls,
+                            )
+                            .map_err(invalid_output)?,
+                        ),
+                        DataType::Binary => Arc::new(
+                            BinaryArray::try_new(OffsetBuffer::from_lengths(lengths), bytes, nulls)
+                                .map_err(invalid_output)?,
+                        ),
+                        _ => Arc::new(
+                            LargeBinaryArray::try_new(
+                                OffsetBuffer::from_lengths(lengths),
+                                bytes,
+                                nulls,
+                            )
+                            .map_err(invalid_output)?,
+                        ),
                     }
                 }
             };

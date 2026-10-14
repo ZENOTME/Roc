@@ -60,7 +60,11 @@ impl BitState {
 #[inline]
 pub(crate) fn tail_mask(w: usize, n: usize) -> u64 {
     let rows = n.saturating_sub(w * 64);
-    if rows >= 64 { u64::MAX } else { (1u64 << rows) - 1 }
+    if rows >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << rows) - 1
+    }
 }
 
 pub(crate) fn words(n: usize) -> usize {
@@ -94,7 +98,12 @@ pub(crate) fn first(bitmaps: &[&[u64]], n: usize) -> Option<usize> {
 /// Rows below `n` set in every bitmap.
 pub(crate) fn count(bitmaps: &[&[u64]], n: usize) -> usize {
     (0..words(n))
-        .map(|w| bitmaps.iter().fold(tail_mask(w, n), |a, b| a & b[w]).count_ones() as usize)
+        .map(|w| {
+            bitmaps
+                .iter()
+                .fold(tail_mask(w, n), |a, b| a & b[w])
+                .count_ones() as usize
+        })
         .sum()
 }
 
@@ -128,7 +137,11 @@ impl BitBuilder {
         if n == 0 {
             return;
         }
-        let bits = if n == 64 { bits } else { bits & ((1u64 << n) - 1) };
+        let bits = if n == 64 {
+            bits
+        } else {
+            bits & ((1u64 << n) - 1)
+        };
         let used = self.len % 64;
         if used == 0 {
             self.words.push(bits);

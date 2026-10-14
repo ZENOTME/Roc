@@ -480,7 +480,15 @@ mod tests {
             divisors.extend([next(), next() >> (next() % 64)]);
         }
         for &d in &divisors {
-            let mut dividends = vec![0, 1, d.wrapping_sub(1), d, d.wrapping_add(1), u64::MAX, 1 << 63];
+            let mut dividends = vec![
+                0,
+                1,
+                d.wrapping_sub(1),
+                d,
+                d.wrapping_add(1),
+                u64::MAX,
+                1 << 63,
+            ];
             for _ in 0..100 {
                 dividends.extend([next(), next() >> (next() % 64)]);
             }

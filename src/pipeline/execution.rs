@@ -724,7 +724,13 @@ mod tests {
     #[test]
     fn source_morsels_split_and_empty_batches_are_skipped() {
         let (exec, observed) = executor(vec![batch(&[]), batch(&[1, 2, 3])], passthrough(), None);
-        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(
+            Arc::new(ThreadTaskExecutor),
+            asyncband::shutdown::new().1,
+            config(),
+            1,
+        ))
+        .unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2, 3]);
         assert_eq!(*observed.batch_sizes.lock().unwrap(), [2, 1]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 3);
@@ -735,7 +741,13 @@ mod tests {
         let input = batch(&[1, 2]);
         let owner = input.column(0).clone();
         let (exec, observed) = executor(vec![input], passthrough(), None);
-        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(
+            Arc::new(ThreadTaskExecutor),
+            asyncband::shutdown::new().1,
+            config(),
+            1,
+        ))
+        .unwrap();
         assert!(Arc::ptr_eq(
             &owner,
             observed.batches.lock().unwrap()[0].column(0)
@@ -745,7 +757,13 @@ mod tests {
     fn sink_finish_does_not_read_more_input_and_combines_once() {
         let (exec, observed) =
             executor(vec![batch(&[1, 2, 3]), batch(&[4])], passthrough(), Some(1));
-        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(
+            Arc::new(ThreadTaskExecutor),
+            asyncband::shutdown::new().1,
+            config(),
+            1,
+        ))
+        .unwrap();
         assert_eq!(*observed.values.lock().unwrap(), [1, 2]);
         assert_eq!(observed.source_calls.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
@@ -765,7 +783,15 @@ mod tests {
             .into_ref()
         });
         let (exec, observed) = executor(vec![batch(&[1])], division, None);
-        assert!(block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).is_err());
+        assert!(
+            block_on(exec.execute(
+                Arc::new(ThreadTaskExecutor),
+                asyncband::shutdown::new().1,
+                config(),
+                1
+            ))
+            .is_err()
+        );
         assert!(observed.values.lock().unwrap().is_empty());
         assert_eq!(observed.combined.load(Ordering::SeqCst), 0);
     }
@@ -776,7 +802,13 @@ mod tests {
             passthrough(),
             None,
         );
-        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 3)).unwrap();
+        block_on(exec.execute(
+            Arc::new(ThreadTaskExecutor),
+            asyncband::shutdown::new().1,
+            config(),
+            3,
+        ))
+        .unwrap();
         assert_eq!(observed.cursors.load(Ordering::SeqCst), 1);
         assert_eq!(observed.combined.load(Ordering::SeqCst), 3);
         let mut values = observed.values.lock().unwrap().clone();
@@ -798,7 +830,13 @@ mod tests {
     #[test]
     fn empty_source_still_returns_local_state_for_combine() {
         let (exec, observed) = executor(vec![], passthrough(), None);
-        block_on(exec.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 1)).unwrap();
+        block_on(exec.execute(
+            Arc::new(ThreadTaskExecutor),
+            asyncband::shutdown::new().1,
+            config(),
+            1,
+        ))
+        .unwrap();
         assert_eq!(observed.combined.load(Ordering::SeqCst), 1);
     }
     // The second source read cannot finish until the first chunk is consumed.
@@ -872,7 +910,12 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
+            pipeline.execute(
+                Arc::new(ThreadTaskExecutor),
+                asyncband::shutdown::new().1,
+                config(),
+                2,
+            ),
         )
         .await
         .expect("source and consume deadlocked")
@@ -955,7 +998,12 @@ mod tests {
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            pipeline.execute(Arc::new(ThreadTaskExecutor), asyncband::shutdown::new().1, config(), 2),
+            pipeline.execute(
+                Arc::new(ThreadTaskExecutor),
+                asyncband::shutdown::new().1,
+                config(),
+                2,
+            ),
         )
         .await
         .expect("finish must interrupt pending source read")

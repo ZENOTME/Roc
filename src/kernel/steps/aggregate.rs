@@ -35,7 +35,10 @@ static SUMS: LazyLock<[KernelFn; 2]> = LazyLock::new(|| {
 
 #[track_caller]
 fn overflow() -> Error {
-    Error::new(ErrorKind::ArithmeticOverflow, "aggregate arithmetic overflow")
+    Error::new(
+        ErrorKind::ArithmeticOverflow,
+        "aggregate arithmetic overflow",
+    )
 }
 
 /// The rows below `n` set in every bitmap: the domain mask, validity.
@@ -57,7 +60,10 @@ impl Rows {
         if n == 0 || masks.iter().any(|(_, s)| *s == BitState::AllFalse) {
             return None;
         }
-        let mut mixed = masks.iter().filter(|(_, s)| *s == BitState::Mixed).map(|(m, _)| *m);
+        let mut mixed = masks
+            .iter()
+            .filter(|(_, s)| *s == BitState::Mixed)
+            .map(|(m, _)| *m);
         let set = match (mixed.next(), mixed.next()) {
             (None, _) => Set::All,
             (Some(m), None) => Set::Single(m.as_ptr()),
@@ -103,7 +109,10 @@ impl Rows {
         }
         let words = bits::words(self.n);
         let bitmap = &self.bitmap()[..words];
-        let full = bitmap[..words - 1].iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        let full = bitmap[..words - 1]
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>();
         full + (bitmap[words - 1] & bits::tail_mask(words - 1, self.n)).count_ones() as usize
     }
 
@@ -197,7 +206,8 @@ fn lookup_words<T: Word>(
     valid: Option<&[u64]>,
     ids: *mut u64,
 ) {
-    let cache: *const [crate::exec::aggregate::group_index::WordEntry; 1024] = &**index.cache.as_ref().unwrap();
+    let cache: *const [crate::exec::aggregate::group_index::WordEntry; 1024] =
+        &**index.cache.as_ref().unwrap();
     rows.each(|r| {
         // SAFETY: keys and ids cover the window.
         let bits = unsafe { *keys.add(r) }.word();
@@ -209,7 +219,11 @@ fn lookup_words<T: Word>(
         let id = if cached.key == key && cached.tag == v + 1 {
             cached.id
         } else {
-            index.intern_word(Cell { bits, len: 0, valid: v }) as u64
+            index.intern_word(Cell {
+                bits,
+                len: 0,
+                valid: v,
+            }) as u64
         };
         unsafe { *ids.add(r) = id };
     });
@@ -369,7 +383,8 @@ impl Frame<'_> {
                             let mut out = !word & bits::tail_mask(w, rows.n);
                             while out != 0 {
                                 // SAFETY: as above.
-                                let v = unsafe { *values.add(w * 64 + out.trailing_zeros() as usize) };
+                                let v =
+                                    unsafe { *values.add(w * 64 + out.trailing_zeros() as usize) };
                                 total = total.wrapping_sub(v);
                                 out &= out - 1;
                             }
@@ -388,7 +403,8 @@ impl Frame<'_> {
                     let base = groups.as_mut_ptr();
                     rows.each_weighted(|r, valid| {
                         // As for counts; the values cover the window.
-                        let (sum, v) = unsafe { (&mut (*base.add(*ids.add(r) as usize)).sum, *values.add(r)) };
+                        let (sum, v) =
+                            unsafe { (&mut (*base.add(*ids.add(r) as usize)).sum, *values.add(r)) };
                         sum.bits = sum.bits.wrapping_add(v & valid.wrapping_neg());
                         sum.valid |= valid;
                     });

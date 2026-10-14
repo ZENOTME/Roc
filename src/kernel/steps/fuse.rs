@@ -45,7 +45,8 @@ pub(crate) struct Jit {
 
 impl Jit {
     pub fn ir(&self) -> &str {
-        self.ir.get_or_init(|| self.module.print_to_string().to_string())
+        self.ir
+            .get_or_init(|| self.module.print_to_string().to_string())
     }
 }
 
@@ -80,7 +81,11 @@ fn host() -> Result<&'static codegen::Isa> {
         codegen::initialize()?;
         let cpu = TargetMachine::get_host_cpu_name().to_string();
         let features = TargetMachine::get_host_cpu_features().to_string();
-        let vector_bits = if features.split(',').any(|f| f == "+avx2") { 256 } else { 128 };
+        let vector_bits = if features.split(',').any(|f| f == "+avx2") {
+            256
+        } else {
+            128
+        };
         Ok(codegen::Isa {
             cpu,
             features,
@@ -111,7 +116,11 @@ fn group(steps: &Steps, run: &[Step], later: &[bool]) -> Run {
     let mut srcs: HashMap<VariableId, Src> = HashMap::new();
     let mut domains: HashMap<DomainId, Src> = HashMap::new();
     let mut defined = vec![];
-    let src = |srcs: &mut HashMap<VariableId, Src>, g: &mut Group, args: &mut Vec<Operand>, v: VariableId| -> Src {
+    let src = |srcs: &mut HashMap<VariableId, Src>,
+               g: &mut Group,
+               args: &mut Vec<Operand>,
+               v: VariableId|
+     -> Src {
         if let Some(s) = srcs.get(&v) {
             return *s;
         }
@@ -304,17 +313,18 @@ pub(super) fn fuse(steps: &mut Steps, graph: &KernelGraph) -> Result<()> {
     for (i, run) in groups.iter().enumerate() {
         emit::function(cx, &module, &format!("roc_fused_{i}"), &run.group, isa).map_err(error)?;
     }
-    MACHINE.with(|machine| {
-        let mut machine = machine.borrow_mut();
-        if machine.is_none() {
-            let triple = TargetMachine::get_default_triple();
-            *machine = Some(codegen::machine(&triple, isa, RelocMode::Default)?);
-        }
-        // The emitted code is already explicit and vectorized: common
-        // subexpressions are all that is left, and compile time matters here.
-        codegen::optimize(&module, machine.as_ref().unwrap(), "function(early-cse)")
-    })
-    .map_err(error)?;
+    MACHINE
+        .with(|machine| {
+            let mut machine = machine.borrow_mut();
+            if machine.is_none() {
+                let triple = TargetMachine::get_default_triple();
+                *machine = Some(codegen::machine(&triple, isa, RelocMode::Default)?);
+            }
+            // The emitted code is already explicit and vectorized: common
+            // subexpressions are all that is left, and compile time matters here.
+            codegen::optimize(&module, machine.as_ref().unwrap(), "function(early-cse)")
+        })
+        .map_err(error)?;
     let engine = module
         .create_jit_execution_engine(OptimizationLevel::Aggressive)
         .map_err(error)?;
@@ -327,8 +337,14 @@ pub(super) fn fuse(steps: &mut Steps, graph: &KernelGraph) -> Result<()> {
         functions.push(unsafe { std::mem::transmute::<usize, KernelFn>(address) });
     }
 
-    let mut old = std::mem::take(&mut steps.steps).into_iter().enumerate().peekable();
-    let mut runs_iter = runs.iter().zip(groups.into_iter().zip(functions)).peekable();
+    let mut old = std::mem::take(&mut steps.steps)
+        .into_iter()
+        .enumerate()
+        .peekable();
+    let mut runs_iter = runs
+        .iter()
+        .zip(groups.into_iter().zip(functions))
+        .peekable();
     while let Some((i, step)) = old.next() {
         match runs_iter.peek() {
             Some((range, _)) if range.start == i => {

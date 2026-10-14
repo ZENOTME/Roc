@@ -31,7 +31,9 @@ use inkwell::{
     intrinsics::Intrinsic,
     module::Module,
     types::{BasicTypeEnum, VectorType},
-    values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PhiValue, PointerValue, VectorValue},
+    values::{
+        BasicValue, BasicValueEnum, FunctionValue, IntValue, PhiValue, PointerValue, VectorValue,
+    },
 };
 use std::collections::HashMap;
 
@@ -74,7 +76,10 @@ enum Bits<'c> {
     /// Bit `shift` of the chunk starting at row `base`.
     Chunk { base: IntValue<'c>, shift: u32 },
     /// Bit `shift` of word `word`.
-    Word { word: IntValue<'c>, shift: IntValue<'c> },
+    Word {
+        word: IntValue<'c>,
+        shift: IntValue<'c>,
+    },
 }
 
 type Memo<'c> = HashMap<Src, VectorValue<'c>>;
@@ -149,7 +154,9 @@ pub fn function<'c>(
     e.b.position_at_end(entry);
     for (i, arg) in g.args.iter().enumerate() {
         // SAFETY: the caller passes one pointer per argument.
-        let at = t!(unsafe { e.b.build_in_bounds_gep(ptr, args, &[i64t.const_int(i as u64, false)], "") });
+        let at = t!(unsafe {
+            e.b.build_in_bounds_gep(ptr, args, &[i64t.const_int(i as u64, false)], "")
+        });
         let p = t!(e.b.build_load(ptr, at, &format!("arg{i}"))).into_pointer_value();
         e.ptrs.push(p);
         e.scalars.push(match *arg {
@@ -169,8 +176,12 @@ pub fn function<'c>(
         // sign is known, so each sign gets its own loops.
         Some(arg) => {
             let c = e.scalars[arg].unwrap().into_int_value();
-            let non_negative = t!(e.b.build_int_compare(IntPredicate::SGE, c, c.get_type().const_zero(), ""));
-            let (positive, negative) = (cx.append_basic_block(f, "non_negative"), cx.append_basic_block(f, "negative"));
+            let non_negative =
+                t!(e.b.build_int_compare(IntPredicate::SGE, c, c.get_type().const_zero(), ""));
+            let (positive, negative) = (
+                cx.append_basic_block(f, "non_negative"),
+                cx.append_basic_block(f, "negative"),
+            );
             t!(e.b.build_conditional_branch(non_negative, positive, negative));
             for (block, sign) in [(positive, true), (negative, false)] {
                 e.b.position_at_end(block);
@@ -288,19 +299,25 @@ impl<'c> Emit<'_, 'c> {
         for k in 0..chunk / lanes {
             let mut rows = Rows {
                 lanes,
-                row: t!(self.b.build_int_add(base, i64t.const_int((k * lanes) as u64, false), "")),
-                bits: Bits::Chunk { base, shift: k * lanes },
+                row: t!(self
+                    .b
+                    .build_int_add(base, i64t.const_int((k * lanes) as u64, false), "")),
+                bits: Bits::Chunk {
+                    base,
+                    shift: k * lanes,
+                },
                 loaded: std::mem::take(&mut loaded),
                 splats: std::mem::take(&mut splats),
             };
             let mut memo = Memo::new();
-            let collect = |src: Src, v: VectorValue<'c>, pending: &mut Vec<(Src, Vec<VectorValue<'c>>)>| {
-                match pending.iter_mut().find(|(s, _)| *s == src) {
-                    Some((_, vs)) if vs.len() as u32 > k => {}
-                    Some((_, vs)) => vs.push(v),
-                    None => pending.push((src, vec![v])),
-                }
-            };
+            let collect =
+                |src: Src, v: VectorValue<'c>, pending: &mut Vec<(Src, Vec<VectorValue<'c>>)>| {
+                    match pending.iter_mut().find(|(s, _)| *s == src) {
+                        Some((_, vs)) if vs.len() as u32 > k => {}
+                        Some((_, vs)) => vs.push(v),
+                        None => pending.push((src, vec![v])),
+                    }
+                };
             for &(src, out) in &g.stores {
                 let v = self.get(src, &mut rows, &mut memo)?;
                 if g.ty(src) != Ty::Bool {
@@ -309,7 +326,9 @@ impl<'c> Emit<'_, 'c> {
                     collect(src, v, &mut pending);
                 }
             }
-            raise_v = t!(self.b.build_or(raise_v, self.raised(&mut rows, &mut memo)?, ""));
+            raise_v = t!(self
+                .b
+                .build_or(raise_v, self.raised(&mut rows, &mut memo)?, ""));
             for (j, src) in g.reports[..reported].iter().enumerate() {
                 let v = self.get(*src, &mut rows, &mut memo)?;
                 if lazy(src) {
@@ -323,7 +342,9 @@ impl<'c> Emit<'_, 'c> {
                 let v = self.get(value, &mut rows, &mut memo)?;
                 let m = self.get(mask, &mut rows, &mut memo)?;
                 let m = t!(self.b.build_int_s_extend(m, v.get_type(), ""));
-                sum_v = t!(self.b.build_int_add(sum_v, t!(self.b.build_and(v, m, "")), ""));
+                sum_v = t!(self
+                    .b
+                    .build_int_add(sum_v, t!(self.b.build_and(v, m, "")), ""));
             }
             loaded = rows.loaded;
             splats = rows.splats;
@@ -346,7 +367,9 @@ impl<'c> Emit<'_, 'c> {
             if lazy(src) {
                 any_next.push(lazy_v[j].unwrap().as_basic_value_enum());
             } else {
-                any_next.push(t!(self.b.build_or(phi_int(any[j]), word[src], "")).as_basic_value_enum());
+                any_next.push(
+                    t!(self.b.build_or(phi_int(any[j]), word[src], "")).as_basic_value_enum(),
+                );
                 all_next.push(t!(self.b.build_and(phi_int(all[a]), word[src], "")));
                 a += 1;
             }
@@ -379,14 +402,20 @@ impl<'c> Emit<'_, 'c> {
         self.b.position_at_end(thead);
         let row = t!(self.b.build_phi(i64t, "r"));
         let traise = t!(self.b.build_phi(bit, "traise"));
-        let tany = (0..reported).map(|_| self.b.build_phi(bit, "tany").map_err(err)).collect::<R<Vec<_>>>()?;
-        let tall = (0..reported).map(|_| self.b.build_phi(bit, "tall").map_err(err)).collect::<R<Vec<_>>>()?;
+        let tany = (0..reported)
+            .map(|_| self.b.build_phi(bit, "tany").map_err(err))
+            .collect::<R<Vec<_>>>()?;
+        let tall = (0..reported)
+            .map(|_| self.b.build_phi(bit, "tall").map_err(err))
+            .collect::<R<Vec<_>>>()?;
         let tsum = t!(self.b.build_phi(i64t, "tsum"));
         let rv = phi_int(row);
         let more = t!(self.b.build_int_compare(IntPredicate::ULT, rv, n, ""));
         t!(self.b.build_conditional_branch(more, tbody, exit));
         self.b.position_at_end(tbody);
-        let word_index = t!(self.b.build_right_shift(rv, i64t.const_int(6, false), false, ""));
+        let word_index = t!(self
+            .b
+            .build_right_shift(rv, i64t.const_int(6, false), false, ""));
         let shift = t!(self.b.build_and(rv, i64t.const_int(63, false), ""));
         let mut rows = Rows {
             lanes: 1,
@@ -409,10 +438,15 @@ impl<'c> Emit<'_, 'c> {
             } else if packed(&src) {
                 let flag = t!(self.b.build_int_z_extend(lane(self, v)?, i64t, ""));
                 let flag = t!(self.b.build_left_shift(flag, shift, ""));
-                let clear = t!(self.b.build_not(t!(self.b.build_left_shift(i64t.const_int(1, false), shift, "")), ""));
+                let clear = t!(self.b.build_not(
+                    t!(self.b.build_left_shift(i64t.const_int(1, false), shift, "")),
+                    ""
+                ));
                 let at = self.word_ptr(out, word_index)?;
                 let old = t!(self.b.build_load(i64t, at, "")).into_int_value();
-                let new = t!(self.b.build_or(t!(self.b.build_and(old, clear, "")), flag, ""));
+                let new = t!(self
+                    .b
+                    .build_or(t!(self.b.build_and(old, clear, "")), flag, ""));
                 t!(self.b.build_store(at, new));
             }
         }
@@ -429,7 +463,8 @@ impl<'c> Emit<'_, 'c> {
         if let Some((value, mask)) = g.sum {
             let v = self.get(value, &mut rows, &mut memo)?;
             let m = self.get(mask, &mut rows, &mut memo)?;
-            let picked = t!(self.b.build_select(m, v, v.get_type().const_zero(), "")).into_vector_value();
+            let picked =
+                t!(self.b.build_select(m, v, v.get_type().const_zero(), "")).into_vector_value();
             tsum_v = t!(self.b.build_int_add(tsum_v, lane(self, picked)?, ""));
         }
         let tnext = t!(self.b.build_int_add(rv, i64t.const_int(1, false), ""));
@@ -459,10 +494,22 @@ impl<'c> Emit<'_, 'c> {
                 found.any.push(t!(self.b.build_or(v, tail_any, "")));
                 found.all.push(bit.const_zero());
             } else {
-                let v = t!(self.b.build_int_compare(IntPredicate::NE, phi_int(any[j]), ct.const_zero(), ""));
+                let v = t!(self.b.build_int_compare(
+                    IntPredicate::NE,
+                    phi_int(any[j]),
+                    ct.const_zero(),
+                    ""
+                ));
                 found.any.push(t!(self.b.build_or(v, tail_any, "")));
-                let full = t!(self.b.build_int_compare(IntPredicate::EQ, phi_int(all[a]), ct.const_all_ones(), ""));
-                found.all.push(t!(self.b.build_and(full, phi_int(tall[j]), "")));
+                let full = t!(self.b.build_int_compare(
+                    IntPredicate::EQ,
+                    phi_int(all[a]),
+                    ct.const_all_ones(),
+                    ""
+                ));
+                found
+                    .all
+                    .push(t!(self.b.build_and(full, phi_int(tall[j]), "")));
                 a += 1;
             }
         }
@@ -535,9 +582,14 @@ impl<'c> Emit<'_, 'c> {
     /// The bitmap chunk of the rows from `base`.
     fn chunk_ptr(&self, arg: usize, base: IntValue<'c>) -> R<PointerValue<'c>> {
         let i64t = self.cx.i64_type();
-        let byte = t!(self.b.build_right_shift(base, i64t.const_int(3, false), false, ""));
+        let byte = t!(self
+            .b
+            .build_right_shift(base, i64t.const_int(3, false), false, ""));
         // SAFETY: bitmaps cover every row of the window.
-        Ok(t!(unsafe { self.b.build_in_bounds_gep(self.cx.i8_type(), self.ptrs[arg], &[byte], "") }))
+        Ok(t!(unsafe {
+            self.b
+                .build_in_bounds_gep(self.cx.i8_type(), self.ptrs[arg], &[byte], "")
+        }))
     }
 
     /// The function result of a pass.
@@ -557,15 +609,25 @@ impl<'c> Emit<'_, 'c> {
         }
         for (flag, bit) in flags {
             let flag = t!(self.b.build_int_z_extend(flag, i64t, ""));
-            let flag = t!(self.b.build_left_shift(flag, i64t.const_int(bit, false), ""));
+            let flag = t!(self
+                .b
+                .build_left_shift(flag, i64t.const_int(bit, false), ""));
             result = t!(self.b.build_or(result, flag, ""));
         }
         Ok(result)
     }
 
     fn reduce_or(&self, v: VectorValue<'c>) -> R<IntValue<'c>> {
-        let bits = t!(self.b.build_bit_cast(v, self.cx.custom_width_int_type(self.lanes), "")).into_int_value();
-        Ok(t!(self.b.build_int_compare(IntPredicate::NE, bits, bits.get_type().const_zero(), "")))
+        let bits = t!(self
+            .b
+            .build_bit_cast(v, self.cx.custom_width_int_type(self.lanes), ""))
+        .into_int_value();
+        Ok(t!(self.b.build_int_compare(
+            IntPredicate::NE,
+            bits,
+            bits.get_type().const_zero(),
+            ""
+        )))
     }
 
     /// The bits of a chunk's Boolean lanes. Lanes are widened to the lane
@@ -582,8 +644,14 @@ impl<'c> Emit<'_, 'c> {
         if self.widest > 8 {
             v = t!(self.b.build_int_truncate(v, self.ints(8, chunk), ""));
         }
-        let set = t!(self.b.build_int_compare(IntPredicate::NE, v, self.splat_int(8, chunk, 0), ""));
-        Ok(t!(self.b.build_bit_cast(set, self.cx.custom_width_int_type(chunk), "")).into_int_value())
+        let set =
+            t!(self
+                .b
+                .build_int_compare(IntPredicate::NE, v, self.splat_int(8, chunk, 0), ""));
+        Ok(t!(self
+            .b
+            .build_bit_cast(set, self.cx.custom_width_int_type(chunk), ""))
+        .into_int_value())
     }
 
     fn concat(&self, vs: &[VectorValue<'c>]) -> R<VectorValue<'c>> {
@@ -593,8 +661,15 @@ impl<'c> Emit<'_, 'c> {
             let mut next = vec![];
             for pair in vs.chunks(2) {
                 let n = pair[0].get_type().get_size();
-                let mask = (0..2 * n).map(|i| i32t.const_int(i as u64, false)).collect::<Vec<_>>();
-                next.push(t!(self.b.build_shuffle_vector(pair[0], pair[1], VectorType::const_vector(&mask), "")));
+                let mask = (0..2 * n)
+                    .map(|i| i32t.const_int(i as u64, false))
+                    .collect::<Vec<_>>();
+                next.push(t!(self.b.build_shuffle_vector(
+                    pair[0],
+                    pair[1],
+                    VectorType::const_vector(&mask),
+                    ""
+                )));
             }
             vs = next;
         }
@@ -662,9 +737,16 @@ impl<'c> Emit<'_, 'c> {
             _ => unreachable!("scalars are integers or floats"),
         };
         let i32t = self.cx.i32_type();
-        let one = t!(self.b.build_insert_element(ty.get_poison(), v, i32t.const_zero(), ""));
+        let one = t!(self
+            .b
+            .build_insert_element(ty.get_poison(), v, i32t.const_zero(), ""));
         let mask = VectorType::const_vector(&vec![i32t.const_zero(); lanes as usize]);
-        Ok(t!(self.b.build_shuffle_vector(one, ty.get_poison(), mask, "")))
+        Ok(t!(self.b.build_shuffle_vector(
+            one,
+            ty.get_poison(),
+            mask,
+            ""
+        )))
     }
 
     fn intrinsic(&self, name: &str, types: &[BasicTypeEnum<'c>]) -> R<FunctionValue<'c>> {
@@ -683,12 +765,18 @@ impl<'c> Emit<'_, 'c> {
 
     fn word_ptr(&self, arg: usize, word: IntValue<'c>) -> R<PointerValue<'c>> {
         // SAFETY: bitmaps cover every word of the window.
-        Ok(t!(unsafe { self.b.build_in_bounds_gep(self.cx.i64_type(), self.ptrs[arg], &[word], "") }))
+        Ok(t!(unsafe {
+            self.b
+                .build_in_bounds_gep(self.cx.i64_type(), self.ptrs[arg], &[word], "")
+        }))
     }
 
     fn column_ptr(&self, arg: usize, t: Ty, row: IntValue<'c>) -> R<PointerValue<'c>> {
         // SAFETY: columns cover every row of the window.
-        Ok(t!(unsafe { self.b.build_in_bounds_gep(self.elem(t), self.ptrs[arg], &[row], "") }))
+        Ok(t!(unsafe {
+            self.b
+                .build_in_bounds_gep(self.elem(t), self.ptrs[arg], &[row], "")
+        }))
     }
 
     fn store_column(&self, out: usize, v: VectorValue<'c>, rows: &Rows<'c>) -> R<()> {
@@ -758,7 +846,12 @@ impl<'c> Emit<'_, 'c> {
                             .collect::<Vec<_>>();
                         let probes = VectorType::const_vector(&probes);
                         let hit = t!(self.b.build_and(splat, probes, ""));
-                        return Ok(t!(self.b.build_int_compare(IntPredicate::NE, hit, et.vec_type(lanes).const_zero(), "")));
+                        return Ok(t!(self.b.build_int_compare(
+                            IntPredicate::NE,
+                            hit,
+                            et.vec_type(lanes).const_zero(),
+                            ""
+                        )));
                     }
                     let (whole, shift) = match rows.bits {
                         Bits::Chunk { shift, .. } => {
@@ -767,16 +860,26 @@ impl<'c> Emit<'_, 'c> {
                         }
                         Bits::Word { word, shift } => {
                             let at = self.word_ptr(i, word)?;
-                            (t!(self.b.build_load(self.cx.i64_type(), at, "")).into_int_value(), shift)
+                            (
+                                t!(self.b.build_load(self.cx.i64_type(), at, "")).into_int_value(),
+                                shift,
+                            )
                         }
                     };
                     let bits = t!(self.b.build_right_shift(whole, shift, false, ""));
                     let bits = if whole.get_type().get_bit_width() == lanes {
                         bits
                     } else {
-                        t!(self.b.build_int_truncate(bits, self.cx.custom_width_int_type(lanes), ""))
+                        t!(self.b.build_int_truncate(
+                            bits,
+                            self.cx.custom_width_int_type(lanes),
+                            ""
+                        ))
                     };
-                    Ok(t!(self.b.build_bit_cast(bits, self.ints(1, lanes), "")).into_vector_value())
+                    Ok(
+                        t!(self.b.build_bit_cast(bits, self.ints(1, lanes), ""))
+                            .into_vector_value(),
+                    )
                 }
                 Arg::Output(_) | Arg::OutputBitmap => Err("an output read as an operand".into()),
             },
@@ -823,9 +926,25 @@ impl<'c> Emit<'_, 'c> {
                     icmp(IntPredicate::ULT, r, a[0])?
                 } else if let Some(non_negative) = imm_sign(1) {
                     // x + c leaves x downwards iff c >= 0.
-                    icmp(if non_negative { IntPredicate::SLT } else { IntPredicate::SGT }, r, a[0])?
+                    icmp(
+                        if non_negative {
+                            IntPredicate::SLT
+                        } else {
+                            IntPredicate::SGT
+                        },
+                        r,
+                        a[0],
+                    )?
                 } else if let Some(non_negative) = imm_sign(0) {
-                    icmp(if non_negative { IntPredicate::SLT } else { IntPredicate::SGT }, r, a[1])?
+                    icmp(
+                        if non_negative {
+                            IntPredicate::SLT
+                        } else {
+                            IntPredicate::SGT
+                        },
+                        r,
+                        a[1],
+                    )?
                 } else {
                     let x = t!(b.build_xor(a[0], r, ""));
                     let y = t!(b.build_xor(a[1], r, ""));
@@ -838,7 +957,15 @@ impl<'c> Emit<'_, 'c> {
                     icmp(IntPredicate::ULT, a[0], a[1])?
                 } else if let Some(non_negative) = imm_sign(1) {
                     // x - c leaves x upwards iff c >= 0.
-                    icmp(if non_negative { IntPredicate::SGT } else { IntPredicate::SLT }, r, a[0])?
+                    icmp(
+                        if non_negative {
+                            IntPredicate::SGT
+                        } else {
+                            IntPredicate::SLT
+                        },
+                        r,
+                        a[0],
+                    )?
                 } else {
                     let x = t!(b.build_xor(a[0], a[1], ""));
                     let y = t!(b.build_xor(a[0], r, ""));
@@ -852,7 +979,9 @@ impl<'c> Emit<'_, 'c> {
                     "llvm.umul.with.overflow"
                 };
                 let f = self.intrinsic(name, &[a[0].get_type().into()])?;
-                let pair = self.call(f, &[a[0].into(), a[1].into()])?.into_struct_value();
+                let pair = self
+                    .call(f, &[a[0].into(), a[1].into()])?
+                    .into_struct_value();
                 t!(b.build_extract_value(pair, 1, "")).into_vector_value()
             }
             Op::Neg if t.is_float() => t!(b.build_float_neg(a[0], "")),
@@ -889,10 +1018,18 @@ impl<'c> Emit<'_, 'c> {
             Op::DivMagic | Op::RemMagic => self.magic(node.op, t, a, lanes)?,
             Op::Compare(p) => {
                 let (x, y, signed) = if t.is_float() {
-                    (self.float_key(a[0], bits, lanes)?, self.float_key(a[1], bits, lanes)?, true)
+                    (
+                        self.float_key(a[0], bits, lanes)?,
+                        self.float_key(a[1], bits, lanes)?,
+                        true,
+                    )
                 } else if t == Ty::Bool {
                     let i8v = self.ints(8, lanes);
-                    (t!(b.build_int_z_extend(a[0], i8v, "")), t!(b.build_int_z_extend(a[1], i8v, "")), false)
+                    (
+                        t!(b.build_int_z_extend(a[0], i8v, "")),
+                        t!(b.build_int_z_extend(a[1], i8v, "")),
+                        false,
+                    )
                 } else {
                     (a[0], a[1], t.is_signed())
                 };
@@ -921,8 +1058,18 @@ impl<'c> Emit<'_, 'c> {
 
     fn div_overflow(&self, a: &[VectorValue<'c>], bits: u32, lanes: u32) -> R<VectorValue<'c>> {
         let b = &self.b;
-        let min = t!(b.build_int_compare(IntPredicate::EQ, a[0], self.splat_int(bits, lanes, 1 << (bits - 1)), ""));
-        let neg = t!(b.build_int_compare(IntPredicate::EQ, a[1], self.splat_int(bits, lanes, u64::MAX), ""));
+        let min = t!(b.build_int_compare(
+            IntPredicate::EQ,
+            a[0],
+            self.splat_int(bits, lanes, 1 << (bits - 1)),
+            ""
+        ));
+        let neg = t!(b.build_int_compare(
+            IntPredicate::EQ,
+            a[1],
+            self.splat_int(bits, lanes, u64::MAX),
+            ""
+        ));
         Ok(t!(b.build_and(min, neg, "")))
     }
 
@@ -930,7 +1077,8 @@ impl<'c> Emit<'_, 'c> {
     fn float_key(&self, v: VectorValue<'c>, bits: u32, lanes: u32) -> R<VectorValue<'c>> {
         let b = &self.b;
         let x = t!(b.build_bit_cast(v, self.ints(bits, lanes), "")).into_vector_value();
-        let sign = t!(b.build_right_shift(x, self.splat_int(bits, lanes, (bits - 1) as u64), true, ""));
+        let sign =
+            t!(b.build_right_shift(x, self.splat_int(bits, lanes, (bits - 1) as u64), true, ""));
         let mask = t!(b.build_right_shift(sign, self.splat_int(bits, lanes, 1), false, ""));
         Ok(t!(b.build_xor(x, mask, "")))
     }
@@ -956,13 +1104,25 @@ impl<'c> Emit<'_, 'c> {
     }
 
     /// The high 64 bits of a 64 x 64 bit product.
-    fn mulh(&self, x: VectorValue<'c>, y: VectorValue<'c>, signed: bool, lanes: u32) -> R<VectorValue<'c>> {
+    fn mulh(
+        &self,
+        x: VectorValue<'c>,
+        y: VectorValue<'c>,
+        signed: bool,
+        lanes: u32,
+    ) -> R<VectorValue<'c>> {
         let b = &self.b;
         let w = self.ints(128, lanes);
         let (x, y) = if signed {
-            (t!(b.build_int_s_extend(x, w, "")), t!(b.build_int_s_extend(y, w, "")))
+            (
+                t!(b.build_int_s_extend(x, w, "")),
+                t!(b.build_int_s_extend(y, w, "")),
+            )
         } else {
-            (t!(b.build_int_z_extend(x, w, "")), t!(b.build_int_z_extend(y, w, "")))
+            (
+                t!(b.build_int_z_extend(x, w, "")),
+                t!(b.build_int_z_extend(y, w, "")),
+            )
         };
         let p = t!(b.build_int_mul(x, y, ""));
         let p = t!(b.build_right_shift(p, self.splat_int(128, lanes, 64), false, ""));
@@ -982,9 +1142,15 @@ impl<'c> Emit<'_, 'c> {
         } else {
             let hi = self.mulh(m, n, false, lanes)?;
             let plain = t!(b.build_right_shift(hi, s, false, ""));
-            let half = t!(b.build_right_shift(t!(b.build_int_sub(n, hi, "")), self.splat_int(64, lanes, 1), false, ""));
+            let half = t!(b.build_right_shift(
+                t!(b.build_int_sub(n, hi, "")),
+                self.splat_int(64, lanes, 1),
+                false,
+                ""
+            ));
             let added = t!(b.build_right_shift(t!(b.build_int_add(half, hi, "")), s, false, ""));
-            let more = t!(b.build_int_compare(IntPredicate::NE, more, self.splat_int(64, lanes, 0), ""));
+            let more =
+                t!(b.build_int_compare(IntPredicate::NE, more, self.splat_int(64, lanes, 0), ""));
             t!(b.build_select(more, added, plain, "")).into_vector_value()
         };
         let v = if op == Op::DivMagic {
@@ -997,7 +1163,13 @@ impl<'c> Emit<'_, 'c> {
     }
 
     /// `(value, invalid)` of a conversion.
-    fn cast(&self, v: VectorValue<'c>, from: Ty, to: Ty, lanes: u32) -> R<(VectorValue<'c>, VectorValue<'c>)> {
+    fn cast(
+        &self,
+        v: VectorValue<'c>,
+        from: Ty,
+        to: Ty,
+        lanes: u32,
+    ) -> R<(VectorValue<'c>, VectorValue<'c>)> {
         let b = &self.b;
         let ok = self.splat_int(1, lanes, 0);
         if from == to {
@@ -1005,10 +1177,20 @@ impl<'c> Emit<'_, 'c> {
         }
         if to == Ty::Bool {
             let bit = if from.is_float() {
-                let zero = t!(b.build_bit_cast(self.splat_int(from.bits(), lanes, 0), self.vec(from, lanes), "")).into_vector_value();
+                let zero = t!(b.build_bit_cast(
+                    self.splat_int(from.bits(), lanes, 0),
+                    self.vec(from, lanes),
+                    ""
+                ))
+                .into_vector_value();
                 t!(b.build_float_compare(FloatPredicate::UNE, v, zero, ""))
             } else {
-                t!(b.build_int_compare(IntPredicate::NE, v, self.splat_int(from.bits(), lanes, 0), ""))
+                t!(b.build_int_compare(
+                    IntPredicate::NE,
+                    v,
+                    self.splat_int(from.bits(), lanes, 0),
+                    ""
+                ))
             };
             return Ok((bit, ok));
         }
@@ -1035,16 +1217,31 @@ impl<'c> Emit<'_, 'c> {
         let signed = to.is_signed();
         let i64v = self.ints(64, lanes);
         if from.is_float() {
-            let wide = if from == Ty::F32 { t!(b.build_float_ext(v, f64v, "")) } else { v };
-            let name = if signed { "llvm.fptosi.sat" } else { "llvm.fptoui.sat" };
+            let wide = if from == Ty::F32 {
+                t!(b.build_float_ext(v, f64v, ""))
+            } else {
+                v
+            };
+            let name = if signed {
+                "llvm.fptosi.sat"
+            } else {
+                "llvm.fptoui.sat"
+            };
             let convert = self.intrinsic(name, &[i64v.into(), f64v.into()])?;
             let raw = self.call(convert, &[wide.into()])?.into_vector_value();
             let trunc = self.intrinsic("llvm.trunc", &[f64v.into()])?;
             let whole = self.call(trunc, &[wide.into()])?.into_vector_value();
             let float = |x: f64| -> R<VectorValue<'c>> {
-                Ok(t!(b.build_bit_cast(self.splat_int(64, lanes, x.to_bits()), f64v, "")).into_vector_value())
+                Ok(
+                    t!(b.build_bit_cast(self.splat_int(64, lanes, x.to_bits()), f64v, ""))
+                        .into_vector_value(),
+                )
             };
-            let lo = if signed { -(2f64).powi(bits as i32 - 1) } else { 0.0 };
+            let lo = if signed {
+                -(2f64).powi(bits as i32 - 1)
+            } else {
+                0.0
+            };
             let hi = (2f64).powi(bits as i32 - i32::from(signed));
             let low = t!(b.build_float_compare(FloatPredicate::OLT, whole, float(lo)?, ""));
             let high = t!(b.build_float_compare(FloatPredicate::OGE, whole, float(hi)?, ""));
@@ -1064,11 +1261,29 @@ impl<'c> Emit<'_, 'c> {
         let (high, low) = if signed {
             let max = (i64::MAX >> (64 - bits)) as u64;
             let min = (i64::MIN >> (64 - bits)) as u64;
-            let p = if from.is_signed() { IntPredicate::SGT } else { IntPredicate::UGT };
-            (icmp(p, raw, c(max))?, from.is_signed().then(|| icmp(IntPredicate::SLT, raw, c(min))).transpose()?)
+            let p = if from.is_signed() {
+                IntPredicate::SGT
+            } else {
+                IntPredicate::UGT
+            };
+            (
+                icmp(p, raw, c(max))?,
+                from.is_signed()
+                    .then(|| icmp(IntPredicate::SLT, raw, c(min)))
+                    .transpose()?,
+            )
         } else {
-            let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
-            (icmp(IntPredicate::UGT, raw, c(max))?, from.is_signed().then(|| icmp(IntPredicate::SLT, raw, c(0))).transpose()?)
+            let max = if bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << bits) - 1
+            };
+            (
+                icmp(IntPredicate::UGT, raw, c(max))?,
+                from.is_signed()
+                    .then(|| icmp(IntPredicate::SLT, raw, c(0)))
+                    .transpose()?,
+            )
         };
         let bad = match low {
             Some(low) => t!(b.build_or(high, low, "")),

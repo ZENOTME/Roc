@@ -502,14 +502,22 @@ mod tests {
         let sum = plan.column(DataType::Int64, false);
         let add = FunctionExpression::binary(FunctionKind::Add, x.clone(), one, sum).into_ref();
         let above = plan.column(DataType::Boolean, false);
-        let predicate = FunctionExpression::binary(FunctionKind::GreaterThan, add, five, above).into_ref();
+        let predicate =
+            FunctionExpression::binary(FunctionKind::GreaterThan, add, five, above).into_ref();
         let filter = FilterOperator::new(predicate, plan.inputs.clone());
         let count = aggregate(&mut plan, Count, vec![], DataType::Int64, false);
         let total = aggregate(&mut plan, Sum, vec![x], DataType::Int64, true);
-        let operator = AggregateOperator::try_new(vec![k], vec![Arc::new(count), Arc::new(total)]).unwrap();
+        let operator =
+            AggregateOperator::try_new(vec![k], vec![Arc::new(count), Arc::new(total)]).unwrap();
         let n = 1024;
         let keys = Int64Array::from_iter_values((0..n).map(|i| i % 3));
-        let xs = Int64Array::from_iter_values((0..n).map(|i| if i % 2 == 0 { 10 } else { -1_000_000_000_000 - i }));
+        let xs = Int64Array::from_iter_values((0..n).map(|i| {
+            if i % 2 == 0 {
+                10
+            } else {
+                -1_000_000_000_000 - i
+            }
+        }));
         let batch = input(&plan, vec![Arc::new(keys), Arc::new(xs)]);
         let (_shutdown, guard) = asyncband::shutdown::new();
         for mode in MODES {
@@ -522,8 +530,13 @@ mod tests {
             for _ in 0..3 {
                 program.run(&batch, &mut local, &guard).unwrap();
             }
-            let (groups, values) = crate::kernel::aggregation::partial(&mut local, &states).unwrap();
-            let keys = groups.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let (groups, values) =
+                crate::kernel::aggregation::partial(&mut local, &states).unwrap();
+            let keys = groups
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
             let counts = values[0][0].as_any().downcast_ref::<Int64Array>().unwrap();
             let sums = values[1][0].as_any().downcast_ref::<Int64Array>().unwrap();
             let mut seen = (0..keys.len())
@@ -531,7 +544,11 @@ mod tests {
                 .collect::<Vec<_>>();
             seen.sort();
             // Even rows pass: per key 0 / 1 / 2, rows i = 6j / 6j + 4 / 6j + 2.
-            assert_eq!(seen, [(0, 513, 5130), (1, 510, 5100), (2, 513, 5130)], "{mode:?}");
+            assert_eq!(
+                seen,
+                [(0, 513, 5130), (1, 510, 5100), (2, 513, 5130)],
+                "{mode:?}"
+            );
         }
     }
 

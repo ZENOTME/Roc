@@ -70,9 +70,23 @@ fn main() -> Result<(), String> {
         .collect::<Vec<_>>();
     names.sort();
     let mut table = String::new();
-    let suffixes = variants.iter().map(|(s, _)| format!("{s:?}")).collect::<Vec<_>>();
-    writeln!(table, "pub(super) const VARIANTS: [&str; {}] = [{}];", variants.len(), suffixes.join(", ")).unwrap();
-    writeln!(table, "pub(super) static NAMES: [&str; {}] = [", names.len()).unwrap();
+    let suffixes = variants
+        .iter()
+        .map(|(s, _)| format!("{s:?}"))
+        .collect::<Vec<_>>();
+    writeln!(
+        table,
+        "pub(super) const VARIANTS: [&str; {}] = [{}];",
+        variants.len(),
+        suffixes.join(", ")
+    )
+    .unwrap();
+    writeln!(
+        table,
+        "pub(super) static NAMES: [&str; {}] = [",
+        names.len()
+    )
+    .unwrap();
     for name in &names {
         writeln!(table, "    {name:?},").unwrap();
     }
@@ -80,7 +94,11 @@ fn main() -> Result<(), String> {
     for (suffix, _) in &variants {
         for name in &names {
             let symbol = codegen::symbol(name, suffix);
-            writeln!(table, "    fn {symbol}(args: *const *mut u8, rows: u64) -> u64;").unwrap();
+            writeln!(
+                table,
+                "    fn {symbol}(args: *const *mut u8, rows: u64) -> u64;"
+            )
+            .unwrap();
         }
     }
     writeln!(

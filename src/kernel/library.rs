@@ -113,7 +113,10 @@ mod tests {
     /// Runs a kernel; returns its result and the bytes of its outputs.
     fn run(f: KernelFn, args: &[Arg], inputs: &[Vec<u64>], n: usize) -> (u64, Vec<Vec<u8>>) {
         let mut buffers = inputs.to_vec();
-        let pointers = buffers.iter_mut().map(|b| b.as_mut_ptr().cast()).collect::<Vec<_>>();
+        let pointers = buffers
+            .iter_mut()
+            .map(|b| b.as_mut_ptr().cast())
+            .collect::<Vec<_>>();
         // SAFETY: every argument has room for a window of 64-bit values or a
         // window bitmap.
         let result = unsafe { f(pointers.as_ptr(), n as u64) };
@@ -127,7 +130,8 @@ mod tests {
                     _ => return None,
                 };
                 // SAFETY: the buffer has 8192 bytes.
-                let mut out = unsafe { std::slice::from_raw_parts(b.as_ptr().cast::<u8>(), bytes) }.to_vec();
+                let mut out =
+                    unsafe { std::slice::from_raw_parts(b.as_ptr().cast::<u8>(), bytes) }.to_vec();
                 if let (Arg::OutputBitmap, Some(last)) = (a, out.last_mut())
                     && !n.is_multiple_of(8)
                 {
@@ -193,7 +197,12 @@ mod tests {
                 }
                 let mut any = 0u64;
                 for r in 0..n {
-                    let (one_result, one_outputs) = run(table::TABLES[*VARIANT][i], &g.args, &row(&g.args, &inputs, r), 1);
+                    let (one_result, one_outputs) = run(
+                        table::TABLES[*VARIANT][i],
+                        &g.args,
+                        &row(&g.args, &inputs, r),
+                        1,
+                    );
                     for ((arg, whole), one) in g
                         .args
                         .iter()
@@ -210,7 +219,12 @@ mod tests {
                     any |= one_result & 0x5555_5555_5555_5555;
                 }
                 if g.sum.is_none() {
-                    assert_eq!(result & 0x5555_5555_5555_5555, any, "{} reports", key.name());
+                    assert_eq!(
+                        result & 0x5555_5555_5555_5555,
+                        any,
+                        "{} reports",
+                        key.name()
+                    );
                 }
             }
         }

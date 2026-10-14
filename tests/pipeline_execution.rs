@@ -198,13 +198,12 @@ fn source_failure_does_not_combine_or_request_shutdown() {
     );
     let (shutdown, guard) = asyncband::shutdown::new();
     let observer = guard.clone();
-    let result =
-        futures::executor::block_on(pipeline.execute(
-            Arc::new(ThreadTaskExecutor),
-            guard,
-            PipelineExecutionConfig::default(),
-            2,
-        ));
+    let result = futures::executor::block_on(pipeline.execute(
+        Arc::new(ThreadTaskExecutor),
+        guard,
+        PipelineExecutionConfig::default(),
+        2,
+    ));
     let error = result.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::External);
     assert_eq!(error.message(), "source failed");

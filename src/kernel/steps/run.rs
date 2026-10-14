@@ -216,23 +216,33 @@ impl Steps {
         let mut b = std::mem::take(&mut *local.buffers);
         b.home.clear();
         b.home.extend(self.vars.iter().map(|v| match v.place {
-            Place::Value(s) | Place::InputBytes { slot: s, .. } => unsafe { base.add(s * WINDOW).cast() },
-            Place::Bits(s) | Place::InputBits { slot: s, .. } => unsafe { bitmaps.add(s * WORDS).cast() },
+            Place::Value(s) | Place::InputBytes { slot: s, .. } => unsafe {
+                base.add(s * WINDOW).cast()
+            },
+            Place::Bits(s) | Place::InputBits { slot: s, .. } => unsafe {
+                bitmaps.add(s * WORDS).cast()
+            },
             _ => std::ptr::null_mut(),
         }));
         b.mask_home.clear();
-        b.mask_home.extend(
-            self.masks
-                .iter()
-                .map(|m| m.map_or(std::ptr::null_mut(), |s| unsafe { bitmaps.add(s * WORDS).cast() })),
-        );
+        b.mask_home.extend(self.masks.iter().map(|m| {
+            m.map_or(std::ptr::null_mut(), |s| unsafe {
+                bitmaps.add(s * WORDS).cast()
+            })
+        }));
         b.groups.clear();
         b.accumulators.clear();
-        let states = self.steps.iter().chain(&self.fallback).flat_map(|step| match step {
-            Step::GroupLookup { state, .. } => vec![(*state, true)],
-            Step::Aggregates { updates, .. } => updates.iter().map(|u| (u.state, false)).collect(),
-            _ => vec![],
-        });
+        let states = self
+            .steps
+            .iter()
+            .chain(&self.fallback)
+            .flat_map(|step| match step {
+                Step::GroupLookup { state, .. } => vec![(*state, true)],
+                Step::Aggregates { updates, .. } => {
+                    updates.iter().map(|u| (u.state, false)).collect()
+                }
+                _ => vec![],
+            });
         for (i, group) in states {
             if b.groups.len() <= i.0 {
                 b.groups.resize(i.0 + 1, std::ptr::null_mut());
@@ -249,7 +259,8 @@ impl Steps {
         b.states.clear();
         b.states.resize(self.vars.len(), BitState::Mixed);
         b.masks.clear();
-        b.masks.resize(self.masks.len(), (ones(), BitState::AllTrue));
+        b.masks
+            .resize(self.masks.len(), (ones(), BitState::AllTrue));
         b.bounds.clear();
         b.bounds.resize(self.vars.len(), 0);
         let mut frame = Frame {
@@ -289,7 +300,9 @@ impl Steps {
         let result = frame.windows(rows, guard);
         let result = match (result, output, frame.outputs.take()) {
             (Err(e), _, _) => Err(e),
-            (Ok(()), Some(output), Some(outputs)) => outputs.finish(output, batch, inputs, aliases).map(Some),
+            (Ok(()), Some(output), Some(outputs)) => {
+                outputs.finish(output, batch, inputs, aliases).map(Some)
+            }
             (Ok(()), _, _) => Ok(None),
         };
         *local.buffers = Buffers {
@@ -305,7 +318,6 @@ impl Steps {
         };
         result
     }
-
 }
 
 fn ones() -> *mut u8 {
@@ -346,7 +358,9 @@ impl Frame<'_> {
                 Place::Output(j) => {
                     self.ptrs[v] = self.outputs.as_mut().unwrap().column_ptr(j, start);
                 }
-                Place::InputBits { input, validity, .. } => {
+                Place::InputBits {
+                    input, validity, ..
+                } => {
                     let input = self.inputs[input].as_ref().unwrap();
                     let source = if validity {
                         input.nulls.as_ref().map(|n| n.inner().clone())
@@ -372,7 +386,12 @@ impl Frame<'_> {
                                 self.ptrs[v] = self.home[v];
                             }
                             // SAFETY: the pointer covers the window's words.
-                            let words = unsafe { std::slice::from_raw_parts(self.ptrs[v] as *const u64, bits::words(n)) };
+                            let words = unsafe {
+                                std::slice::from_raw_parts(
+                                    self.ptrs[v] as *const u64,
+                                    bits::words(n),
+                                )
+                            };
                             bits::state(words, n)
                         }
                     };
@@ -417,13 +436,20 @@ impl Frame<'_> {
     pub fn mask(&self, d: DomainId) -> (&[u64], BitState) {
         let (p, state) = self.masks[d.0];
         // SAFETY: masks cover a window bitmap.
-        (unsafe { std::slice::from_raw_parts(p as *const u64, WORDS) }, state)
+        (
+            unsafe { std::slice::from_raw_parts(p as *const u64, WORDS) },
+            state,
+        )
     }
 
     /// The canonical bits of `v` at a window row.
     pub fn get(&self, v: VariableId, row: usize) -> u64 {
         let var = &self.steps.vars[v.0];
-        let row = if var.scalar() && var.ty != Ty::Bool { 0 } else { row };
+        let row = if var.scalar() && var.ty != Ty::Bool {
+            0
+        } else {
+            row
+        };
         // SAFETY: rows are below the window size.
         unsafe { load(self.ptrs[v.0], var.ty, row) }
     }
@@ -466,7 +492,9 @@ impl Frame<'_> {
 
     pub fn step(&mut self, step: &Step) -> Result<()> {
         match step {
-            Step::Kernel { f, args, reports, .. } => {
+            Step::Kernel {
+                f, args, reports, ..
+            } => {
                 let result = self.call(*f, args);
                 for (j, v) in reports.iter().enumerate() {
                     self.ptrs[v.0] = self.home[v.0];
@@ -530,12 +558,24 @@ impl Frame<'_> {
                     (BitState::AllTrue, _) => {
                         let src = self.ptrs[predicate.0] as *const u64;
                         // SAFETY: both cover a window bitmap.
-                        unsafe { std::ptr::copy_nonoverlapping(src, self.mask_home[domain.0] as *mut u64, WORDS) };
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                src,
+                                self.mask_home[domain.0] as *mut u64,
+                                WORDS,
+                            )
+                        };
                         BitState::Mixed
                     }
                     (_, BitState::AllTrue) => {
                         // SAFETY: both cover a window bitmap.
-                        unsafe { std::ptr::copy_nonoverlapping(parent_ptr, self.mask_home[domain.0] as *mut u64, WORDS) };
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                parent_ptr,
+                                self.mask_home[domain.0] as *mut u64,
+                                WORDS,
+                            )
+                        };
                         BitState::Mixed
                     }
                     _ => {
@@ -560,7 +600,10 @@ impl Frame<'_> {
                 domain,
             } => {
                 let (mask, state) = self.mask(*domain);
-                if self.states[cond.0] == BitState::AllFalse || state == BitState::AllFalse || self.limit == 0 {
+                if self.states[cond.0] == BitState::AllFalse
+                    || state == BitState::AllFalse
+                    || self.limit == 0
+                {
                     return Ok(());
                 }
                 if let Some(r) = bits::first(&[self.words(*cond), mask], self.limit) {
@@ -609,7 +652,11 @@ impl Frame<'_> {
             BitState::Mixed => {
                 // SAFETY: Boolean slots and pointers cover a window bitmap.
                 unsafe {
-                    std::ptr::copy_nonoverlapping(self.ptrs[from.0] as *const u64, self.home[to.0] as *mut u64, WORDS)
+                    std::ptr::copy_nonoverlapping(
+                        self.ptrs[from.0] as *const u64,
+                        self.home[to.0] as *mut u64,
+                        WORDS,
+                    )
                 };
                 self.ptrs[to.0] = self.home[to.0];
                 self.states[to.0] = BitState::Mixed;
@@ -671,7 +718,11 @@ impl Frame<'_> {
             frame.settle(v);
         };
         match *text {
-            Text::Compare { pred, inputs, output } => flags(self, output, &|f, r| {
+            Text::Compare {
+                pred,
+                inputs,
+                output,
+            } => flags(self, output, &|f, r| {
                 let o = runtime::compare_bytes(
                     f.get(inputs[0], r),
                     f.get(inputs[1], r),
@@ -730,7 +781,8 @@ impl Frame<'_> {
                 let mask = mask.to_vec();
                 let (p, l) = (self.ptrs[ptr.0] as *mut u64, self.ptrs[len.0] as *mut u64);
                 for r in 0..n {
-                    let selected = state == BitState::AllTrue || (state == BitState::Mixed && mask[r / 64] >> (r % 64) & 1 != 0);
+                    let selected = state == BitState::AllTrue
+                        || (state == BitState::Mixed && mask[r / 64] >> (r % 64) & 1 != 0);
                     let (address, length) = if selected {
                         let text = format(self.get(input, r)).into_bytes().into_boxed_slice();
                         let word = (text.as_ptr() as u64, text.len() as u64);
