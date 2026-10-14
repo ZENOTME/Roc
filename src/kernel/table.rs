@@ -99,45 +99,33 @@ impl Table {
         keys: &[usize],
         nulls_equal: bool,
     ) -> Result<Self> {
-        let mut columns = (0..schema.fields().len())
-            .map(|i| {
-                concat(
-                    batches.iter().map(|b| b.column(i)),
-                    schema.field(i).data_type(),
-                )
-            })
+        let columns = (0..schema.fields().len())
+            .map(|i| column(batches, &schema, i))
             .collect::<Result<Vec<_>>>()?;
-        let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-        if rows >= END as usize {
-            return Err(Error::new(
-                crate::error::ErrorKind::ResourceExhausted,
-                format!("a table holds at most {} rows", END - 1),
-            ));
-        }
-        let index = if keys.is_empty() {
-            None
-        } else {
-            let (index, order) = Index::new(&columns, rows, keys, nulls_equal)?;
-            if let Some(order) = order {
-                let order = crate::arrow::array::UInt32Array::from(order);
-                for c in &mut columns {
-                    *c = arrow_select::take::take(c, &order, None).map_err(|source| {
-                        Error::new(
-                            crate::error::ErrorKind::ResourceExhausted,
-                            "a column exceeds the offsets of its type",
-                        )
-                        .with_source(source)
-                    })?;
-                }
-            }
-            Some(index)
+        let (index, order) = index(&columns, keys, nulls_equal)?;
+        let columns = match order {
+            Some(order) => columns
+                .iter()
+                .map(|c| reorder(c, &order))
+                .collect::<Result<_>>()?,
+            None => columns,
         };
-        Ok(Self {
+        Ok(Self::from_parts(schema, columns, index))
+    }
+
+    /// A table of columns already in the order of `index`; see `index`.
+    pub(crate) fn from_parts(
+        schema: SchemaRef,
+        columns: Vec<ArrayRef>,
+        index: Option<TableIndex>,
+    ) -> Self {
+        let rows = columns.first().map_or(0, |c| c.len());
+        Self {
             schema,
             columns,
             rows,
-            index,
-        })
+            index: index.map(|i| i.0),
+        }
     }
 
     pub fn rows(&self) -> usize {
@@ -239,16 +227,24 @@ impl Index {
             .iter()
             .map(|&k| columns[k].data_type().clone())
             .collect::<Vec<_>>();
-        let decoded = keys
-            .iter()
-            .map(|&k| scalar::decode(&columns[k]))
-            .collect::<Result<Vec<_>>>()?;
         let buckets = rows.max(2).next_power_of_two();
         let shift = 64 - buckets.trailing_zeros();
-        let indexed = |r: usize| nulls_equal || decoded.iter().all(|c| c[r].valid != 0);
         let word = types.len() == 1 && word_key(&types[0]) && !nulls_equal;
+        let decoded = if word {
+            vec![]
+        } else {
+            keys.iter()
+                .map(|&k| scalar::decode(&columns[k]))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let nulls = keys
+            .iter()
+            .map(|&k| columns[k].logical_nulls())
+            .collect::<Vec<_>>();
+        let indexed =
+            |r: usize| nulls_equal || nulls.iter().all(|n| n.as_ref().is_none_or(|n| n.is_valid(r)));
         let (words, encoders, mut data, mut offsets) = if word {
-            let words = decoded[0].iter().map(|c| c.bits).collect::<Vec<_>>();
+            let words = key_words(&columns[keys[0]]).expect("word keys have word types");
             (words, vec![], vec![], vec![])
         } else {
             let encoders = types
@@ -313,6 +309,82 @@ impl Index {
         };
         Ok((index, (!sorted).then_some(order)))
     }
+}
+
+/// Column `i` of the batches, one after another.
+pub(crate) fn column(batches: &[RecordBatch], schema: &SchemaRef, i: usize) -> Result<ArrayRef> {
+    concat(
+        batches.iter().map(|b| b.column(i)),
+        schema.field(i).data_type(),
+    )
+}
+
+/// The index of a table's columns `keys`, and the order its rows must be
+/// stored in (`None` when they already are). A row with a NULL key is not
+/// indexed unless `nulls_equal`.
+pub(crate) fn index(
+    columns: &[ArrayRef],
+    keys: &[usize],
+    nulls_equal: bool,
+) -> Result<(Option<TableIndex>, Option<Vec<u32>>)> {
+    let rows = columns.first().map_or(0, |c| c.len());
+    if rows >= END as usize {
+        return Err(Error::new(
+            crate::error::ErrorKind::ResourceExhausted,
+            format!("a table holds at most {} rows", END - 1),
+        ));
+    }
+    if keys.is_empty() {
+        return Ok((None, None));
+    }
+    let (index, order) = Index::new(columns, rows, keys, nulls_equal)?;
+    Ok((Some(TableIndex(index)), order))
+}
+
+/// The index of a table under construction.
+pub(crate) struct TableIndex(Index);
+
+/// A column in the order `index` gave.
+pub(crate) fn reorder(column: &ArrayRef, order: &[u32]) -> Result<ArrayRef> {
+    let order = crate::arrow::array::UInt32Array::from(order.to_vec());
+    arrow_select::take::take(column, &order, None).map_err(|source| {
+        Error::new(
+            crate::error::ErrorKind::ResourceExhausted,
+            "a column exceeds the offsets of its type",
+        )
+        .with_source(source)
+    })
+}
+
+/// The canonical word of every row of a key column of a word type, as
+/// `scalar::decode` gives them, NULL rows zero; None for other types.
+fn key_words(a: &ArrayRef) -> Option<Vec<u64>> {
+    use crate::arrow::array::{AsArray, PrimitiveArray};
+    use crate::arrow::datatypes::*;
+    fn words<T: ArrowPrimitiveType>(a: &PrimitiveArray<T>, f: impl Fn(T::Native) -> u64) -> Vec<u64> {
+        match a.nulls() {
+            None => a.values().iter().map(|v| f(*v)).collect(),
+            Some(n) => a
+                .values()
+                .iter()
+                .enumerate()
+                .map(|(i, v)| if n.is_valid(i) { f(*v) } else { 0 })
+                .collect(),
+        }
+    }
+    Some(match a.data_type() {
+        DataType::Int8 => words(a.as_primitive::<Int8Type>(), |v| v as u64),
+        DataType::Int16 => words(a.as_primitive::<Int16Type>(), |v| v as u64),
+        DataType::Int32 => words(a.as_primitive::<Int32Type>(), |v| v as u64),
+        DataType::Int64 => words(a.as_primitive::<Int64Type>(), |v| v as u64),
+        DataType::UInt8 => words(a.as_primitive::<UInt8Type>(), |v| v as u64),
+        DataType::UInt16 => words(a.as_primitive::<UInt16Type>(), |v| v as u64),
+        DataType::UInt32 => words(a.as_primitive::<UInt32Type>(), |v| v as u64),
+        DataType::UInt64 => words(a.as_primitive::<UInt64Type>(), |v| v),
+        DataType::Date32 => words(a.as_primitive::<Date32Type>(), |v| v as u64),
+        DataType::Date64 => words(a.as_primitive::<Date64Type>(), |v| v as u64),
+        _ => return None,
+    })
 }
 
 /// The arrays one after another.

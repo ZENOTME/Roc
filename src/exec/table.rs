@@ -17,7 +17,8 @@ use super::SinkExec;
 use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::error::Result;
 use crate::exec::SinkStatus;
-use crate::kernel::table::{SharedTable, Table};
+use crate::arrow::array::ArrayRef;
+use crate::kernel::table::{self, SharedTable, Table};
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use std::sync::Arc;
@@ -59,13 +60,49 @@ impl SinkExec for TableSinkExec {
     }
 
     fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+        self.finish_on(guard, &crate::exec::Inline)
+    }
+
+    /// Concatenates the columns, indexes the keys and reorders the columns
+    /// for the index, each column a CPU job of its own.
+    fn finish_on<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        cpu: &'a dyn crate::exec::Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if guard.is_shutdown_requested() {
                 return Err(crate::error::Error::cancelled());
             }
-            let batches = std::mem::take(&mut self.batches);
-            let table = Table::new(self.schema.clone(), &batches, &self.keys, self.nulls_equal)?;
-            self.shared.publish(table)
+            let batches = Arc::new(std::mem::take(&mut self.batches));
+            let width = self.schema.fields().len();
+            let jobs = (0..width)
+                .map(|i| {
+                    let (batches, schema) = (batches.clone(), self.schema.clone());
+                    Box::new(move || table::column(&batches, &schema, i))
+                        as Box<dyn FnOnce() -> Result<ArrayRef> + Send>
+                })
+                .collect();
+            let columns = crate::exec::run_all(cpu, jobs).await?;
+            drop(batches);
+            let (index, order) = table::index(&columns, &self.keys, self.nulls_equal)?;
+            let columns = match order {
+                Some(order) => {
+                    let order = Arc::new(order);
+                    let jobs = columns
+                        .into_iter()
+                        .map(|c| {
+                            let order = order.clone();
+                            Box::new(move || table::reorder(&c, &order))
+                                as Box<dyn FnOnce() -> Result<ArrayRef> + Send>
+                        })
+                        .collect();
+                    crate::exec::run_all(cpu, jobs).await?
+                }
+                None => columns,
+            };
+            self.shared
+                .publish(Table::from_parts(self.schema.clone(), columns, index))
         })
     }
 }
