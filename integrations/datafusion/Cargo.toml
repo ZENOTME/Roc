@@ -27,9 +27,16 @@ path = "src/lib.rs"
 roc = { path = "../.." }
 arrow = { version = "59.2.0", default-features = false }
 asyncband = { version = "0.7.3", default-features = false, features = ["shutdown"] }
-datafusion = { version = "=55.1.0", default-features = false, features = ["parquet", "sql"] }
+datafusion = { version = "=55.1.0", default-features = false, features = [
+    "parquet",
+    "sql",
+    "datetime_expressions",
+    "math_expressions",
+    "string_expressions",
+    "unicode_expressions",
+] }
 futures = "0.3"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 parquet = { version = "59.2.0", default-features = false, features = ["arrow", "snap"] }

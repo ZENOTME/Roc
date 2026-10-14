@@ -35,5 +35,6 @@
 //! ```
 
 mod storage;
+pub mod tpcds;
 
 pub use storage::{DataFusionScan, DataFusionStorage};
