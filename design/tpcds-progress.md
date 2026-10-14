@@ -74,19 +74,24 @@ and `tpcds/status.md` from the runner output after each milestone.
 noisy, compare engines within one run). Full per-statement report:
 [`integrations/datafusion/tpcds/status.md`](../integrations/datafusion/tpcds/status.md).
 
-Correctness: 103 / 103 in both modes with 4 workers; with 1 worker q72 used
-to time out (it now takes about 1 s).
+Correctness: 103 / 103 in ZeroCompile with 4 workers at the last commit,
+and in both modes with 4 workers at every milestone before it; with 1
+worker q72 used to time out (it now takes about 1 s).
 
 Performance, ZeroCompile, 4 workers, both engines on a 4-thread runtime
 with 4 DataFusion partitions, best of 3 runs (`--repeat 3`):
 
-| Point | Roc total | DataFusion total | Roc slower on |
+| Point | Roc total | DataFusion total | Roc as fast or faster on |
 | --- | ---: | ---: | --- |
-| start of the phase (10-thread runtime) | 77 s | 6.5 s | 101 / 103 |
-| after the commits up to `cc65ed8` | 23.4 s | 11.4 s | 88 / 103 |
+| start of the phase (10-thread runtime) | 77 s | 6.5 s | 2 / 103 |
+| commit `cc65ed8` | 23.4 s | 11.4 s | 15 / 103 |
+| commit `978830c` | 13.9 s | 9.5 s | 31 / 103 |
 
 DuckDB 1.5 (`tpcds/duckdb.py --threads 4`): 4.1 s over the 101 statements
 it parses (q77 and q90 use reserved words as aliases).
+
+Compile mode has not been worked on: its pipeline construction includes
+LLVM compilation (0.1 to 1.5 s per statement), so it is slower in total.
 <!-- /STATUS -->
 
 ## Performance work so far
@@ -98,19 +103,33 @@ the why.
   their prepared steps), `--threads`, `--set`; Roc phase times; DuckDB
   script. Profile with macOS `sample` while `--repeat N --profile` runs.
 - Scans: DataFusion partitions decode in parallel tasks (`storage.rs`);
-  scans split files into target partitions (`plan.rs`).
+  scans split files into target partitions (`plan.rs`), estimating rows
+  before the split.
 - Joins: indexed tables are stored grouped by hash bucket
   (`kernel/table.rs`); expansions probe a window's rows in one batch and
   stream matches straight into windows (`steps/expand.rs`); gathers and
   imports read only the rows of their domain (`Step::Import`,
-  `steps/mod.rs::place_imports`).
+  `steps/mod.rs::place_imports`); expansions that only reduce a constant
+  true stop at the first match (`ExpandStep::exists`).
 - Translator: real row estimates from DataFusion's `StatisticsContext`;
   semi-join reduction of build sides and of probe scans by filtered
   dimension tables joined above them (`plan.rs::Reduction`).
-- Aggregates: open-addressing group index (`exec/aggregate/group_index.rs`);
-  128-bit sums over whole windows; partials of all workers merge as
-  hash partitions in parallel CPU jobs at finish (`SinkExec::finish_on`,
-  `exec::Cpu`).
+- Aggregates: open-addressing group index with word, fixed-width compound
+  and encoded keys (`exec/aggregate/group_index.rs`); 128-bit sums over
+  whole windows; partials of all workers merge as hash partitions in
+  parallel CPU jobs at finish.
+- Pipelines: a program that needs a match in an empty table for every
+  effect does not read its input (`Steps::idle`).
+- Sinks: `SinkExec::finish_on(guard, &dyn Cpu)` lets a sink run its finish
+  work as CPU jobs on the pipeline's executor (the same worker threads,
+  same parallelism; the default calls `finish`). Users: aggregate merges,
+  join table builds (a job per column), buffer finishes: sorts (ranges
+  sorted in jobs, then merged) and windows (rows split by partition-key
+  hash, one job per part). The IR and the pipeline model are unchanged.
+  Open question for the maintainer: the alternative is to express these
+  finishes as pipelines of their own (e.g. a sort as range-sort and merge
+  pipelines), which keeps all scheduling in the pipeline graph but is a
+  larger change.
 - Lowering: decimal casts that cannot overflow skip their precision check.
 
 ## Known gaps and next steps
@@ -126,29 +145,33 @@ Correctness:
   `RANGE ... CURRENT ROW` are unsupported; `LEFT JOIN` with a residual
   filter is unsupported (`JoinOperator::try_new`).
 - Not yet covered: larger scale factors; an automated test that runs the
-  corpus (it needs the generated data, so it is an example today).
+  corpus (it needs the generated data, so it is an example today); a full
+  Compile-mode and 1-worker corpus run at the last commit.
 
 Performance, largest gaps first (profile before changing anything):
 
-1. **Large group-bys** (q23, q67, q14, q78, q97): composite fixed-width
-   keys still go through the encoded-bytes path one row at a time;
-   `Accumulator` keeps one ~180-byte `Group` per group for every function;
-   merges decode partial arrays into cells. Next: fixed-width composite
-   keys interned from whole windows, typed accumulator storage, merges of
-   indexes and accumulators without Arrow arrays.
-2. **Windows and sorts** (q51, q47, q57, q67): `exec/sort.rs` and
-   `exec/window.rs` work on `scalar::decode` cells on one thread.
-3. **Runtime pruning**: DataFusion prunes row groups of date-sorted fact
+1. **Group-bys with string keys** (q23 `substr(i_item_desc)`, q67): the
+   encoded-key path encodes every row's cells (`scalar::key_bytes` from
+   `GroupIndex::intern_row` dominates q67). Encode byte keys from whole
+   windows, or keep strings as (hash, offset) in a byte arena.
+2. **Accumulators**: `Accumulator` keeps one ~180-byte `Group` per group
+   for every function, and merges decode partial arrays into cells. Typed
+   per-function storage and merges of indexes and accumulators without
+   Arrow arrays would cut q23, q14, q78.
+3. **Serial parts of finishes**: `RowKeys::new` (sort and window keys),
+   the sort runs' merge, `table::index` (hashing and bucket sort).
+4. **Semi joins with a large build side** (q23's `best_ss_customer`): the
+   2.9M-row table is built only to test existence; joining with the
+   distinct keys, or a build-side mark, would avoid it.
+5. **Runtime pruning**: DataFusion prunes row groups of date-sorted fact
    tables with dynamic filters from join builds (q39, q21). An equivalent
    would hand key bounds of a built table to the scan of a semi-join's
    probe side; it is a storage hint and changes no semantics.
-4. **Empty build sides** (q27, q68, q46): DataFusion skips the probe side;
-   Roc still scans it.
-5. **Compile mode overhead.** LLVM compiles every program when the graph is
-   built (q2/q66 ~1.5 s). Cache fused functions by a structural key, or
-   compile in the background.
-6. Row-at-a-time paths: string comparisons and LIKE (`Step::Text`), table
-   index builds (`kernel/table.rs`), serial table builds at `finish`.
+6. **Compile mode overhead.** LLVM compiles every program when the graph is
+   built (q61: 146 ms of 154; q2/q66 ~1.5 s). Cache fused functions by a
+   structural key, compile programs in parallel, or compile in the
+   background and run the precompiled kernels until the code is ready.
+7. Row-at-a-time paths: string comparisons and LIKE (`Step::Text`).
 
 Keep the boundary: these are kernel and execution-strategy changes; the IR
 semantics and the translator stay general.
