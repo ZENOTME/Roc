@@ -199,7 +199,15 @@ impl Pipeline {
                 .await
                 .with_location()?;
             self.source.finish(&shutdown_guard).await.with_location()?;
-            return self.sink.finish(&shutdown_guard).await.with_location();
+            let cpu = ExecutorCpu {
+                executor,
+                parallelism,
+            };
+            return self
+                .sink
+                .finish_on(&shutdown_guard, &cpu)
+                .await
+                .with_location();
         }
         let source_guard = &shutdown_guard;
         let mut source = Box::pin(futures::stream::try_unfold(
@@ -374,7 +382,33 @@ impl Pipeline {
         }
         drop(source);
         self.source.finish(&shutdown_guard).await.with_location()?;
-        self.sink.finish(&shutdown_guard).await.with_location()
+        let cpu = ExecutorCpu {
+            executor,
+            parallelism,
+        };
+        self.sink
+            .finish_on(&shutdown_guard, &cpu)
+            .await
+            .with_location()
+    }
+}
+
+/// CPU work of sinks, as tasks of the pipeline's executor.
+struct ExecutorCpu<E> {
+    executor: Arc<E>,
+    parallelism: usize,
+}
+
+impl<E: Executor> crate::exec::Cpu for ExecutorCpu<E> {
+    fn run(&self, jobs: Vec<crate::exec::CpuJob>) -> futures::future::BoxFuture<'_, Result<()>> {
+        let tasks = jobs
+            .into_iter()
+            .map(|job| on_cpu(self.executor.as_ref(), job))
+            .collect::<Vec<_>>();
+        Box::pin(async move { futures::future::try_join_all(tasks).await.map(|_| ()) })
+    }
+    fn parallelism(&self) -> usize {
+        self.parallelism
     }
 }
 

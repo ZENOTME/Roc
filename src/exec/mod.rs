@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use crate::arrow::record_batch::RecordBatch;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::kernel::LocalState;
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
+use std::sync::{Arc, Mutex};
 
 pub(crate) mod aggregate;
 mod buffer;
@@ -79,4 +80,64 @@ pub trait SinkExec: Send + 'static {
     fn finish<'a>(&'a mut self, _guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    /// `finish`, with CPU work allowed on `cpu`. Pipelines call this one.
+    fn finish_on<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        _cpu: &'a dyn Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
+        self.finish(guard)
+    }
+}
+
+/// One unit of CPU work.
+pub type CpuJob = Box<dyn FnOnce() -> Result<()> + Send>;
+
+/// Runs CPU work of a finishing sink: on the pipeline's executor, or inline.
+pub trait Cpu: Send + Sync {
+    /// Runs the jobs, concurrently where it can; fails with a failed job's
+    /// error.
+    fn run(&self, jobs: Vec<CpuJob>) -> BoxFuture<'_, Result<()>>;
+    /// How many jobs run at once.
+    fn parallelism(&self) -> usize;
+}
+
+/// Runs jobs one after another on the caller's thread.
+pub struct Inline;
+
+impl Cpu for Inline {
+    fn run(&self, jobs: Vec<CpuJob>) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { jobs.into_iter().try_for_each(|job| job()) })
+    }
+    fn parallelism(&self) -> usize {
+        1
+    }
+}
+
+/// Runs `work` on `cpu`; returns the results in order.
+pub async fn run_all<T: Send + 'static>(
+    cpu: &dyn Cpu,
+    work: Vec<Box<dyn FnOnce() -> Result<T> + Send>>,
+) -> Result<Vec<T>> {
+    let results = Arc::new(Mutex::new(
+        (0..work.len()).map(|_| None).collect::<Vec<Option<T>>>(),
+    ));
+    let jobs = work
+        .into_iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let results = results.clone();
+            Box::new(move || {
+                let value = w()?;
+                results.lock().unwrap()[i] = Some(value);
+                Ok(())
+            }) as CpuJob
+        })
+        .collect();
+    cpu.run(jobs).await?;
+    let results = std::mem::take(&mut *results.lock().unwrap());
+    results
+        .into_iter()
+        .map(|r| r.ok_or_else(|| Error::internal("a CPU job left no result".into())))
+        .collect()
 }
