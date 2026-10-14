@@ -107,7 +107,7 @@ impl ConstantExpression {
         }
         let ty = VariableType::of(data_type)
             .ok_or_else(|| Error::unsupported(format!("unsupported constant type: {data_type}")))?;
-        let value = builder.constant(ConstantValue::from_bits(ty, cell.bits))?;
+        let value = builder.constant(ConstantValue::from_words(ty, [cell.bits, cell.len]))?;
         Ok((ColumnVariableBinding::fixed(ty, value, None)?, vec![]))
     }
 }

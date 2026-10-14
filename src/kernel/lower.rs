@@ -15,6 +15,7 @@
 //! Lowering helpers shared by expressions and operators. Validity is an
 //! optional Boolean where None means "always valid".
 use super::builder::is_bytes;
+use super::decimal::{decimal, pow10};
 use super::*;
 use crate::arrow::datatypes::DataType;
 use crate::error::{Error, Result};
@@ -236,6 +237,34 @@ impl KernelBuilder<'_> {
                 }
             }
         };
+        if decimal(from).is_some() || decimal(to).is_some() {
+            let value = input.value().ok_or_else(unsupported)?;
+            let (value, target, invalid) = self.decimal_cast(value, from, to)?;
+            let (validity, errors) = match invalid {
+                Some(invalid) => checked(self, invalid, vec![], KernelError::InvalidCast)?,
+                None => (validity, vec![]),
+            };
+            return Ok((
+                ColumnVariableBinding::fixed(target, value, validity)?,
+                errors,
+            ));
+        }
+        // Dates are days since the epoch, as Int32 values.
+        if matches!((from, to), (DataType::Date32, _) | (_, DataType::Date32)) {
+            let days = |t: &DataType| {
+                if *t == DataType::Date32 {
+                    DataType::Int32
+                } else {
+                    t.clone()
+                }
+            };
+            let (from, to) = (&days(from), &days(to));
+            if scalar_type(from).is_none() || scalar_type(to).is_none() {
+                return Err(unsupported());
+            }
+            let (binding, errors) = self.cast_binding(input, from, to, mode)?;
+            return Ok((binding, errors));
+        }
         if is_bytes(from) && is_bytes(to) {
             let ColumnVariableBinding::Bytes { ptr, len, .. } = *input else {
                 return Err(unsupported());
@@ -291,11 +320,107 @@ impl KernelBuilder<'_> {
     }
 }
 
+impl KernelBuilder<'_> {
+    /// A cast from or to a decimal: the value, its type and the flag of rows
+    /// that cannot be represented, if any can fail.
+    fn decimal_cast(
+        &mut self,
+        value: VariableId,
+        from: &DataType,
+        to: &DataType,
+    ) -> Result<(VariableId, VariableType, Option<VariableId>)> {
+        use ScalarFunction as S;
+        let unsupported = || Error::unsupported(format!("unsupported cast from {from} to {to}"));
+        let any = |b: &mut Self, flags: Vec<VariableId>| -> Result<Option<VariableId>> {
+            let mut out = None;
+            for f in flags {
+                out = Some(match out {
+                    None => f,
+                    Some(o) => b.or(o, f)?,
+                });
+            }
+            Ok(out)
+        };
+        match (decimal(from), decimal(to)) {
+            (Some((_, s1)), Some((p2, s2))) => {
+                let r = self.rescale(value, s1, s2, KernelError::InvalidCast)?;
+                let mut flags = r.flags.iter().map(|f| f.0).collect::<Vec<_>>();
+                flags.push(self.exceeds_precision(r.value, p2)?);
+                Ok((r.value, VariableType::Int128, any(self, flags)?))
+            }
+            (Some((_, s1)), None) => {
+                let target = scalar_type(to)
+                    .filter(|t| t.is_numeric())
+                    .ok_or_else(unsupported)?;
+                if target.is_float() {
+                    let float = self.call(
+                        S::Cast {
+                            to: VariableType::Float64,
+                        },
+                        vec![value],
+                    )?[0];
+                    let scale = self.constant(ConstantValue::Float64(10f64.powi(s1 as i32)))?;
+                    let mut v = self.call(S::Divide, vec![float, scale])?[0];
+                    if target == VariableType::Float32 {
+                        v = self.call(S::Cast { to: target }, vec![v])?[0];
+                    }
+                    return Ok((v, target, None));
+                }
+                let d = self.constant(ConstantValue::Int128(pow10(s1 as u32)))?;
+                let whole = self.call(S::Divide, vec![value, d])?[0];
+                let out = self.call(S::Cast { to: target }, vec![whole])?;
+                Ok((out[0], target, Some(out[1])))
+            }
+            (None, Some((p2, s2))) => {
+                let source = scalar_type(from)
+                    .filter(|t| t.is_numeric())
+                    .ok_or_else(unsupported)?;
+                let mut flags = vec![];
+                let unscaled = if source.is_float() {
+                    let float = self.call(
+                        S::Cast {
+                            to: VariableType::Float64,
+                        },
+                        vec![value],
+                    )?[0];
+                    let scale = self.constant(ConstantValue::Float64(10f64.powi(s2 as i32)))?;
+                    let scaled = self.call(S::Multiply, vec![float, scale])?[0];
+                    let rounded = self.call(S::Round, vec![scaled])?[0];
+                    let out = self.call(
+                        S::Cast {
+                            to: VariableType::Int128,
+                        },
+                        vec![rounded],
+                    )?;
+                    flags.push(out[1]);
+                    out[0]
+                } else {
+                    let wide = self.call(
+                        S::Cast {
+                            to: VariableType::Int128,
+                        },
+                        vec![value],
+                    )?[0];
+                    let r = self.rescale(wide, 0, s2, KernelError::InvalidCast)?;
+                    flags.extend(r.flags.iter().map(|f| f.0));
+                    r.value
+                };
+                flags.push(self.exceeds_precision(unscaled, p2)?);
+                Ok((unscaled, VariableType::Int128, any(self, flags)?))
+            }
+            (None, None) => Err(unsupported()),
+        }
+    }
+}
+
 /// Numeric and Boolean types that Cast / ParseText / FormatText accept.
 /// Temporal types only cast to themselves.
 fn scalar_type(t: &DataType) -> Option<VariableType> {
     match t {
-        DataType::Date32 | DataType::Date64 | DataType::Timestamp(..) => None,
+        DataType::Date32
+        | DataType::Date64
+        | DataType::Timestamp(..)
+        | DataType::Decimal128(..) => None,
         _ => VariableType::of(t),
     }
 }
@@ -322,5 +447,13 @@ pub(crate) fn cast_can_fail(from: VariableType, to: VariableType) -> bool {
 /// Whether a logical cast is supported, checked before code generation.
 pub(crate) fn cast_supported(from: &DataType, to: &DataType) -> bool {
     let value = |t: &DataType| scalar_type(t).is_some() || is_bytes(t);
-    from == to || *from == DataType::Null || (value(from) && value(to))
+    let number =
+        |t: &DataType| decimal(t).is_some() || scalar_type(t).is_some_and(|v| v.is_numeric());
+    let date =
+        |t: &DataType| *t == DataType::Date32 || scalar_type(t).is_some_and(|v| v.is_integer());
+    from == to
+        || *from == DataType::Null
+        || (value(from) && value(to))
+        || ((decimal(from).is_some() || decimal(to).is_some()) && number(from) && number(to))
+        || (date(from) && date(to))
 }

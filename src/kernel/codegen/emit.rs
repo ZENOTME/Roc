@@ -981,6 +981,19 @@ impl<'c> Emit<'_, 'c> {
                     icmp(IntPredicate::SLT, t!(b.build_and(x, y, "")), zeros(bits))?
                 }
             }
+            Op::MulOverflow if bits > 64 => {
+                // The product of the sign-extended operands at twice the
+                // width overflows iff it differs from its sign-extended low
+                // half; LLVM expands this without the 128-bit library
+                // routine generated code cannot link to.
+                let double = self.ints(bits * 2, lanes);
+                let x = t!(b.build_int_s_extend(a[0], double, ""));
+                let y = t!(b.build_int_s_extend(a[1], double, ""));
+                let p = t!(b.build_int_mul(x, y, ""));
+                let low = t!(b.build_int_truncate(p, self.ints(bits, lanes), ""));
+                let back = t!(b.build_int_s_extend(low, double, ""));
+                icmp(IntPredicate::NE, p, back)?
+            }
             Op::MulOverflow => {
                 let name = if t.is_signed() {
                     "llvm.smul.with.overflow"

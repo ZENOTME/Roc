@@ -16,6 +16,7 @@ use super::{ScalarExprRef, build_input};
 use crate::arrow::datatypes::DataType;
 use crate::column::ColumnId;
 use crate::error::{Error, ErrorContext, Result, ResultExt};
+use crate::kernel::decimal::decimal;
 use crate::kernel::{
     ColumnVariableBinding, KernelBuilder, KernelError, PendingErrors, ScalarFunction, VariableId,
     scalar,
@@ -117,10 +118,37 @@ impl FunctionExpression {
         if unary != (inputs.len() == 1) || (!unary && inputs.len() != 2) {
             return Err(Error::invalid_plan("invalid function arity".into()));
         }
-        if !unary && types[0] != types[1] {
+        // Decimals of different precision or scale combine like Arrow's.
+        let decimals = !unary && decimal(&types[0]).is_some() && decimal(&types[1]).is_some();
+        if !unary && types[0] != types[1] && !decimals {
             return Err(Error::invalid_plan(
                 "operand types differ; insert an explicit cast".into(),
             ));
+        }
+        // Comparisons see decimals at their common scale.
+        if decimals && !matches!(f, Add | Subtract | Multiply | Divide | Remainder) {
+            let scale = decimal(&types[0])
+                .unwrap()
+                .1
+                .max(decimal(&types[1]).unwrap().1);
+            for (input, t) in inputs.iter_mut().zip(&types) {
+                let from = decimal(t).unwrap().1;
+                if from != scale {
+                    let rescaled = builder.rescale(
+                        input.value().unwrap(),
+                        from,
+                        scale,
+                        KernelError::ArithmeticOverflow,
+                    )?;
+                    for (flag, error) in rescaled.flags {
+                        errors.push(builder.pending(flag, input.validity(), error, vec![])?);
+                    }
+                    *input = ColumnVariableBinding::Int128 {
+                        value: rescaled.value,
+                        validity: input.validity(),
+                    };
+                }
+            }
         }
         let binding = match f {
             IsNull | IsNotNull => {
@@ -137,12 +165,41 @@ impl FunctionExpression {
                     validity: None,
                 }
             }
+            Add | Subtract | Multiply | Divide if decimals => {
+                let output = builder.column_type(self.output)?.data_type.clone();
+                let (_, scale) = decimal(&output).ok_or_else(signature)?;
+                let validity = builder.strict_validity(&inputs)?;
+                let operand =
+                    |i: usize| (inputs[i].value().unwrap(), decimal(&types[i]).unwrap().1);
+                let function = match f {
+                    Add => ScalarFunction::Add,
+                    Subtract => ScalarFunction::Subtract,
+                    Multiply => ScalarFunction::Multiply,
+                    _ => ScalarFunction::Divide,
+                };
+                let (result, natural) =
+                    builder.decimal_arithmetic(function, operand(0), operand(1))?;
+                let fit = builder.rescale(
+                    result.value,
+                    natural,
+                    scale,
+                    KernelError::ArithmeticOverflow,
+                )?;
+                for (flag, error) in result.flags.into_iter().chain(fit.flags) {
+                    errors.push(builder.pending(flag, validity, error, vec![])?);
+                }
+                ColumnVariableBinding::Int128 {
+                    value: fit.value,
+                    validity,
+                }
+            }
             Negate | Add | Subtract | Multiply | Divide | Remainder => {
                 let signed = !matches!(
                     t,
                     DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
                 );
-                if !scalar::numeric(t) || (f == Negate && !signed) {
+                let negate_decimal = f == Negate && decimal(t).is_some();
+                if !(scalar::numeric(t) || negate_decimal) || (f == Negate && !signed) {
                     return Err(signature());
                 }
                 let validity = builder.strict_validity(&inputs)?;

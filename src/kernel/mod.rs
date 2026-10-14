@@ -20,6 +20,7 @@
 //! kernels from `codegen`: precompiled into the binary, or fused at run time.
 pub(crate) mod aggregation;
 mod builder;
+pub(crate) mod decimal;
 // The build script uses the whole module; the crate fuses with part of it.
 #[allow(dead_code)]
 pub(crate) mod codegen;
