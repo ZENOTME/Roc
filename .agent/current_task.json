@@ -1,0 +1,7 @@
+{
+  "task": "llvm-simd-execution",
+  "task_dir": ".agent/llvm-simd-execution",
+  "plan_path": ".agent/llvm-simd-execution/plan.md",
+  "updated_by": "planning",
+  "updated_at": "2026-10-14T13:10:14+08:00"
+}

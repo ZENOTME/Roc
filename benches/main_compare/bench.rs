@@ -21,6 +21,11 @@ use std::{
     time::Instant,
 };
 
+// Every engine variant uses the allocator of the DataFusion and DuckDB
+// reference builds' class, so allocation policy does not decide comparisons.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const BATCH: usize = 8192;
 const CASES: [&str; 6] = [
     "scan",
@@ -264,28 +269,21 @@ mod adapter {
             agg::{AggregateExpression, AggregateFunction},
             scalar::{ConstantExpression, FunctionExpression, FunctionKind, ReferenceExpression, ScalarExprRef},
         },
-        kernel::{ExecutionMode, KernelLibrary, prewarm_kernels},
+        kernel::ExecutionMode,
         operator::{AggregateOperator, FilterOperator, Operator, OperatorTree, ProjectOperator},
         pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph_with_mode, build_pipeline_on_node},
     };
-    pub const MODES: [&str; 3] = ["compile", "zero-generated", "zero-native"];
+    pub const MODES: [&str; 2] = ["compile", "zero-compile"];
     fn mode(name: &str) -> ExecutionMode {
         match name {
             "compile" => ExecutionMode::Compile,
-            "zero-generated" => ExecutionMode::ZeroCompile(KernelLibrary::Generated),
-            "zero-native" => ExecutionMode::ZeroCompile(KernelLibrary::Native),
+            "zero-compile" => ExecutionMode::ZeroCompile,
             _ => panic!("unknown mode {name}"),
         }
     }
-    /// Generates every kernel signature before measuring the generated library.
-    pub fn prewarm(name: &str) -> Option<f64> {
-        (name == "zero-generated").then(|| {
-            let start = Instant::now();
-            let kernels = prewarm_kernels().unwrap();
-            let ms = start.elapsed().as_secs_f64() * 1000.;
-            eprintln!("prewarmed {kernels} kernels in {ms:.3}ms");
-            ms
-        })
+    /// Zero-compile kernels are built into the binary: nothing to prewarm.
+    pub fn prewarm(_: &str) -> Option<f64> {
+        None
     }
     /// Root operator passing its child's output chunks to `Sink`.
     #[derive(Debug)]

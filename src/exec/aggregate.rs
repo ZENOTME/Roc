@@ -471,6 +471,54 @@ mod tests {
         plan.columns.schema(&columns).unwrap()
     }
 
+    /// `SELECT k, COUNT(*), SUM(x) WHERE x + 1 > 5 GROUP BY k`: group IDs only
+    /// exist on rows the filter keeps; the slots of rejected rows hold other
+    /// values, here huge negative ones.
+    #[test]
+    fn grouped_updates_under_a_filter_never_read_ids_of_rejected_rows() {
+        use crate::expr::agg::AggregateFunction::{Count, Sum};
+        use crate::operator::FilterOperator;
+        let mut plan = TestPlan::new(&[(DataType::Int64, false), (DataType::Int64, false)]);
+        let k = ReferenceExpression::new(plan.input(0)).into_ref();
+        let x = ReferenceExpression::new(plan.input(1)).into_ref();
+        let one = int(&mut plan, 1);
+        let five = int(&mut plan, 5);
+        let sum = plan.column(DataType::Int64, false);
+        let add = FunctionExpression::binary(FunctionKind::Add, x.clone(), one, sum).into_ref();
+        let above = plan.column(DataType::Boolean, false);
+        let predicate = FunctionExpression::binary(FunctionKind::GreaterThan, add, five, above).into_ref();
+        let filter = FilterOperator::new(predicate, plan.inputs.clone());
+        let count = aggregate(&mut plan, Count, vec![], DataType::Int64, false);
+        let total = aggregate(&mut plan, Sum, vec![x], DataType::Int64, true);
+        let operator = AggregateOperator::try_new(vec![k], vec![Arc::new(count), Arc::new(total)]).unwrap();
+        let n = 1024;
+        let keys = Int64Array::from_iter_values((0..n).map(|i| i % 3));
+        let xs = Int64Array::from_iter_values((0..n).map(|i| if i % 2 == 0 { 10 } else { -1_000_000_000_000 - i }));
+        let batch = input(&plan, vec![Arc::new(keys), Arc::new(xs)]);
+        let (_shutdown, guard) = asyncband::shutdown::new();
+        for mode in MODES {
+            let mut builder = KernelBuilder::new(&plan.columns);
+            builder.bind_inputs(&plan.inputs).unwrap();
+            filter.build_kernels(&mut builder).unwrap();
+            let states = operator.build_kernels(&mut builder).unwrap();
+            let program = Program::new(builder.finish(None).unwrap(), mode).unwrap();
+            let mut local = program.new_local().unwrap();
+            for _ in 0..3 {
+                program.run(&batch, &mut local, &guard).unwrap();
+            }
+            let (groups, values) = crate::kernel::aggregation::partial(&mut local, &states).unwrap();
+            let keys = groups.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+            let counts = values[0][0].as_any().downcast_ref::<Int64Array>().unwrap();
+            let sums = values[1][0].as_any().downcast_ref::<Int64Array>().unwrap();
+            let mut seen = (0..keys.len())
+                .map(|g| (keys.value(g), counts.value(g), sums.value(g)))
+                .collect::<Vec<_>>();
+            seen.sort();
+            // Even rows pass: per key 0 / 1 / 2, rows i = 6j / 6j + 4 / 6j + 2.
+            assert_eq!(seen, [(0, 513, 5130), (1, 510, 5100), (2, 513, 5130)], "{mode:?}");
+        }
+    }
+
     #[test]
     fn generated_global_reductions_handle_sliced_bitmaps_arbitrary_null_payloads_and_tails() {
         use crate::arrow::buffer::NullBuffer;

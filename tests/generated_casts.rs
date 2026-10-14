@@ -185,7 +185,7 @@ fn typed_float_branches_merge_and_generated_integer_cast_is_visible_in_ir() {
     .into_ref();
     let p = TestProgram::try_new(cast).unwrap();
     assert!(
-        p.program().generated_ir().contains("sextend.i64"),
+        p.program().generated_ir().contains("sext <"),
         "{}",
         p.program().generated_ir()
     );

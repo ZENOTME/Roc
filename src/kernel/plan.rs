@@ -26,19 +26,12 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Item {
-    Input(usize),
     Kernel(usize),
     Output,
 }
 
 pub(crate) struct Plan {
     pub items: Vec<(Item, DomainId)>,
-    /// Per input: the variables read by generated code.
-    pub input_vars: Vec<Vec<VariableId>>,
-    pub live: Vec<bool>,
-    /// Per domain: the Filter predicate that creates it.
-    pub predicates: Vec<Option<VariableId>>,
-    pub parents: Vec<Option<DomainId>>,
     /// Indexed by StateId; None for states of dead kernels.
     pub states: Vec<Option<StateKind>>,
     /// Per output column: the input whose array it reuses.
@@ -92,7 +85,6 @@ impl Plan {
         }
         let mut live = vec![false; graph.kernels.len()];
         let mut place = vec![DomainId::ROOT; graph.kernels.len()];
-        let mut predicates = vec![None; parents.len()];
         for (k, (domain, kernel)) in graph.kernels.iter().enumerate().rev() {
             match kernel {
                 Kernel::Scalar(s) => {
@@ -116,7 +108,6 @@ impl Plan {
                     }
                 }
                 Kernel::Domain(DomainKernel::Filter { predicate, output }) => {
-                    predicates[output.0] = Some(*predicate);
                     if domain_live[output.0] {
                         live[k] = true;
                         place[k] = *domain;
@@ -137,24 +128,6 @@ impl Plan {
             }
         }
         let mut items = vec![];
-        let mut input_vars = vec![];
-        for (i, input) in graph.inputs.iter().enumerate() {
-            let mut p = None;
-            let mut vars = vec![];
-            for v in input.binding.variables() {
-                if let Some(u) = uses[v.0]
-                    && graph.variables[v.0].domain == DomainId::ROOT
-                    && !is_constant(graph, v)
-                {
-                    p = Some(lca(p, u));
-                    vars.push(v);
-                }
-            }
-            if let Some(p) = p {
-                items.push(((created[p.0], 1, -1i64), Item::Input(i), p));
-            }
-            input_vars.push(vars);
-        }
         for k in 0..graph.kernels.len() {
             if live[k] {
                 let p = place[k];
@@ -199,41 +172,8 @@ impl Plan {
         });
         Self {
             items: items.into_iter().map(|(_, i, p)| (i, p)).collect(),
-            input_vars,
-            live,
-            predicates,
-            parents,
             states,
             aliases,
         }
     }
-
-    /// Whether no output needs computing and no kernel is live.
-    pub fn trivial(&self, graph: &KernelGraph) -> bool {
-        graph
-            .output
-            .as_ref()
-            .is_none_or(|o| o.domain == DomainId::ROOT)
-            && self.aliases.iter().all(Option::is_some)
-            && !self.live.contains(&true)
-    }
-
-    /// The chain from the root to `domain`, inclusive.
-    pub fn path(&self, mut domain: DomainId) -> Vec<DomainId> {
-        let mut path = vec![domain];
-        while let Some(p) = self.parents[domain.0] {
-            path.push(p);
-            domain = p;
-        }
-        path.reverse();
-        path
-    }
-}
-
-/// Input bindings of NULL columns use a Constant validity, not an input read.
-fn is_constant(graph: &KernelGraph, v: VariableId) -> bool {
-    graph.kernels.iter().any(|(_, k)| match k {
-        Kernel::Scalar(ScalarKernel::Constant { output, .. }) => *output == v,
-        _ => false,
-    })
 }

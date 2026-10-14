@@ -15,12 +15,15 @@
 //! The physical execution layer.
 //!
 //! Operators and expressions lower a pipeline into kernels over variables in
-//! row domains through a `KernelBuilder`. The resulting `KernelGraph` is
-//! compiled into one fused `Program` per pipeline.
+//! row domains through a `KernelBuilder`. The resulting `KernelGraph` becomes
+//! one `Program` per pipeline, executed over windows of rows by `steps` with
+//! kernels from `codegen`: precompiled into the binary, or fused at run time.
 pub(crate) mod aggregation;
 mod builder;
-pub(crate) mod io;
-mod jit;
+// The build script uses the whole module; the crate fuses with part of it.
+#[allow(dead_code)]
+pub(crate) mod codegen;
+mod library;
 mod lower;
 mod model;
 mod plan;
@@ -28,15 +31,14 @@ mod program;
 pub(crate) mod runtime;
 pub(crate) mod scalar;
 mod state;
-mod vector;
+mod steps;
 
 pub use builder::{
     GraphInput, GraphOutput, KernelBuilder, KernelGraph, PendingError, PendingErrors,
 };
-pub use jit::prewarm_kernels;
 pub(crate) use lower::cast_supported;
 pub use model::*;
-pub use program::{ExecutionMode, KernelLibrary, LocalState, Program};
+pub use program::{ExecutionMode, LocalState, Program};
 #[cfg(test)]
 pub(crate) use program::{MODES, agree};
 pub use state::{State, StateBuilder, StateId};

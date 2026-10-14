@@ -33,10 +33,10 @@ futures = "0.3"
 foldhash = "0.2"
 thiserror = "2"
 rayon = "1.11"
-cranelift-codegen = { version = "0.129.1" }
-cranelift-frontend = { version = "0.129.1" }
-cranelift-jit = { version = "0.129.1" }
-cranelift-module = { version = "0.129.1" }
+inkwell = { version = "=0.7.1", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86", "target-aarch64"] }
+
+[build-dependencies]
+inkwell = { version = "=0.7.1", default-features = false, features = ["llvm19-1-prefer-dynamic", "target-x86", "target-aarch64"] }
 
 [features]
 default = ["jit"]

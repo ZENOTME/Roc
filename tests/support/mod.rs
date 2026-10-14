@@ -25,7 +25,7 @@ use arrow::{
 use roc::column::{ColumnContext, ColumnId, ColumnType};
 use roc::error::{Error, Result};
 use roc::expr::scalar::{ConstantExpression, ScalarExprRef, ScalarExpression};
-use roc::kernel::{ExecutionMode, KernelBuilder, KernelLibrary, Program};
+use roc::kernel::{ExecutionMode, KernelBuilder, Program};
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock, Mutex},
@@ -94,11 +94,7 @@ impl TestInput {
 }
 
 /// Every execution mode; each expression runs in all of them.
-pub const MODES: [ExecutionMode; 3] = [
-    ExecutionMode::Compile,
-    ExecutionMode::ZeroCompile(KernelLibrary::Generated),
-    ExecutionMode::ZeroCompile(KernelLibrary::Native),
-];
+pub const MODES: [ExecutionMode; 2] = [ExecutionMode::Compile, ExecutionMode::ZeroCompile];
 
 /// A program per execution mode computing expressions over the input columns
 /// they reference. Evaluation requires every mode to return equal arrays or

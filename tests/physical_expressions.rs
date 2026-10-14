@@ -32,7 +32,7 @@ use roc::{
             ScalarExprRef,
         },
     },
-    kernel::{ExecutionMode, KernelBuilder, KernelLibrary, LocalState, Program},
+    kernel::{ExecutionMode, KernelBuilder, LocalState, Program},
     operator::{
         AggregateOperator, FilterOperator, Operator, OperatorTree, OperatorTreeNode,
         ProjectOperator, ScanConsumer, ScanHandle, ScanOperator, ScanRequest, ScanStorage,
@@ -220,11 +220,7 @@ impl Executor for TestExecutor {
 
 #[tokio::test]
 async fn executes_a_fully_bound_tree_with_reordered_scan_and_physical_expressions() {
-    for mode in [
-        ExecutionMode::Compile,
-        ExecutionMode::ZeroCompile(KernelLibrary::Generated),
-        ExecutionMode::ZeroCompile(KernelLibrary::Native),
-    ] {
+    for mode in [ExecutionMode::Compile, ExecutionMode::ZeroCompile] {
         execute_fully_bound_tree(mode).await;
     }
 }

@@ -53,38 +53,38 @@ domain holding the rows whose predicate is TRUE. Ancestor variables stay visible
 in descendant domains.
 
 Each pipeline becomes one `Program`, in one of two execution modes chosen when
-the pipeline graph is built:
+the pipeline graph is built. Both run the plan over windows of 1024 rows: values
+keep their Arrow width (inputs are read in place, root outputs written in place),
+Booleans — values, validity and error flags — are bitmaps, constants are
+broadcast, and a Filter domain is a row mask of the window.
 
-- `ExecutionMode::Compile` (the default) fuses the whole graph into one generated
-  Cranelift row loop: Filter opens a nested `if`, CASE/COALESCE emit balanced
-  branches, Count/Sum updates are inlined and global integer reductions lower to
-  SIMD. Compilation happens during graph construction.
-- `ExecutionMode::ZeroCompile(library)` generates no code for the pipeline. Each
-  kernel binds a precompiled function and runs over windows of 1024 rows in plan
-  order; a Filter domain is a selection vector of root rows. With
-  `KernelLibrary::Generated`, a Call runs Cranelift code generated once per
-  signature with the instruction selection of fused programs and cached for the
-  life of the process; `prewarm_kernels()` generates every signature up front, and
-  a miss generates its signature when the program is prepared. With
-  `KernelLibrary::Native`, Calls run Rust implementations with the same results.
+- `ExecutionMode::ZeroCompile` generates no code. Every kernel calls a function
+  of the kernel library that the build script compiles into the binary, in
+  explicit SIMD for each CPU class (AVX2 or SSE2 on x86_64, NEON on aarch64)
+  and selected at run time.
+- `ExecutionMode::Compile` (the default) additionally fuses each run of
+  consecutive kernels into one vectorized function compiled with LLVM when the
+  program is prepared; the values between them stay in registers. A window
+  where a fused function may raise reruns the kernels it replaced, which find
+  the failing row.
 
-Both modes execute the same plan and return equal results and equal errors: when
-several rows fail, the lowest failing row wins, as in the fused row loop. The
-test suite runs every expression, aggregate and pipeline test in all modes and
-compares them.
+Both modes generate code with one emitter (`src/kernel/codegen`), which defines
+every kernel's semantics once. They execute the same plan and return equal
+results and equal errors: when several rows fail, the lowest failing row wins.
+The test suite runs every expression, aggregate and pipeline test in both modes
+and compares them.
 
 ```rust,ignore
-use roc::{kernel::{ExecutionMode, KernelLibrary, prewarm_kernels},
+use roc::{kernel::ExecutionMode,
           pipeline::{build_pipeline_graph, build_pipeline_graph_with_mode}};
 // tree is the fully typed physical operator tree supplied by the caller.
 let graph = build_pipeline_graph(&tree)?; // ExecutionMode::Compile
-prewarm_kernels()?;
-let graph = build_pipeline_graph_with_mode(
-    &tree,
-    ExecutionMode::ZeroCompile(KernelLibrary::Generated),
-)?;
+let graph = build_pipeline_graph_with_mode(&tree, ExecutionMode::ZeroCompile)?;
 // PipelineGraphExecutor::new(graph) ...
 ```
+
+Building requires LLVM 19 (`LLVM_SYS_191_PREFIX`, for example
+`$(brew --prefix llvm@19)`).
 
 The [annotated Rust walkthrough](design/execution_architecture.rs) is executable:
 
@@ -94,11 +94,11 @@ cargo test --all-targets
 ```
 
 `PipelineGraph::explain()` prints each pipeline's kernel graph and
-`Program::generated_ir()` the Cranelift IR of a compiled program. String parsing
-and formatting and hash-table or aggregate state operations use scalar runtime
-functions with bound signatures. Unsupported signatures fail when the program
-is built; there is no interpreter fallback. Execution polls cancellation and
-never publishes the output of a chunk that failed.
+`Program::generated_ir()` the LLVM IR of a compiled program's fused functions.
+String parsing and formatting and hash-table or aggregate state operations are
+runtime functions with bound signatures. Unsupported signatures fail when the
+program is built; there is no interpreter fallback. Execution polls cancellation
+and never publishes the output of a chunk that failed.
 
 Roc depends on `arrow-array`, `arrow-buffer`, and `arrow-schema` for interchange;
 the umbrella `arrow` crate is only a test oracle. Output columns that pass an

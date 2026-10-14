@@ -13,52 +13,31 @@
 // limitations under the License.
 
 //! A pipeline program and its per-thread state.
-use super::aggregation::{AccumulatorState, GroupState};
-use super::io::{self, OutputColumn};
-use super::jit::Compiled;
 use super::plan::{Plan, StateKind};
-use super::runtime::Runtime;
-use super::vector::Steps;
+use super::steps::Steps;
 use super::*;
-use crate::arrow::{
-    datatypes::SchemaRef,
-    record_batch::{RecordBatch, RecordBatchOptions},
-};
+use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::error::{Error, Result};
 use asyncband::shutdown::ShutdownGuard;
 use std::fmt::Write;
+use std::sync::Arc;
 
 /// How a program executes its kernel graph. Both modes run the same plan with
-/// identical results.
+/// identical results and errors.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ExecutionMode {
-    /// Generates one fused row loop per pipeline.
+    /// Generates code when the program is prepared: each run of consecutive
+    /// kernels becomes one fused, vectorized function.
     #[default]
     Compile,
-    /// Runs the kernels one after another over whole chunks; preparing a
-    /// program generates no code for it.
-    ZeroCompile(KernelLibrary),
-}
-
-/// Where zero-compile execution takes each kernel's implementation from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum KernelLibrary {
-    /// Code generated once per kernel signature by the same emitter as fused
-    /// programs, kept in a process-wide cache. `prewarm_kernels` fills the
-    /// cache; a signature missing from it is generated on first use.
-    #[default]
-    Generated,
-    /// Rust implementations built into the binary.
-    Native,
+    /// Runs every kernel from the library precompiled into the binary;
+    /// preparing a program generates no code.
+    ZeroCompile,
 }
 
 /// Every execution mode; tests compare their results.
 #[cfg(test)]
-pub(crate) const MODES: [ExecutionMode; 3] = [
-    ExecutionMode::Compile,
-    ExecutionMode::ZeroCompile(KernelLibrary::Generated),
-    ExecutionMode::ZeroCompile(KernelLibrary::Native),
-];
+pub(crate) const MODES: [ExecutionMode; 2] = [ExecutionMode::Compile, ExecutionMode::ZeroCompile];
 
 /// The common result of every mode: results equal, or errors with equal text.
 #[cfg(test)]
@@ -79,22 +58,19 @@ pub(crate) fn agree<T>(
     first
 }
 
-#[derive(Debug)]
-enum Code {
-    Compiled(Box<Compiled>),
-    Steps(Steps),
-}
-
 /// The code of one pipeline: reads source chunks, updates states and produces
 /// at most one output chunk per input chunk.
 #[derive(Debug)]
 pub struct Program {
     mode: ExecutionMode,
-    code: Code,
+    steps: Steps,
     /// Indexed by StateId; None for states of dead kernels.
     kinds: Vec<Option<StateKind>>,
     /// Per output column: the input whose array it reuses.
     aliases: Vec<Option<usize>>,
+    /// The chunk position of every output column when the program only
+    /// passes input arrays through.
+    passthrough: Option<Vec<usize>>,
     inputs: Vec<GraphInput>,
     output: Option<GraphOutput>,
     states: Vec<StateBuilder>,
@@ -105,8 +81,11 @@ pub struct Program {
 #[derive(Debug, Default)]
 pub struct LocalState {
     states: Vec<Option<State>>,
-    /// Columns reused by zero-compile execution across chunks.
-    pub(crate) scratch: Vec<Vec<u64>>,
+    /// Window slots, reused across chunks.
+    pub(crate) scratch: Vec<u64>,
+    /// A chunk schema whose fields satisfy every input column type.
+    checked: Option<SchemaRef>,
+    pub(crate) buffers: Box<super::steps::Buffers>,
 }
 
 impl LocalState {
@@ -125,15 +104,19 @@ impl LocalState {
 impl Program {
     pub fn new(graph: KernelGraph, mode: ExecutionMode) -> Result<Self> {
         let plan = Plan::new(&graph);
-        let code = match mode {
-            ExecutionMode::Compile => Code::Compiled(Box::new(Compiled::compile(&graph, &plan)?)),
-            ExecutionMode::ZeroCompile(library) => {
-                Code::Steps(Steps::prepare(&graph, &plan, library)?)
-            }
-        };
+        let steps = Steps::prepare(&graph, &plan, mode == ExecutionMode::Compile)?;
+        let passthrough = (steps.is_output_only() && graph.output.is_some())
+            .then(|| {
+                plan.aliases
+                    .iter()
+                    .map(|a| a.map(|i| graph.inputs[i].position))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
         Ok(Self {
             mode,
-            code,
+            steps,
+            passthrough,
             kinds: plan.states,
             aliases: plan.aliases,
             explain: explain(&graph),
@@ -169,12 +152,9 @@ impl Program {
         &self.explain
     }
 
-    /// Cranelift IR of the generated functions; empty when nothing is generated.
+    /// LLVM IR of the generated functions; empty when nothing is generated.
     pub fn generated_ir(&self) -> &str {
-        match &self.code {
-            Code::Compiled(code) => &code.ir,
-            Code::Steps(_) => "",
-        }
+        self.steps.ir()
     }
 
     pub fn new_local(&self) -> Result<LocalState> {
@@ -186,21 +166,14 @@ impl Program {
             .collect::<Result<_>>()?;
         Ok(LocalState {
             states,
-            scratch: vec![],
+            ..LocalState::default()
         })
     }
 
     /// Runs the program over one chunk. Returns the output chunk when the
     /// program has an output, even if it is empty.
-    pub fn run(
-        &self,
-        batch: &RecordBatch,
-        local: &mut LocalState,
-        guard: &ShutdownGuard,
-    ) -> Result<Option<RecordBatch>> {
-        if guard.is_shutdown_requested() {
-            return Err(Error::Cancelled);
-        }
+    /// Checks the input columns of a chunk against their column types.
+    fn check(&self, batch: &RecordBatch) -> Result<()> {
         for input in &self.inputs {
             let array = batch.columns().get(input.position).ok_or_else(|| {
                 Error::Execution(format!("column index {} out of bounds", input.position))
@@ -218,127 +191,50 @@ impl Program {
                 ));
             }
         }
-        let code = match &self.code {
-            Code::Compiled(code) => code,
-            Code::Steps(steps) => {
-                return steps.run(
-                    batch,
-                    &self.inputs,
-                    self.output.as_ref(),
-                    &self.aliases,
-                    local,
-                    guard,
-                );
-            }
-        };
-        let rows = batch.num_rows();
-        let inputs = self
-            .inputs
-            .iter()
-            .map(|i| io::input(batch.column(i.position)))
-            .collect::<Result<Vec<_>>>()?;
-        let mut states = vec![std::ptr::null_mut::<()>(); self.kinds.len()];
-        for (i, kind) in self.kinds.iter().enumerate() {
-            let Some(kind) = kind else { continue };
-            let state = local.state_mut(StateId(i))?;
-            states[i] = match kind {
-                StateKind::Group => (state.get_mut::<GroupState>()? as *mut GroupState).cast(),
-                StateKind::Accumulator => {
-                    (state.get_mut::<AccumulatorState>()? as *mut AccumulatorState).cast()
-                }
-            };
-        }
-        let mut runtime = Runtime {
-            guard,
-            ..Runtime::default()
-        };
-        if let Some(reduction) = code.reduction {
-            // SAFETY: as for the entry below; a reduction writes no output.
-            let status = unsafe {
-                reduction(
-                    &mut runtime,
-                    inputs.as_ptr(),
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    states.as_ptr(),
-                    rows,
-                )
-            };
-            Self::check(code, status, &mut runtime)?;
-            return Ok(None);
-        }
-        let mut columns = vec![];
-        let mut count = rows;
-        if let Some(entry) = code.entry {
-            if let Some(output) = &self.output {
-                for (j, binding) in output.bindings.iter().enumerate() {
-                    let nullable = binding.validity().is_some() && !binding.is_null_type();
-                    columns.push(self.aliases[j].is_none().then(|| {
-                        OutputColumn::new(output.schema.field(j).data_type(), nullable, rows)
-                    }));
-                }
-            }
-            let descriptors = columns
-                .iter_mut()
-                .map(|c| {
-                    c.as_mut()
-                        .map_or([std::ptr::null_mut(); io::OUTPUT_WORDS], |c| c.descriptor())
-                })
-                .collect::<Vec<_>>();
-            count = 0;
-            // SAFETY: the signature and buffer layouts are private to this
-            // module. Inputs, states and output capacity stay live and
-            // exclusive for the call; each input row writes at most one row.
-            let status = unsafe {
-                entry(
-                    &mut runtime,
-                    inputs.as_ptr(),
-                    descriptors.as_ptr(),
-                    &mut count,
-                    states.as_ptr(),
-                    rows,
-                )
-            };
-            Self::check(code, status, &mut runtime)?;
-        }
-        let Some(output) = &self.output else {
-            return Ok(None);
-        };
-        let mut arrays = Vec::with_capacity(output.bindings.len());
-        for (j, field) in output.schema.fields().iter().enumerate() {
-            let array = match self.aliases[j] {
-                Some(i) => batch.column(self.inputs[i].position).clone(),
-                None => columns[j]
-                    .take()
-                    .unwrap()
-                    .finish(field.data_type(), count)?,
-            };
-            arrays.push(array);
-        }
-        // Strings formatted by generated code are copied by `finish` above.
-        drop(runtime);
-        Ok(Some(RecordBatch::try_new_with_options(
-            output.schema.clone(),
-            arrays,
-            &RecordBatchOptions::new().with_row_count(Some(count)),
-        )?))
+        Ok(())
     }
 
-    fn check(code: &Compiled, status: i32, runtime: &mut Runtime) -> Result<()> {
-        match status {
-            0 => Ok(()),
-            1 => Err(runtime
-                .error
-                .take()
-                .unwrap_or_else(|| Error::Execution("generated runtime call failed".into()))),
-            s => {
-                let site = code
-                    .sites
-                    .get((s - 2) as usize)
-                    .ok_or_else(|| Error::Execution(format!("unknown generated status {s}")))?;
-                Err(site.to_error(&runtime.raise_args))
-            }
+    pub fn run(
+        &self,
+        batch: &RecordBatch,
+        local: &mut LocalState,
+        guard: &ShutdownGuard,
+    ) -> Result<Option<RecordBatch>> {
+        if guard.is_shutdown_requested() {
+            return Err(Error::Cancelled);
         }
+        // A chunk's columns have the types of its schema's fields and no
+        // NULLs in non-nullable ones, so a schema that satisfies the input
+        // columns once does for every chunk.
+        if !local
+            .checked
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, batch.schema_ref()))
+        {
+            self.check(batch)?;
+            let schema = batch.schema_ref();
+            let satisfied = self.inputs.iter().all(|i| {
+                let field = schema.field(i.position);
+                i.ty.nullable || i.binding.is_null_type() || !field.is_nullable()
+            });
+            local.checked = satisfied.then(|| schema.clone());
+        }
+        if let (Some(positions), Some(output)) = (&self.passthrough, &self.output) {
+            let arrays = positions.iter().map(|&p| batch.column(p).clone()).collect();
+            // SAFETY: the checks above match each array to the column type
+            // its output field is made of.
+            return Ok(Some(unsafe {
+                RecordBatch::new_unchecked(output.schema.clone(), arrays, batch.num_rows())
+            }));
+        }
+        self.steps.run(
+            batch,
+            &self.inputs,
+            self.output.as_ref(),
+            &self.aliases,
+            local,
+            guard,
+        )
     }
 }
 
