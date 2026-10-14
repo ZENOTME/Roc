@@ -164,7 +164,7 @@ pub fn function<'c>(
                 let v = t!(e.b.build_load(e.elem(ty), p, ""));
                 v.as_instruction_value()
                     .unwrap()
-                    .set_alignment(ty.bytes() as u32)
+                    .set_alignment(ty.align())
                     .map_err(err)?;
                 Some(v)
             }
@@ -730,6 +730,14 @@ impl<'c> Emit<'_, 'c> {
         VectorType::const_vector(&vec![c; lanes as usize])
     }
 
+    /// A signed constant of any lane width, truncated to `bits`.
+    fn splat_signed(&self, bits: u32, lanes: u32, value: i128) -> VectorValue<'c> {
+        let i = self.cx.custom_width_int_type(bits);
+        let words = [value as u64, (value >> 64) as u64];
+        let c = i.const_int_arbitrary_precision(&words[..(bits as usize).div_ceil(64)]);
+        VectorType::const_vector(&vec![c; lanes as usize])
+    }
+
     fn splat(&self, v: BasicValueEnum<'c>, lanes: u32) -> R<VectorValue<'c>> {
         let ty = match v.get_type() {
             BasicTypeEnum::FloatType(f) => f.vec_type(lanes),
@@ -785,7 +793,7 @@ impl<'c> Emit<'_, 'c> {
         };
         let at = self.column_ptr(out, t, rows.row)?;
         let store = t!(self.b.build_store(at, v));
-        store.set_alignment(t.bytes() as u32).map_err(err)?;
+        store.set_alignment(t.align()).map_err(err)?;
         Ok(())
     }
 
@@ -815,7 +823,7 @@ impl<'c> Emit<'_, 'c> {
                     let v = t!(self.b.build_load(self.vec(t, lanes), at, ""));
                     v.as_instruction_value()
                         .unwrap()
-                        .set_alignment(t.bytes() as u32)
+                        .set_alignment(t.align())
                         .map_err(err)?;
                     Ok(v.into_vector_value())
                 }
@@ -902,12 +910,13 @@ impl<'c> Emit<'_, 'c> {
         let bits = t.bits();
         let zeros = |bits: u32| self.splat_int(bits, lanes, 0);
         let all = |bits: u32, v: u64| self.splat_int(bits, lanes, v);
-        let min = 1u64 << (bits.max(1) - 1);
+        let min = || self.splat_signed(bits, lanes, i128::MIN >> (128 - bits.max(1)));
         let icmp = |p, x: VectorValue<'c>, y: VectorValue<'c>| -> R<VectorValue<'c>> {
             Ok(t!(b.build_int_compare(p, x, y, "")))
         };
         let imm_sign = |i: usize| match node.args[i] {
-            Src::Imm(_, v) => Some(((v << (64 - bits)) as i64) >= 0),
+            Src::Imm(_, v) if bits <= 64 => Some(((v << (64 - bits)) as i64) >= 0),
+            Src::Imm(..) => None,
             Src::Arg(a) => self.known.filter(|(k, _)| *k == a).map(|(_, s)| s),
             _ => None,
         };
@@ -986,7 +995,7 @@ impl<'c> Emit<'_, 'c> {
             }
             Op::Neg if t.is_float() => t!(b.build_float_neg(a[0], "")),
             Op::Neg => t!(b.build_int_sub(zeros(bits), a[0], "")),
-            Op::NegOverflow => icmp(IntPredicate::EQ, a[0], all(bits, min))?,
+            Op::NegOverflow => icmp(IntPredicate::EQ, a[0], min())?,
             Op::Div | Op::Rem if t.is_float() => {
                 if node.op == Op::Div {
                     t!(b.build_float_div(a[0], a[1], ""))
@@ -1051,6 +1060,24 @@ impl<'c> Emit<'_, 'c> {
             Op::Or => t!(b.build_or(a[0], a[1], "")),
             Op::Not => t!(b.build_not(a[0], "")),
             Op::Select => t!(b.build_select(a[0], a[1], a[2], "")).into_vector_value(),
+            Op::Shr => {
+                let n = t!(b.build_and(a[1], all(bits, bits as u64 - 1), ""));
+                t!(b.build_right_shift(a[0], n, t.is_signed(), ""))
+            }
+            Op::Abs if t.is_float() => {
+                let f = self.intrinsic("llvm.fabs", &[a[0].get_type().into()])?;
+                self.call(f, &[a[0].into()])?.into_vector_value()
+            }
+            Op::Abs if t.is_signed() => {
+                let negative = icmp(IntPredicate::SLT, a[0], zeros(bits))?;
+                let negated = t!(b.build_int_sub(zeros(bits), a[0], ""));
+                t!(b.build_select(negative, negated, a[0], "")).into_vector_value()
+            }
+            Op::Abs => a[0],
+            Op::Round => {
+                let f = self.intrinsic("llvm.round", &[a[0].get_type().into()])?;
+                self.call(f, &[a[0].into()])?.into_vector_value()
+            }
             Op::Cast(to) => self.cast(a[0], t, to, lanes)?.0,
             Op::CastInvalid(to) => self.cast(a[0], t, to, lanes)?.1,
         })
@@ -1061,13 +1088,13 @@ impl<'c> Emit<'_, 'c> {
         let min = t!(b.build_int_compare(
             IntPredicate::EQ,
             a[0],
-            self.splat_int(bits, lanes, 1 << (bits - 1)),
+            self.splat_signed(bits, lanes, i128::MIN >> (128 - bits)),
             ""
         ));
         let neg = t!(b.build_int_compare(
             IntPredicate::EQ,
             a[1],
-            self.splat_int(bits, lanes, u64::MAX),
+            self.splat_signed(bits, lanes, -1),
             ""
         ));
         Ok(t!(b.build_and(min, neg, "")))
@@ -1084,9 +1111,10 @@ impl<'c> Emit<'_, 'c> {
     }
 
     /// The 64-bit form of an integer or Boolean lane.
-    fn widen(&self, v: VectorValue<'c>, t: Ty, lanes: u32) -> R<VectorValue<'c>> {
-        let w = self.ints(64, lanes);
-        Ok(if t.bits() == 64 {
+    /// Extends an integer or Boolean lane to `bits`, at least its own width.
+    fn widen(&self, v: VectorValue<'c>, t: Ty, bits: u32, lanes: u32) -> R<VectorValue<'c>> {
+        let w = self.ints(bits, lanes);
+        Ok(if t.bits() == bits {
             v
         } else if t.is_signed() {
             t!(self.b.build_int_s_extend(v, w, ""))
@@ -1096,11 +1124,18 @@ impl<'c> Emit<'_, 'c> {
     }
 
     fn narrow(&self, v: VectorValue<'c>, t: Ty, lanes: u32) -> R<VectorValue<'c>> {
-        Ok(if t.bits() == 64 {
-            v
-        } else {
-            t!(self.b.build_int_truncate(v, self.ints(t.bits(), lanes), ""))
-        })
+        Ok(
+            if v.get_type()
+                .get_element_type()
+                .into_int_type()
+                .get_bit_width()
+                == t.bits()
+            {
+                v
+            } else {
+                t!(self.b.build_int_truncate(v, self.ints(t.bits(), lanes), ""))
+            },
+        )
     }
 
     /// The high 64 bits of a 64 x 64 bit product.
@@ -1131,7 +1166,7 @@ impl<'c> Emit<'_, 'c> {
 
     fn magic(&self, op: Op, t: Ty, a: &[VectorValue<'c>], lanes: u32) -> R<VectorValue<'c>> {
         let b = &self.b;
-        let n = self.widen(a[0], t, lanes)?;
+        let n = self.widen(a[0], t, 64, lanes)?;
         let (m, s, more) = (a[2], a[3], a[4]);
         let q = if t.is_signed() {
             let q = self.mulh(m, n, true, lanes)?;
@@ -1156,7 +1191,7 @@ impl<'c> Emit<'_, 'c> {
         let v = if op == Op::DivMagic {
             q
         } else {
-            let d = self.widen(a[1], t, lanes)?;
+            let d = self.widen(a[1], t, 64, lanes)?;
             t!(b.build_int_sub(n, t!(b.build_int_mul(q, d, "")), ""))
         };
         self.narrow(v, t, lanes)
@@ -1195,6 +1230,8 @@ impl<'c> Emit<'_, 'c> {
             return Ok((bit, ok));
         }
         let f64v = self.vec(Ty::F64, lanes);
+        // Integer conversions run at the wider of 64 bits and both types.
+        let wide = 64.max(from.bits()).max(to.bits());
         if to.is_float() {
             let target = self.vec(to, lanes);
             let value = if from.is_float() {
@@ -1204,7 +1241,7 @@ impl<'c> Emit<'_, 'c> {
                     t!(b.build_float_trunc(v, target, ""))
                 }
             } else {
-                let raw = self.widen(v, from, lanes)?;
+                let raw = self.widen(v, from, 64.max(from.bits()), lanes)?;
                 if from.is_signed() {
                     t!(b.build_signed_int_to_float(raw, target, ""))
                 } else {
@@ -1215,9 +1252,9 @@ impl<'c> Emit<'_, 'c> {
         }
         let bits = to.bits();
         let signed = to.is_signed();
-        let i64v = self.ints(64, lanes);
         if from.is_float() {
-            let wide = if from == Ty::F32 {
+            let iv = self.ints(wide, lanes);
+            let float_value = if from == Ty::F32 {
                 t!(b.build_float_ext(v, f64v, ""))
             } else {
                 v
@@ -1227,10 +1264,12 @@ impl<'c> Emit<'_, 'c> {
             } else {
                 "llvm.fptoui.sat"
             };
-            let convert = self.intrinsic(name, &[i64v.into(), f64v.into()])?;
-            let raw = self.call(convert, &[wide.into()])?.into_vector_value();
+            let convert = self.intrinsic(name, &[iv.into(), f64v.into()])?;
+            let raw = self
+                .call(convert, &[float_value.into()])?
+                .into_vector_value();
             let trunc = self.intrinsic("llvm.trunc", &[f64v.into()])?;
-            let whole = self.call(trunc, &[wide.into()])?.into_vector_value();
+            let whole = self.call(trunc, &[float_value.into()])?.into_vector_value();
             let float = |x: f64| -> R<VectorValue<'c>> {
                 Ok(
                     t!(b.build_bit_cast(self.splat_int(64, lanes, x.to_bits()), f64v, ""))
@@ -1245,22 +1284,23 @@ impl<'c> Emit<'_, 'c> {
             let hi = (2f64).powi(bits as i32 - i32::from(signed));
             let low = t!(b.build_float_compare(FloatPredicate::OLT, whole, float(lo)?, ""));
             let high = t!(b.build_float_compare(FloatPredicate::OGE, whole, float(hi)?, ""));
-            let nan = t!(b.build_float_compare(FloatPredicate::UNO, wide, wide, ""));
+            let nan = t!(b.build_float_compare(FloatPredicate::UNO, float_value, float_value, ""));
             let bad = t!(b.build_or(t!(b.build_or(low, high, "")), nan, ""));
             return Ok((self.narrow(raw, to, lanes)?, bad));
         }
-        let raw = self.widen(v, from, lanes)?;
+        let raw = self.widen(v, from, wide, lanes)?;
         let value = self.narrow(raw, to, lanes)?;
         if from == Ty::Bool {
             return Ok((value, ok));
         }
-        let c = |x: u64| self.splat_int(64, lanes, x);
+        let c = |x: i128| self.splat_signed(wide, lanes, x);
         let icmp = |p, x: VectorValue<'c>, y: VectorValue<'c>| -> R<VectorValue<'c>> {
             Ok(t!(b.build_int_compare(p, x, y, "")))
         };
+        // The range of the target, as values of the wide type.
         let (high, low) = if signed {
-            let max = (i64::MAX >> (64 - bits)) as u64;
-            let min = (i64::MIN >> (64 - bits)) as u64;
+            let max = i128::MAX >> (128 - bits);
+            let min = i128::MIN >> (128 - bits);
             let p = if from.is_signed() {
                 IntPredicate::SGT
             } else {
@@ -1273,11 +1313,7 @@ impl<'c> Emit<'_, 'c> {
                     .transpose()?,
             )
         } else {
-            let max = if bits == 64 {
-                u64::MAX
-            } else {
-                (1u64 << bits) - 1
-            };
+            let max = (u128::MAX >> (128 - bits)) as i128;
             (
                 icmp(IntPredicate::UGT, raw, c(max))?,
                 from.is_signed()

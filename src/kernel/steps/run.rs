@@ -91,6 +91,7 @@ impl Input {
             DataType::UInt64 => UInt64Type,
             DataType::Float32 => Float32Type,
             DataType::Float64 => Float64Type,
+            DataType::Decimal128(..) => Decimal128Type,
             DataType::Date32 => Date32Type,
             DataType::Date64 => Date64Type,
             DataType::Timestamp(TimeUnit::Second, _) => TimestampSecondType,
@@ -178,7 +179,18 @@ pub(super) unsafe fn load(ptr: *const u8, ty: Ty, row: usize) -> u64 {
             Ty::U16 => *(ptr as *const u16).add(row) as u64,
             Ty::U32 | Ty::F32 => *(ptr as *const u32).add(row) as u64,
             Ty::I64 | Ty::U64 | Ty::F64 => *(ptr as *const u64).add(row),
+            // The low word; see `load_wide`.
+            Ty::I128 => *(ptr as *const u64).add(2 * row),
         }
+    }
+}
+
+/// Both words of a 128-bit lane.
+#[inline(always)]
+pub(super) unsafe fn load_wide(ptr: *const u8, row: usize) -> [u64; 2] {
+    unsafe {
+        let p = (ptr as *const u64).add(2 * row);
+        [*p, *p.add(1)]
     }
 }
 
@@ -189,6 +201,9 @@ pub(super) unsafe fn store(ptr: *mut u8, ty: Ty, row: usize, bits: u64) {
             1 => *ptr.add(row) = bits as u8,
             2 => *(ptr as *mut u16).add(row) = bits as u16,
             4 => *(ptr as *mut u32).add(row) = bits as u32,
+            16 => (ptr as *mut i128)
+                .add(row)
+                .write_unaligned(bits as i64 as i128),
             _ => *(ptr as *mut u64).add(row) = bits,
         }
     }
@@ -454,10 +469,25 @@ impl Frame<'_> {
         unsafe { load(self.ptrs[v.0], var.ty, row) }
     }
 
+    /// Both words of an Int128 variable at a window row.
+    pub fn get_wide(&self, v: VariableId, row: usize) -> [u64; 2] {
+        let row = if self.steps.vars[v.0].scalar() {
+            0
+        } else {
+            row
+        };
+        // SAFETY: rows are below the window size.
+        unsafe { load_wide(self.ptrs[v.0], row) }
+    }
+
     pub fn cell(&self, binding: &ColumnVariableBinding, row: usize) -> Cell {
         let valid = binding.validity().map_or(1, |v| self.get(v, row));
         match *binding {
             ColumnVariableBinding::Null { .. } => Cell::default(),
+            ColumnVariableBinding::Int128 { value, .. } => {
+                let [bits, len] = self.get_wide(value, row);
+                Cell { bits, len, valid }
+            }
             ColumnVariableBinding::Bytes { ptr, len, .. } => Cell {
                 bits: self.get(ptr, row),
                 len: self.get(len, row),

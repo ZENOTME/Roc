@@ -129,7 +129,9 @@ fn group(steps: &Steps, run: &[Step], later: &[bool]) -> Run {
         // known operands in ways that change NaN bits, which the precompiled
         // kernels must match.
         let s = match var.place {
-            Place::Constant(i) if !var.ty.is_float() => Src::Imm(var.ty, steps.pool[i]),
+            Place::Constant(i) if !var.ty.is_float() && var.ty != Ty::I128 => {
+                Src::Imm(var.ty, steps.pool[i])
+            }
             Place::Constant(_) => {
                 args.push(Operand::Var(v));
                 g.arg(Arg::Scalar(var.ty))

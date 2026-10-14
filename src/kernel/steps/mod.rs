@@ -56,6 +56,7 @@ pub(crate) fn lane(t: VariableType) -> Ty {
         VariableType::Int16 => Ty::I16,
         VariableType::Int32 => Ty::I32,
         VariableType::Int64 => Ty::I64,
+        VariableType::Int128 => Ty::I128,
         VariableType::UInt8 => Ty::U8,
         VariableType::UInt16 => Ty::U16,
         VariableType::UInt32 => Ty::U32,
@@ -310,6 +311,12 @@ fn lowered(f: ScalarFunction) -> Option<Func> {
         S::GreaterThan => Func::Compare(Pred::Gt),
         S::GreaterThanOrEqual => Func::Compare(Pred::Ge),
         S::Cast { to } => Func::Cast(lane(to)),
+        S::DivideRound => Func::DivRound,
+        S::Abs => Func::Abs,
+        S::Round => Func::Round,
+        S::BitAnd => Func::BitAnd,
+        S::BitOr => Func::BitOr,
+        S::ShiftRight => Func::ShiftRight,
         _ => return None,
     })
 }
@@ -323,9 +330,25 @@ struct Builder {
 }
 
 impl Builder {
+    /// A constant of `v` given its low word; a 128-bit value sign-extends it.
     fn constant(&mut self, v: VariableId, bits: u64) {
-        self.pool.push(bits);
-        self.vars[v.0].place = Place::Constant(self.pool.len() - 1);
+        let high = if (bits as i64) < 0 { u64::MAX } else { 0 };
+        self.constant_words(v, [bits, high]);
+    }
+    /// Pool entries hold one word, or two for a 128-bit lane.
+    fn constant_words(&mut self, v: VariableId, words: [u64; 2]) {
+        self.pool.push(words[0]);
+        if self.vars[v.0].ty == Ty::I128 {
+            self.pool.push(words[1]);
+        }
+        self.vars[v.0].place =
+            Place::Constant(self.pool.len() - 1 - (self.vars[v.0].ty == Ty::I128) as usize);
+    }
+    fn words(&self, v: VariableId) -> Option<[u64; 2]> {
+        match self.vars[v.0].place {
+            Place::Constant(i) => Some([self.pool[i], *self.pool.get(i + 1).unwrap_or(&0)]),
+            _ => None,
+        }
     }
     fn pool(&mut self, bits: u64) -> Operand {
         self.pool.push(bits);
@@ -343,29 +366,29 @@ impl Builder {
         let f = library::kernel(&Key { scalars: 0, ..key })?;
         let mut values = inputs
             .iter()
-            .map(|v| self.value(*v).unwrap())
+            .map(|v| self.words(*v).unwrap())
             .collect::<Vec<_>>();
-        let mut results = vec![0u64; outputs.len()];
+        let mut results = vec![[0u64; 2]; outputs.len()];
         let mut args: Vec<*mut u8> = vec![];
         for (v, value) in inputs.iter().zip(values.iter_mut()) {
             args.push(if self.vars[v.0].ty == Ty::Bool {
-                bits::BitState::constant(*value != 0).bitmap().unwrap()
+                bits::BitState::constant(value[0] != 0).bitmap().unwrap()
             } else {
-                (value as *mut u64).cast()
+                value.as_mut_ptr().cast()
             });
         }
         for r in results.iter_mut() {
-            args.push((r as *mut u64).cast());
+            args.push(r.as_mut_ptr().cast());
         }
-        // SAFETY: every argument is one row: a value or a bitmap word.
+        // SAFETY: every argument is one row: a value of up to two words or a
+        // bitmap word.
         unsafe { f(args.as_ptr(), 1) };
-        for (v, bits) in outputs.iter().zip(results) {
-            let bits = if self.vars[v.0].ty == Ty::Bool {
-                bits & 1
-            } else {
-                bits
-            };
-            self.constant(*v, bits);
+        for (v, words) in outputs.iter().zip(results) {
+            match self.vars[v.0].ty {
+                Ty::Bool => self.constant(*v, words[0] & 1),
+                Ty::I128 => self.constant_words(*v, words),
+                _ => self.constant(*v, words[0]),
+            }
         }
         Ok(())
     }
@@ -683,7 +706,7 @@ impl Steps {
                             if let ConstantValue::BytePointer(bytes) = value {
                                 b.bytes.push(bytes.clone());
                             }
-                            b.constant(*output, value.bits());
+                            b.constant_words(*output, value.words());
                         }
                         ScalarKernel::Call {
                             function,
@@ -849,6 +872,7 @@ impl Steps {
             }
         }
         let mut free_values = vec![];
+        let mut free_wide = vec![];
         let mut free_bits = vec![];
         let mut release: Vec<Vec<VariableId>> = vec![vec![]; steps.len()];
         for (s, step) in steps.iter().enumerate() {
@@ -861,6 +885,12 @@ impl Steps {
                         bit_slots += 1;
                         bit_slots - 1
                     }))
+                } else if vars[v.0].ty == Ty::I128 {
+                    // Two consecutive value slots.
+                    Place::Value(free_wide.pop().unwrap_or_else(|| {
+                        value_slots += 2;
+                        value_slots - 2
+                    }))
                 } else {
                     Place::Value(free_values.pop().unwrap_or_else(|| {
                         value_slots += 1;
@@ -872,6 +902,7 @@ impl Steps {
             for v in std::mem::take(&mut release[s]) {
                 match vars[v.0].place {
                     Place::Bits(slot) => free_bits.push(slot),
+                    Place::Value(slot) if vars[v.0].ty == Ty::I128 => free_wide.push(slot),
                     Place::Value(slot) => free_values.push(slot),
                     _ => {}
                 }

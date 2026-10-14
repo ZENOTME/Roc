@@ -56,6 +56,12 @@ impl Key {
                 Func::Compare(p) => format!("cmp_{}_{t}_{}", p.name(), shape(2)),
                 Func::Cast(to) => format!("cast_{t}_{}", to.name()),
                 Func::Select => format!("select_{t}_{}", shape(2)),
+                Func::DivRound => format!("divround_{t}_{}", shape(2)),
+                Func::Abs => format!("abs_{t}"),
+                Func::Round => format!("round_{t}"),
+                Func::BitAnd => format!("bitand_{t}_{}", shape(2)),
+                Func::BitOr => format!("bitor_{t}_{}", shape(2)),
+                Func::ShiftRight => format!("shr_{t}_{}", shape(2)),
             },
             Kind::DivMagic => format!("divmagic_{t}"),
             Kind::RemMagic => format!("remmagic_{t}"),
@@ -79,7 +85,9 @@ impl Key {
         let results = match self.kind {
             Kind::Func(f) => {
                 let args = match f {
-                    Func::Neg | Func::Cast(_) => vec![value(&mut g, 0)],
+                    Func::Neg | Func::Cast(_) | Func::Abs | Func::Round => {
+                        vec![value(&mut g, 0)]
+                    }
                     Func::Select => {
                         let cond = g.arg(Arg::Bitmap);
                         vec![cond, value(&mut g, 0), value(&mut g, 1)]
@@ -140,7 +148,15 @@ pub fn all() -> Vec<Key> {
             keys.extend(binary.map(|s| key(Kind::Func(Func::Compare(p)), t, s)));
         }
         keys.extend([0, 1, 2, 3].map(|s| key(Kind::Func(Func::Select), t, s)));
-        if t.is_integer() {
+        keys.push(key(Kind::Func(Func::Abs), t, 0));
+        if t.is_float() {
+            keys.push(key(Kind::Func(Func::Round), t, 0));
+        } else {
+            for f in [Func::DivRound, Func::BitAnd, Func::BitOr, Func::ShiftRight] {
+                keys.extend(binary.map(|s| key(Kind::Func(f), t, s)));
+            }
+        }
+        if t.is_integer() && t.bits() <= 64 {
             keys.push(key(Kind::DivMagic, t, 0));
             keys.push(key(Kind::RemMagic, t, 0));
         }

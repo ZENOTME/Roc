@@ -651,6 +651,7 @@ fn binding_value_type(binding: &ColumnVariableBinding) -> VariableType {
         B::Int16 { .. } => VariableType::Int16,
         B::Int32 { .. } => VariableType::Int32,
         B::Int64 { .. } => VariableType::Int64,
+        B::Int128 { .. } => VariableType::Int128,
         B::UInt8 { .. } => VariableType::UInt8,
         B::UInt16 { .. } => VariableType::UInt16,
         B::UInt32 { .. } => VariableType::UInt32,

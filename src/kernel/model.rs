@@ -37,6 +37,8 @@ pub enum VariableType {
     Int16,
     Int32,
     Int64,
+    /// The unscaled value of a decimal.
+    Int128,
     UInt8,
     UInt16,
     UInt32,
@@ -53,11 +55,15 @@ impl VariableType {
             Self::Boolean | Self::Int8 | Self::UInt8 => 8,
             Self::Int16 | Self::UInt16 => 16,
             Self::Int32 | Self::UInt32 | Self::Float32 => 32,
+            Self::Int128 => 128,
             _ => 64,
         }
     }
     pub fn is_signed(self) -> bool {
-        matches!(self, Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64)
+        matches!(
+            self,
+            Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64 | Self::Int128
+        )
     }
     pub fn is_float(self) -> bool {
         matches!(self, Self::Float32 | Self::Float64)
@@ -69,6 +75,7 @@ impl VariableType {
                 | Self::Int16
                 | Self::Int32
                 | Self::Int64
+                | Self::Int128
                 | Self::UInt8
                 | Self::UInt16
                 | Self::UInt32
@@ -88,6 +95,7 @@ impl VariableType {
             DataType::Int16 => Self::Int16,
             DataType::Int32 | DataType::Date32 => Self::Int32,
             DataType::Int64 | DataType::Date64 | DataType::Timestamp(..) => Self::Int64,
+            DataType::Decimal128(..) => Self::Int128,
             DataType::UInt8 => Self::UInt8,
             DataType::UInt16 => Self::UInt16,
             DataType::UInt32 => Self::UInt32,
@@ -334,6 +342,7 @@ pub enum ConstantValue {
     Int16(i16),
     Int32(i32),
     Int64(i64),
+    Int128(i128),
     UInt8(u8),
     UInt16(u16),
     UInt32(u32),
@@ -353,6 +362,7 @@ impl ConstantValue {
             Self::Int16(_) => VariableType::Int16,
             Self::Int32(_) => VariableType::Int32,
             Self::Int64(_) => VariableType::Int64,
+            Self::Int128(_) => VariableType::Int128,
             Self::UInt8(_) => VariableType::UInt8,
             Self::UInt16(_) => VariableType::UInt16,
             Self::UInt32(_) => VariableType::UInt32,
@@ -371,6 +381,7 @@ impl ConstantValue {
             VariableType::Int16 => Self::Int16(0),
             VariableType::Int32 => Self::Int32(0),
             VariableType::Int64 => Self::Int64(0),
+            VariableType::Int128 => Self::Int128(0),
             VariableType::UInt8 => Self::UInt8(0),
             VariableType::UInt16 => Self::UInt16(0),
             VariableType::UInt32 => Self::UInt32(0),
@@ -381,7 +392,34 @@ impl ConstantValue {
             VariableType::Usize => Self::Usize(0),
         }
     }
-    /// Reverses `bits` for fixed-width types.
+    /// Reverses `words` for fixed-width types.
+    pub fn from_words(ty: VariableType, [lo, hi]: [u64; 2]) -> Self {
+        match ty {
+            VariableType::Int128 => Self::Int128((lo as u128 | (hi as u128) << 64) as i128),
+            _ => Self::from_bits(ty, lo),
+        }
+    }
+
+    /// The value in two words: the low word holds `bits`, the high word the
+    /// rest of a 128-bit value (sign-extended).
+    pub fn words(&self) -> [u64; 2] {
+        match self {
+            Self::Int128(v) => [*v as u64, (*v >> 64) as u64],
+            other => {
+                let bits = other.bits();
+                [
+                    bits,
+                    if (bits as i64) < 0 && other.ty().is_signed() {
+                        u64::MAX
+                    } else {
+                        0
+                    },
+                ]
+            }
+        }
+    }
+
+    /// Reverses `bits` for fixed-width types up to 64 bits.
     pub fn from_bits(ty: VariableType, bits: u64) -> Self {
         match ty {
             VariableType::Boolean => Self::Boolean(bits != 0),
@@ -389,6 +427,7 @@ impl ConstantValue {
             VariableType::Int16 => Self::Int16(bits as i16),
             VariableType::Int32 => Self::Int32(bits as i32),
             VariableType::Int64 => Self::Int64(bits as i64),
+            VariableType::Int128 => Self::Int128(bits as i64 as i128),
             VariableType::UInt8 => Self::UInt8(bits as u8),
             VariableType::UInt16 => Self::UInt16(bits as u16),
             VariableType::UInt32 => Self::UInt32(bits as u32),
@@ -399,9 +438,10 @@ impl ConstantValue {
         }
     }
 
-    /// Raw bits, sign-extended for signed integers.
+    /// Raw bits, sign-extended for signed integers; the low word of Int128.
     pub fn bits(&self) -> u64 {
         match self {
+            Self::Int128(v) => *v as u64,
             Self::Boolean(v) => *v as u64,
             Self::Int8(v) => *v as i64 as u64,
             Self::Int16(v) => *v as i64 as u64,
@@ -432,6 +472,19 @@ pub enum ScalarFunction {
     Divide,
     /// Integers output `[value, divide_by_zero]`; floats `[value]`.
     Remainder,
+    /// Integer division rounding halves away from zero: `[value,
+    /// divide_by_zero]`. The quotient cannot overflow.
+    DivideRound,
+    /// Signed integers output `[value, overflow]`; unsigned integers and
+    /// floats `[value]`.
+    Abs,
+    /// Floats rounded to an integer value, halves away from zero.
+    Round,
+    /// Integer bitwise operations: `[value]`.
+    BitAnd,
+    BitOr,
+    /// `a` shifted right by `b` modulo its bits; signed types extend the sign.
+    ShiftRight,
     /// Fixed-width operands `[a, b]`, or byte strings `[a_ptr, a_len, b_ptr,
     /// b_len]`. Floats use a total order. Outputs `[Boolean]`.
     Equal,
@@ -478,7 +531,13 @@ impl ScalarFunction {
             (Negate, [a]) if a.is_signed() => vec![*a, T::Boolean],
             (Negate, [a]) if a.is_float() => vec![*a],
             (Divide, [a, b]) if a == b && a.is_integer() => vec![*a, T::Boolean, T::Boolean],
-            (Remainder, [a, b]) if a == b && a.is_integer() => vec![*a, T::Boolean],
+            (Remainder | DivideRound, [a, b]) if a == b && a.is_integer() => {
+                vec![*a, T::Boolean]
+            }
+            (Abs, [a]) if a.is_signed() => vec![*a, T::Boolean],
+            (Abs, [a]) if a.is_numeric() => vec![*a],
+            (Round, [a]) if a.is_float() => vec![*a],
+            (BitAnd | BitOr | ShiftRight, [a, b]) if a == b && a.is_integer() => vec![*a],
             (
                 Equal | NotEqual | LessThan | LessThanOrEqual | GreaterThan | GreaterThanOrEqual,
                 [a, b],
@@ -600,6 +659,10 @@ pub enum ColumnVariableBinding {
         value: VariableId,
         validity: Option<VariableId>,
     },
+    Int128 {
+        value: VariableId,
+        validity: Option<VariableId>,
+    },
     UInt8 {
         value: VariableId,
         validity: Option<VariableId>,
@@ -636,7 +699,8 @@ pub enum ColumnVariableBinding {
 macro_rules! fixed_bindings {
     ($m:ident) => {
         $m!(
-            Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64
+            Boolean, Int8, Int16, Int32, Int64, Int128, UInt8, UInt16, UInt32, UInt64, Float32,
+            Float64
         )
     };
 }

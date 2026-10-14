@@ -91,8 +91,8 @@ mod tests {
         let mut inputs = args
             .iter()
             .map(|a| match a {
-                Arg::Output(_) | Arg::OutputBitmap => vec![0u64; 1024],
-                _ => (0..1024).map(|_| rng.value()).collect(),
+                Arg::Output(_) | Arg::OutputBitmap => vec![0u64; 2048],
+                _ => (0..2048).map(|_| rng.value()).collect(),
             })
             .collect::<Vec<_>>();
         if matches!(key.kind, Kind::DivMagic | Kind::RemMagic) {
@@ -117,7 +117,7 @@ mod tests {
             .iter_mut()
             .map(|b| b.as_mut_ptr().cast())
             .collect::<Vec<_>>();
-        // SAFETY: every argument has room for a window of 64-bit values or a
+        // SAFETY: every argument has room for a window of 128-bit values or a
         // window bitmap.
         let result = unsafe { f(pointers.as_ptr(), n as u64) };
         let outputs = args
@@ -129,7 +129,7 @@ mod tests {
                     Arg::OutputBitmap => n.div_ceil(8),
                     _ => return None,
                 };
-                // SAFETY: the buffer has 8192 bytes.
+                // SAFETY: the buffer has 16384 bytes.
                 let mut out =
                     unsafe { std::slice::from_raw_parts(b.as_ptr().cast::<u8>(), bytes) }.to_vec();
                 if let (Arg::OutputBitmap, Some(last)) = (a, out.last_mut())
@@ -148,11 +148,11 @@ mod tests {
         args.iter()
             .zip(inputs)
             .map(|(a, input)| {
-                let mut one = vec![0u64; 1024];
+                let mut one = vec![0u64; 2048];
                 match a {
                     Arg::Column(t) => {
                         let w = t.bytes();
-                        // SAFETY: both buffers have 8192 bytes.
+                        // SAFETY: both buffers have 16384 bytes.
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 input.as_ptr().cast::<u8>().add(r * w),
@@ -162,7 +162,8 @@ mod tests {
                         }
                     }
                     Arg::Bitmap => one[0] = input[r / 64] >> (r % 64) & 1,
-                    Arg::Scalar(_) => one[0] = input[0],
+                    Arg::Scalar(t) => one[..t.bytes().div_ceil(8)]
+                        .copy_from_slice(&input[..t.bytes().div_ceil(8)]),
                     Arg::Output(_) | Arg::OutputBitmap => {}
                 }
                 one
@@ -228,5 +229,159 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Runs the kernel `name` over the rows of `columns`, given as one value
+    /// of up to 128 bits per row; returns each output as one value per row,
+    /// Booleans as 0 or 1.
+    fn eval(name: &str, columns: &[Vec<i128>]) -> Vec<Vec<i128>> {
+        let key = catalog::all()
+            .into_iter()
+            .find(|k| k.name() == name)
+            .unwrap_or_else(|| panic!("no kernel {name}"));
+        let g = key.group();
+        let n = columns[0].len();
+        let mut inputs = columns.iter();
+        let buffers = g
+            .args
+            .iter()
+            .map(|a| {
+                let mut words = vec![0u64; 2048];
+                if let Arg::Column(t) = a {
+                    let values = inputs.next().unwrap();
+                    for (r, v) in values.iter().enumerate() {
+                        let bytes = v.to_le_bytes();
+                        // SAFETY: the buffer has room for 1024 values of 16 bytes.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                bytes.as_ptr(),
+                                words.as_mut_ptr().cast::<u8>().add(r * t.bytes()),
+                                t.bytes(),
+                            )
+                        }
+                    }
+                }
+                words
+            })
+            .collect::<Vec<_>>();
+        let (_, outputs) = run(kernel(&key).unwrap(), &g.args, &buffers, n);
+        g.args
+            .iter()
+            .filter(|a| matches!(a, Arg::Output(_) | Arg::OutputBitmap))
+            .zip(outputs)
+            .map(|(a, bytes)| {
+                (0..n)
+                    .map(|r| match a {
+                        Arg::Output(t) => {
+                            let w = t.bytes();
+                            let mut raw = [0u8; 16];
+                            raw[..w].copy_from_slice(&bytes[r * w..(r + 1) * w]);
+                            let v = i128::from_le_bytes(raw);
+                            if t.is_signed() {
+                                v << (128 - 8 * w) >> (128 - 8 * w)
+                            } else {
+                                v
+                            }
+                        }
+                        _ => (bytes[r / 8] >> (r % 8) & 1) as i128,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_and_rounding_kernels_match_their_definitions() {
+        let wide = [
+            0i128,
+            1,
+            -1,
+            7,
+            -7,
+            12345,
+            -99999,
+            i128::MAX,
+            i128::MIN,
+            i64::MAX as i128 * 3,
+            -(10i128.pow(30)),
+        ];
+        let pairs = wide.iter().flat_map(|&a| wide.iter().map(move |&b| (a, b)));
+        let (a, b): (Vec<i128>, Vec<i128>) = pairs.unzip();
+        let out = eval("add_i128_cc", &[a.clone(), b.clone()]);
+        for (r, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            let (v, o) = x.overflowing_add(y);
+            assert_eq!((out[0][r], out[1][r]), (v, o as i128), "{x} + {y}");
+        }
+        let out = eval("mul_i128_cc", &[a.clone(), b.clone()]);
+        for (r, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            let (v, o) = x.overflowing_mul(y);
+            assert_eq!((out[0][r], out[1][r]), (v, o as i128), "{x} * {y}");
+        }
+        let out = eval("div_i128_cc", &[a.clone(), b.clone()]);
+        for (r, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            let zero = y == 0;
+            let overflow = x == i128::MIN && y == -1;
+            assert_eq!((out[1][r], out[2][r]), (zero as i128, overflow as i128));
+            if !zero && !overflow {
+                assert_eq!(out[0][r], x / y, "{x} / {y}");
+            }
+        }
+        let out = eval("divround_i128_cc", &[a.clone(), b.clone()]);
+        for (r, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            if y == 0 || (x == i128::MIN && y == -1) {
+                continue;
+            }
+            let (q, m) = (x / y, x % y);
+            let away = m.unsigned_abs() >= y.unsigned_abs() - m.unsigned_abs();
+            let expected = if !away {
+                q
+            } else if (x < 0) != (y < 0) {
+                q - 1
+            } else {
+                q + 1
+            };
+            assert_eq!(out[0][r], expected, "round({x} / {y})");
+        }
+        let out = eval("cmp_lt_i128_cc", &[a.clone(), b.clone()]);
+        for (r, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(out[0][r], (x < y) as i128);
+        }
+        let small = (-25i128..25).collect::<Vec<_>>();
+        let divisors = small.iter().map(|_| 4i128).collect::<Vec<_>>();
+        let out = eval("divround_i64_cc", &[small.clone(), divisors]);
+        let rounded = small
+            .iter()
+            .map(|&x| (x as f64 / 4.0).round() as i128)
+            .collect::<Vec<_>>();
+        assert_eq!(out[0], rounded);
+        let out = eval("abs_i64", &[small.clone()]);
+        assert_eq!(out[0], small.iter().map(|x| x.abs()).collect::<Vec<_>>());
+        let out = eval("cast_i128_i64", &[wide.to_vec()]);
+        for (r, &x) in wide.iter().enumerate() {
+            let fits = i64::try_from(x).is_ok();
+            assert_eq!(out[1][r], !fits as i128, "{x} as i64");
+            if fits {
+                assert_eq!(out[0][r], x);
+            }
+        }
+        let out = eval("cast_i64_i128", &[small.clone()]);
+        assert_eq!(out[0], small);
+        let halves = [-2.5f64, -1.5, -0.5, 0.5, 1.5, 2.5, 3.49]
+            .map(|x| x.to_bits() as i128)
+            .to_vec();
+        let out = eval("round_f64", &[halves]);
+        let out = out[0]
+            .iter()
+            .map(|&b| f64::from_bits(b as u64))
+            .collect::<Vec<_>>();
+        assert_eq!(out, [-3.0, -2.0, -1.0, 1.0, 2.0, 3.0, 3.0]);
+        let ids = (0..8i128).collect::<Vec<_>>();
+        let out = eval("shr_u8_cc", &[ids.clone(), ids.iter().map(|_| 1).collect()]);
+        assert_eq!(out[0], ids.iter().map(|x| x >> 1).collect::<Vec<_>>());
+        let out = eval(
+            "bitand_u8_cc",
+            &[ids.clone(), ids.iter().map(|_| 2).collect()],
+        );
+        assert_eq!(out[0], ids.iter().map(|x| x & 2).collect::<Vec<_>>());
     }
 }

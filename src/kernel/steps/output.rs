@@ -270,6 +270,10 @@ impl Outputs {
                         1 => Arc::new(Int8Array::new(ScalarBuffer::new(buffer, 0, rows), nulls)),
                         2 => Arc::new(Int16Array::new(ScalarBuffer::new(buffer, 0, rows), nulls)),
                         4 => Arc::new(Int32Array::new(ScalarBuffer::new(buffer, 0, rows), nulls)),
+                        16 => Arc::new(Decimal128Array::new(
+                            ScalarBuffer::new(buffer, 0, rows),
+                            nulls,
+                        )),
                         _ => Arc::new(Int64Array::new(ScalarBuffer::new(buffer, 0, rows), nulls)),
                     };
                     if array.data_type() == t {

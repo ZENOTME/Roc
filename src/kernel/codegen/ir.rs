@@ -26,6 +26,9 @@ pub enum Ty {
     I16,
     I32,
     I64,
+    /// Decimal values: emitted in one lane, with LLVM's 128-bit library
+    /// routines for division and float conversion.
+    I128,
     U8,
     U16,
     U32,
@@ -35,12 +38,13 @@ pub enum Ty {
 }
 
 impl Ty {
-    pub const ALL: [Ty; 11] = [
+    pub const ALL: [Ty; 12] = [
         Ty::Bool,
         Ty::I8,
         Ty::I16,
         Ty::I32,
         Ty::I64,
+        Ty::I128,
         Ty::U8,
         Ty::U16,
         Ty::U32,
@@ -56,6 +60,7 @@ impl Ty {
             Ty::I8 | Ty::U8 => 8,
             Ty::I16 | Ty::U16 => 16,
             Ty::I32 | Ty::U32 | Ty::F32 => 32,
+            Ty::I128 => 128,
             _ => 64,
         }
     }
@@ -63,8 +68,13 @@ impl Ty {
     pub fn bytes(self) -> usize {
         (self.bits() as usize).div_ceil(8)
     }
+    /// The alignment loads and stores assume: 128-bit values may be in
+    /// eight-byte aligned memory.
+    pub fn align(self) -> u32 {
+        (self.bytes() as u32).min(8)
+    }
     pub fn is_signed(self) -> bool {
-        matches!(self, Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64)
+        matches!(self, Ty::I8 | Ty::I16 | Ty::I32 | Ty::I64 | Ty::I128)
     }
     pub fn is_float(self) -> bool {
         matches!(self, Ty::F32 | Ty::F64)
@@ -79,6 +89,7 @@ impl Ty {
             Ty::I16 => "i16",
             Ty::I32 => "i32",
             Ty::I64 => "i64",
+            Ty::I128 => "i128",
             Ty::U8 => "u8",
             Ty::U16 => "u16",
             Ty::U32 => "u32",
@@ -147,6 +158,13 @@ pub enum Op {
     Not,
     /// `[cond, a, b]`.
     Select,
+    /// Integer `[a, n]`: `a` shifted right by `n` modulo its bits, with sign
+    /// extension for signed types.
+    Shr,
+    /// `[a]`; integers wrap, floats clear the sign bit.
+    Abs,
+    /// Float `[a]` rounded to an integer, halves away from zero.
+    Round,
     /// `[a]` to the target type. Out-of-range and NaN inputs give an
     /// unspecified value and set the CastInvalid flag.
     Cast(Ty),
@@ -226,9 +244,6 @@ impl Group {
                     | Op::DivZero
                     | Op::DivOverflow
                     | Op::Compare(_)
-                    | Op::And
-                    | Op::Or
-                    | Op::Not
                     | Op::CastInvalid(_) => Ty::Bool,
                     Op::Cast(t) => t,
                     Op::Select => self.ty(node.args[1]),
@@ -273,6 +288,13 @@ pub enum Func {
     Compare(Pred),
     Cast(Ty),
     Select,
+    /// Integer division rounding halves away from zero.
+    DivRound,
+    Abs,
+    Round,
+    BitAnd,
+    BitOr,
+    ShiftRight,
 }
 
 /// The nodes of one function, one per output in the kernel model's output
@@ -344,13 +366,59 @@ pub fn lower(g: &mut Group, f: Func, args: &[Src]) -> Vec<Src> {
             g.node(Op::CastInvalid(to), args.to_vec()),
         ],
         Func::Select => vec![g.node(Op::Select, args.to_vec())],
+        Func::DivRound => {
+            let zero = Src::Imm(t, 0);
+            let one = Src::Imm(t, 1);
+            let q = g.node(Op::Div, args.to_vec());
+            let r = g.node(Op::Rem, args.to_vec());
+            let div_zero = g.node(Op::DivZero, vec![args[1]]);
+            if !t.is_signed() {
+                // Round up when r >= d - r.
+                let rest = g.node(Op::Sub, vec![args[1], r]);
+                let up = g.node(Op::Compare(Pred::Ge), vec![r, rest]);
+                let q1 = g.node(Op::Add, vec![q, one]);
+                return vec![g.node(Op::Select, vec![up, q1, q]), div_zero];
+            }
+            // Negated magnitudes cannot overflow: away iff |r| >= |d| - |r|,
+            // that is -|r| <= -|d| - -|r|.
+            let neg_abs = |g: &mut Group, x: Src| {
+                let positive = g.node(Op::Compare(Pred::Gt), vec![x, zero]);
+                let negated = g.node(Op::Neg, vec![x]);
+                g.node(Op::Select, vec![positive, negated, x])
+            };
+            let nr = neg_abs(g, r);
+            let nd = neg_abs(g, args[1]);
+            let rest = g.node(Op::Sub, vec![nd, nr]);
+            let away = g.node(Op::Compare(Pred::Le), vec![nr, rest]);
+            let a_negative = g.node(Op::Compare(Pred::Lt), vec![args[0], zero]);
+            let d_negative = g.node(Op::Compare(Pred::Lt), vec![args[1], zero]);
+            let negative = g.node(Op::Compare(Pred::Ne), vec![a_negative, d_negative]);
+            let down = g.node(Op::Sub, vec![q, one]);
+            let up = g.node(Op::Add, vec![q, one]);
+            let step = g.node(Op::Select, vec![negative, down, up]);
+            vec![g.node(Op::Select, vec![away, step, q]), div_zero]
+        }
+        Func::Abs => {
+            let v = g.node(Op::Abs, args.to_vec());
+            if t.is_signed() {
+                vec![v, g.node(Op::NegOverflow, args.to_vec())]
+            } else if t.is_float() {
+                vec![v]
+            } else {
+                vec![v, no]
+            }
+        }
+        Func::Round => vec![g.node(Op::Round, args.to_vec())],
+        Func::BitAnd => vec![g.node(Op::And, args.to_vec())],
+        Func::BitOr => vec![g.node(Op::Or, args.to_vec())],
+        Func::ShiftRight => vec![g.node(Op::Shr, args.to_vec())],
     }
 }
 
 /// `[magic, shift, more]` for dividing an integer type by a constant `d >= 2`
 /// (given as its zero-extended bits), computed for 64-bit operands.
 pub fn magic(t: Ty, bits: u64) -> Option<[u64; 3]> {
-    if !t.is_integer() {
+    if !t.is_integer() || t.bits() > 64 {
         return None;
     }
     let shift = 64 - t.bits();
