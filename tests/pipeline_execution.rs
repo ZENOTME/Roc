@@ -17,7 +17,10 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::{channel::oneshot, future::BoxFuture};
 use roc::{
     error::{Error, ErrorKind, Result},
-    exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
+    exec::{
+        ConsumeStatus, LocalSink, LocalSinkContext, LocalSource, LocalSourceContext, SinkExec,
+        SourceExec, StateContext,
+    },
     kernel::Program,
     pipeline::{Executor, Pipeline, PipelineExecutionConfig, PipelineGraph, PipelineGraphExecutor},
 };
@@ -90,10 +93,13 @@ impl SourceExec for EmptySource {
         }
         Ok(())
     }
-    fn next_batch<'a>(
-        &'a mut self,
-        _: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+    fn local_source(&self, _: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(EmptyLocal))
+    }
+}
+struct EmptyLocal;
+impl LocalSource for EmptyLocal {
+    fn next<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async { Ok(None) })
     }
 }
@@ -103,7 +109,13 @@ impl SourceExec for WaitForCancelSource {
         self.0.send(guard.clone()).unwrap();
         Ok(())
     }
-    fn next_batch<'a>(
+    fn local_source(&self, _: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(WaitLocal))
+    }
+}
+struct WaitLocal;
+impl LocalSource for WaitLocal {
+    fn next<'a>(
         &'a mut self,
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
@@ -115,10 +127,13 @@ impl SourceExec for WaitForCancelSource {
 }
 struct FailingSource;
 impl SourceExec for FailingSource {
-    fn next_batch<'a>(
-        &'a mut self,
-        _: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
+    fn local_source(&self, _: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(FailLocal))
+    }
+}
+struct FailLocal;
+impl LocalSource for FailLocal {
+    fn next<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async { Err(Error::new(ErrorKind::External, "source failed")) })
     }
 }

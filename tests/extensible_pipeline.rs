@@ -16,7 +16,7 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use roc::{
     column::{ColumnContext, ColumnId},
-    error::{Error, ErrorKind, Result},
+    error::{ErrorKind, Result},
     exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
     operator::{Operator, OperatorTree, OperatorTreeNode},
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
@@ -25,17 +25,14 @@ use roc::{
 struct NoopExec;
 
 impl SourceExec for NoopExec {
-    fn next_batch<'a>(
-        &'a mut self,
-        _: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<Option<arrow::record_batch::RecordBatch>>> {
-        Box::pin(async {
-            Err(Error::internal(
-                "not executed in graph construction tests".into(),
-            ))
-        })
+    fn local_source(
+        &self,
+        _: &roc::exec::LocalSourceContext,
+    ) -> Result<Box<dyn roc::exec::LocalSource>> {
+        unreachable!("construction only")
     }
 }
+
 impl SinkExec for NoopExec {
     fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
         unreachable!("construction only")

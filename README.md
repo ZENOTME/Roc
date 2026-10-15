@@ -147,22 +147,29 @@ Roc depends on `arrow-array`, `arrow-buffer`, and `arrow-schema` for interchange
 the umbrella `arrow` crate is only a test oracle. Output columns that pass an
 input through keep its Arrow array when all rows survive.
 
-One async `Pipeline::execute` coordinator owns the source cursor and a bounded
-pool of `(LocalState, LocalSink)` pairs. Program calls and local sink work run as
-tasks of the caller's executor; a single worker runs inline, and ordered
-pipelines use one instance. After each program run, `LocalSink::consume` receives
-the optional output and returns `End` (continue), `Flush` (hand off and reuse),
-or `Stop` (stop dispatching new input). `LocalSink::finish` prepares each handoff;
-`SinkExec::consume` takes the prepared data on the coordinator and restores the
-instance after Flush or Stop. Once input and in-flight jobs end, every instance
-prepares End in parallel, all End handoffs complete, and `SinkExec::finish`
-merges and publishes the result. Only this final finish receives `Cpu`, which
-submits work to the same executor: aggregates and windows finish hash partitions
-in parallel, tables assemble contiguous bucket ranges, and sorts gather columns
-in parallel. Local aggregate End preparation also releases its kernel state on
-the worker; Flush keeps the slots available for reuse. Exchange sinks send
-buffered chunks asynchronously on handoff. See
-[`design/sink-parallelism.md`](design/sink-parallelism.md) for the protocol.
+Each pipeline runs one async task per instance. An instance owns a
+`(LocalSource, LocalState, LocalSink)` triple: it reads a batch, runs the Program,
+and feeds the local sink, yielding after each batch. Ordered pipelines use one
+instance. `LocalSource::next` splits input to the configured `batch_rows` bound;
+scan consumers share input work, exchange consumers share a cursor under an
+async lock, and buffer readers claim chunks atomically.
+
+`LocalSink::consume` returns `End` (continue), `Flush` (hand off and reuse), or
+`Stop` (stop all instances' reads, including pending I/O). Each handoff first
+calls local `finish`, then calls `SinkExec::consume` under an async mutex. Every
+successful instance hands off End once. A failing instance cancels its siblings;
+all tasks are joined before returning, and failed pipelines never call the
+final sink finish. The caller's graph shutdown remains explicit.
+
+Aggregate and sort sinks publish lazy partitions; single-specification windows
+publish lazy buckets. Downstream instances merge or evaluate claimed partitions
+and immediately feed their Programs without a global output concat or scatter.
+Sort ranges are claimed in key order, and fetch or downstream Stop leaves later
+ranges uncomputed. Independent readers have separate claims but share cached
+partition results. Table construction and windows with multiple specifications
+retain parallel `SinkExec::finish` jobs through `Cpu`. See
+[`design/source-parallelism.md`](design/source-parallelism.md) for the protocol
+and measured results.
 
 Run the fixed-condition CPU benchmark (preparation and execution reported separately):
 

@@ -15,7 +15,8 @@
 //! Materialized results: pipelines sink chunks into a buffer, optionally
 //! transformed once their input ends, and dependent pipelines read it.
 use super::{
-    ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext, downcast_local,
+    BatchSlices, ConsumeStatus, LocalSink, LocalSinkContext, LocalSource, LocalSourceContext,
+    SinkExec, SourceExec, StateContext, downcast_local,
 };
 use crate::arrow::{
     datatypes::SchemaRef,
@@ -24,18 +25,14 @@ use crate::arrow::{
 use crate::error::{Error, Result};
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
-use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
-/// Rows per chunk a buffer source emits.
-const MORSEL_ROWS: usize = 8192;
-
 /// The chunks of one or more producing pipelines.
 #[derive(Default)]
-pub struct Buffer(pub(super) Mutex<Vec<RecordBatch>>);
+pub struct Buffer(pub(super) Mutex<Arc<Vec<RecordBatch>>>);
 
 /// Transforms one producing pipeline's chunks on the coordinator.
 pub type Finish = Box<dyn FnOnce(Vec<RecordBatch>) -> Result<Vec<RecordBatch>> + Send>;
@@ -152,7 +149,7 @@ impl SinkExec for BufferSinkExec {
             if guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
-            self.buffer.0.lock().unwrap().extend(chunks);
+            Arc::make_mut(&mut self.buffer.0.lock().unwrap()).extend(chunks);
             Ok(())
         })
     }
@@ -163,49 +160,149 @@ impl SinkExec for BufferSinkExec {
 pub struct BufferSourceExec {
     buffer: Arc<Buffer>,
     schema: SchemaRef,
-    chunks: VecDeque<RecordBatch>,
+    chunks: Option<Arc<Vec<RecordBatch>>>,
+    next: Arc<AtomicUsize>,
 }
-
 impl BufferSourceExec {
     pub fn new(buffer: Arc<Buffer>, schema: SchemaRef) -> Self {
         Self {
             buffer,
             schema,
-            chunks: VecDeque::new(),
+            chunks: None,
+            next: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
-
 impl SourceExec for BufferSourceExec {
     fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
-        let chunks = self.buffer.0.lock().unwrap().clone();
-        for chunk in chunks {
-            let chunk = RecordBatch::try_new_with_options(
-                self.schema.clone(),
-                chunk.columns().to_vec(),
-                &RecordBatchOptions::new().with_row_count(Some(chunk.num_rows())),
-            )
-            .map_err(|source| {
-                Error::invalid_plan("buffered chunks do not match the columns read".into())
-                    .with_source(source)
-            })?;
-            for offset in (0..chunk.num_rows()).step_by(MORSEL_ROWS) {
-                self.chunks
-                    .push_back(chunk.slice(offset, MORSEL_ROWS.min(chunk.num_rows() - offset)));
-            }
-        }
+        self.chunks = Some(self.buffer.0.lock().unwrap().clone());
         Ok(())
     }
-
-    fn next_batch<'a>(
+    fn local_source(&self, ctx: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(BufferLocalSource {
+            chunks: self
+                .chunks
+                .clone()
+                .ok_or_else(|| Error::internal("buffer is not started".into()))?,
+            schema: self.schema.clone(),
+            next: self.next.clone(),
+            slices: BatchSlices::default(),
+            batch_rows: ctx.batch_rows,
+        }))
+    }
+}
+struct BufferLocalSource {
+    chunks: Arc<Vec<RecordBatch>>,
+    schema: SchemaRef,
+    next: Arc<AtomicUsize>,
+    slices: BatchSlices,
+    batch_rows: usize,
+}
+impl LocalSource for BufferLocalSource {
+    fn next<'a>(
         &'a mut self,
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            if guard.is_shutdown_requested() {
-                return Err(Error::cancelled());
+            loop {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                if let Some(batch) = self.slices.next(self.batch_rows) {
+                    return Ok(Some(batch));
+                }
+                let index = self.next.fetch_add(1, Ordering::Relaxed);
+                let Some(chunk) = self.chunks.get(index) else {
+                    return Ok(None);
+                };
+                self.slices.set(
+                    RecordBatch::try_new_with_options(
+                        self.schema.clone(),
+                        chunk.columns().to_vec(),
+                        &RecordBatchOptions::new().with_row_count(Some(chunk.num_rows())),
+                    )
+                    .map_err(|source| {
+                        Error::invalid_plan("buffered chunks do not match the columns read".into())
+                            .with_source(source)
+                    })?,
+                );
             }
-            Ok(self.chunks.pop_front())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arrow::{
+        array::Int64Array,
+        datatypes::{DataType, Field, Schema},
+    };
+
+    #[test]
+    fn concurrent_buffer_readers_share_claims_and_spool_readers_start_fresh() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "input",
+            DataType::Int64,
+            false,
+        )]));
+        let chunks = (0..30)
+            .map(|i| {
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(Int64Array::from_iter_values(i * 73..(i + 1) * 73))],
+                )
+                .unwrap()
+            })
+            .collect();
+        let buffer = Arc::new(Buffer(Mutex::new(Arc::new(chunks))));
+        let output = Arc::new(Schema::new(vec![Field::new(
+            "renamed",
+            DataType::Int64,
+            false,
+        )]));
+        for _ in 0..2 {
+            let guard = asyncband::shutdown::new().1;
+            let mut source = BufferSourceExec::new(buffer.clone(), output.clone());
+            source.start(&guard).unwrap();
+            assert!(Arc::ptr_eq(
+                source.chunks.as_ref().unwrap(),
+                &buffer.0.lock().unwrap()
+            ));
+            let mut tasks = vec![];
+            for _ in 0..4 {
+                let mut local = source
+                    .local_source(&LocalSourceContext {
+                        batch_rows: 11,
+                        instances: 4,
+                    })
+                    .unwrap();
+                let (guard, output) = (guard.clone(), output.clone());
+                tasks.push(std::thread::spawn(move || {
+                    futures::executor::block_on(async move {
+                        let mut values = vec![];
+                        while let Some(chunk) = local.next(&guard).await.unwrap() {
+                            assert!(chunk.num_rows() <= 11);
+                            assert_eq!(chunk.schema(), output);
+                            values.extend_from_slice(
+                                chunk
+                                    .column(0)
+                                    .as_any()
+                                    .downcast_ref::<Int64Array>()
+                                    .unwrap()
+                                    .values(),
+                            );
+                        }
+                        values
+                    })
+                }));
+            }
+            let mut values = tasks
+                .into_iter()
+                .flat_map(|t| t.join().unwrap())
+                .collect::<Vec<i64>>();
+            values.sort();
+            assert_eq!(values, (0..30 * 73).collect::<Vec<_>>());
+        }
     }
 }

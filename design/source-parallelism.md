@@ -1,7 +1,7 @@
 # 设计决策：并行 source 与 sink 收尾的下推
 
-状态：设计已确定，待实现。在 [`sink-parallelism.md`](sink-parallelism.md) 第 12 节
-之后实施。写于 2026-10-15。
+状态：已实现并验证（2026-10-15），基于 sink-parallelism 第 12 节提交
+`cc7d80382f80e7e25fbcb1b095bc04b7c46b0e50`。实现与测量见第 9 节。
 相关：[`sink-parallelism-hotspots.md`](sink-parallelism-hotspots.md)、
 [`tpcds-progress.md`](tpcds-progress.md)。
 
@@ -322,3 +322,121 @@ TableState 读取。
 性能：与 sink-parallelism 第 11 节相同的矩阵和口径，以第 12 节完成后的结果为
 基线，分别记录第 6 节每一步的效果。重点观察 q51、q67、q23、高基数聚合，以及
 带 `ORDER BY … LIMIT` 的查询。
+
+
+## 9. 实现与效果（2026-10-15）
+
+实现位于 `codex/source-parallelism` 分支，独立 worktree；原工作区未提交的方案修改未搬入。
+
+### 9.1 落地范围与实现选择
+
+- 删除 `SourceExec::next_batch`，引入 `LocalSourceContext` / `LocalSource`；扫描、
+  Exchange、Buffer 和物化算子的读取都迁移完成。
+- 每个实例持有自己的 source、Program 状态和 local sink。Flush/Stop/End 在
+  asyncband Mutex 下交接；单 worker 和 ordered 均使用同一路径。删除 coordinator
+  合批队列、morsel 槽、JOB_ROWS 和独立 End 准备阶段。配置中的 `yield_batches`
+  为兼容调用方保留，但所有实例都在每个 batch 后 yield。
+- Stop 使用可唤醒的共享信号，既检查是否还应读取，也中断已经 pending 的 IO；每个
+  成功实例仍交接一次 End。实例错误或 panic 会取消并等待同 pipeline 的其他实例，
+  不调用全局 finish；不代替调用方取消整个 graph。
+- `Partitioned<P>` / `Claims` 由 `PartitionedResult`、`PartitionedSourceExec` 封装。
+  每个读取 pipeline 有自己的 claims；输出与错误均只计算、缓存一次。计算时取走
+  输入，释放该分区 work closure。Sort/Window 跨桶共享的 Arrow payload 和编码键
+  在最后一个引用释放时回收。单读取方暂时也缓存输出，符合第 3 节的初版选择。
+- Aggregate 按 grouping set 和 hash 分区发布 partial，读取时 merge 并直接组装本
+  分区列，删除全局 `concat_parts`。小输入每个 set 一个分区；空 global set 仍
+  只输出一行。沿用原来的 `partition_count`（多 worker 为 2×parallelism 向上取
+  2 的幂），没有把分区数调优混入本轮。
+- 单规格 Window 按桶归并、interleave payload 并计算成员窗口；删除该路径的全局
+  concat/scatter。多规格保持原 Cpu 并行路径，结果再经统一 source 读取。
+- Sort 以全局固定步长采样，选择最多 4×parallelism 个键范围；二分切各 run，
+  相等编码键落入同一范围。ordered source 按范围读取，fetch 在发布时裁掉不需要的
+  后缀，Stop 保留尚未计算的范围。没有加入预取。
+- Table 沿用原来的 Cpu 并行建表。Exchange 仍共享单个 consumer，未假定 service
+  的多 consumer 语义。
+- DataFusion 适配器同步改为各 consumer 直接领取并读取 partition。原实现为每个
+  consumer 启动一组 decoder task，领取后发往该 consumer 的私有队列；新实例模型
+  下会造成输入被少数实例占住。移除这一层任务和队列后，扫描按需求推进。
+
+### 9.2 正确性
+
+`cargo test --locked --workspace`：**198 passed**，无编译警告，包括 doctest。
+SF1 全量 103 条语句、4 worker / 4 runtime threads：**ZeroCompile 103/103，
+Compile 103/103**，逐条与 DataFusion 比对。
+
+新增或改造覆盖：多实例输入不丢不重及 chunk 大小；每个实例只交接一次 End；
+Flush 重用、ordered 前缀、Stop 唤醒 pending read；idle/空输入；source 和 local
+sink 的错误、panic、取消；共享分区被两个读取方同时读取只计算一次并释放输入；
+空 grouping set 与 rollup；单规格字符串窗口、无 PARTITION BY 和多规格回退；
+排序相等键、NULL、升降序、fetch 及未读取范围的计算计数；DataFusion runtime
+中直接拉取和释放 stream。
+
+并行领取改变浮点聚合的合并顺序，标准差可能出现约 1e-12 的末位差异。
+对应测试现在对每种模式与 worker 数分别验证数学参考值；Decimal SUM/AVG 仍严格
+相等，标准差沿用原先参考值检查的 1e-9 相对容差。
+
+### 9.3 分阶段性能
+
+Apple M4 Pro，Rust 1.95.0，内核 LLVM 19.1.7，锁定依赖、默认 release profile、
+同一 SF1 Parquet 数据。每种配置重复 3 次，选最快一次的 Roc 总耗时，并保留该次
+translate/build/execute 分项。1/4 worker 分别对应 1/4 runtime threads；本任务的
+构建、测试和查询计时不重叠。环境、原始记录、复跑脚本和可应用到基线的中间阶段
+patch 见 [`benches/source_parallelism`](../benches/source_parallelism/README.md)。
+
+以下为首轮完整矩阵，单位 ms，**基线 → 最终版（总耗时变化）**：
+
+| 查询 | ZeroCompile / 1 | ZeroCompile / 4 | Compile / 1 | Compile / 4 |
+| --- | ---: | ---: | ---: | ---: |
+| q23a | 3423.6 → 3516.5 (+2.7%) | 1078.6 → 1016.2 (-5.8%) | 3486.3 → 3599.6 (+3.2%) | 1269.2 → 1227.0 (-3.3%) |
+| q23b | 3400.1 → 3374.3 (-0.8%) | 1031.2 → 1027.2 (-0.4%) | 3646.6 → 3581.4 (-1.8%) | 1218.9 → 1242.1 (+1.9%) |
+| q47 | 1017.0 → 846.2 (-16.8%) | 310.8 → 292.8 (-5.8%) | 1107.4 → 1003.4 (-9.4%) | 479.9 → 457.8 (-4.6%) |
+| q51 | 628.1 → 470.5 (-25.1%) | 200.5 → 144.1 (-28.1%) | 709.8 → 459.3 (-35.3%) | 220.0 → 173.7 (-21.0%) |
+| q57 | 327.4 → 309.0 (-5.6%) | 112.2 → 94.7 (-15.6%) | 500.7 → 456.6 (-8.8%) | 268.3 → 246.4 (-8.2%) |
+| q67 | 1438.6 → 1253.3 (-12.9%) | 506.1 → 526.9 (+4.1%) | 1585.1 → 1289.3 (-18.7%) | 550.8 → 564.1 (+2.4%) |
+| 高基数 GROUP BY | 72.2 → 73.0 (+1.1%) | 25.7 → 25.7 (+0.0%) | 82.3 → 73.4 (-10.8%) | 21.4 → 27.0 (+26.2%) |
+| ORDER BY … LIMIT 100 | 83.7 → 83.0 (-0.8%) | 30.7 → 27.9 (-9.1%) | 86.6 → 87.9 (+1.5%) | 29.6 → 29.1 (-1.7%) |
+
+同一轮的 4-worker ZeroCompile 分阶段结果：
+
+| 阶段 | q51 | q67 | 高基数 GROUP BY | ORDER BY … LIMIT |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | 200.5 | 506.1 | 25.7 | 30.7 |
+| instances | 220.9 | 753.0 | 30.9 | 45.0 |
+| aggregate | 198.9 | 644.5 | 27.2 | 43.6 |
+| window | 147.7 | 720.8 | 31.9 | 49.8 |
+| sort | 145.4 | 725.2 | 35.9 | 41.9 |
+| final | 144.1 | 526.9 | 25.7 | 27.9 |
+
+这些是累计阶段，不是隔离微基准。仅改实例调度并没有带来整体收益；单规格 Window
+下推对 q51 的收益明显，DataFusion 直接拉取则消除了大部分调度迁移后的 q67 回退。
+高基数聚合与 top-k 查询仍需结合复测判断。收尾工作移到 source 后，`sink_finish_ms`
+的减少不等于计算消失；判断效果使用 Roc 总耗时和 execute 耗时。
+
+
+### 9.4 交替复测与结论
+
+完整矩阵之后，额外运行两轮 4-worker 基线/最终版交替复测；第一轮最终版先跑，第二轮
+基线先跑。每个点仍为三次中最快一次，下表取两轮这些值的中位数，单位 ms。
+全部 64 个复测配置通过结果校验，原始文件以 `recheck1-` / `recheck2-` 开头。
+
+| 查询 | ZeroCompile 基线 → 最终 | 变化 | Compile 基线 → 最终 | 变化 |
+| --- | ---: | ---: | ---: | ---: |
+| q23a | 1015.2 → 1057.2 | +4.1% | 1202.4 → 1213.3 | +0.9% |
+| q23b | 987.6 → 1025.8 | +3.9% | 1201.1 → 1245.5 | +3.7% |
+| q47 | 303.9 → 291.6 | -4.0% | 444.8 → 444.9 | +0.0% |
+| q51 | 201.6 → 144.2 | -28.5% | 212.8 → 161.6 | -24.1% |
+| q57 | 110.3 → 98.0 | -11.2% | 258.9 → 246.2 | -4.9% |
+| q67 | 498.9 → 530.4 | +6.3% | 521.2 → 557.5 | +7.0% |
+| 高基数 GROUP BY | 22.1 → 26.9 | +21.2% | 21.7 → 26.0 | +19.8% |
+| ORDER BY … LIMIT 100 | 30.2 → 28.9 | -4.6% | 30.1 → 29.6 | -1.3% |
+
+主要收益集中在需要整表窗口物化的 q51：耗时减少约 24–29%；q57 减少约 5–11%。
+q47 的 ZeroCompile 有小幅收益，Compile 持平。q23 约增加 1–4%，q67 约增加 6–7%。
+高基数聚合的回退约 20%，绝对增加约 4–5 ms；两轮复测都存在，不能归为首轮噪声。
+ORDER BY … LIMIT 的差异较小：本查询已有 local top-k，按需范围归并的额外节省有限。
+
+因此，本实现完成并行 source 与按需收尾的结构目标，但目前只支持“窗口场景明显受益”
+这一性能结论。对高基数 GROUP BY 应保留回退记录，后续再定位扫描、实例调度和 merge
+的占比；本轮没有为消除单项回退而增加 eager/inline 特殊路径。单 worker 的数字仅有
+首轮完整矩阵，未做两轮交替复测。未采集峰值 RSS，也未验证专门的 IO 延迟负载，不能
+把设计预期当成已测的内存或公平性收益。

@@ -21,6 +21,7 @@ use futures::future::BoxFuture;
 pub(crate) mod aggregate;
 mod buffer;
 mod exchange;
+mod partitioned;
 mod scan;
 pub mod sort;
 mod table;
@@ -29,6 +30,7 @@ pub mod window;
 pub use aggregate::{AggregateExecuteState, AggregateSinkExec, AggregateSourceExec};
 pub use buffer::{Buffer, BufferSinkExec, BufferSourceExec, Finish, finish};
 pub use exchange::{ExchangeSinkExec, ExchangeSourceExec};
+pub use partitioned::{PartitionedResult, PartitionedSourceExec};
 pub use scan::ScanExec;
 pub use table::TableSinkExec;
 
@@ -37,12 +39,53 @@ pub trait SourceExec: Send + 'static {
     fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
         Ok(())
     }
-    fn next_batch<'a>(
+    /// Construct one cursor per instance after start. Cursors share input claims.
+    fn local_source(&self, ctx: &LocalSourceContext) -> Result<Box<dyn LocalSource>>;
+    fn finish<'a>(&'a mut self, _guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+pub struct LocalSourceContext {
+    pub batch_rows: usize,
+    pub instances: usize,
+}
+
+pub trait LocalSource: Send + 'static {
+    /// Return at most batch_rows rows, or None when this instance is exhausted.
+    fn next<'a>(
         &'a mut self,
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>>;
-    fn finish<'a>(&'a mut self, _guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
+}
+
+/// Slices a claimed chunk without copying Arrow buffers.
+#[derive(Default)]
+pub(crate) struct BatchSlices {
+    batch: Option<RecordBatch>,
+    offset: usize,
+}
+impl BatchSlices {
+    pub fn set(&mut self, batch: RecordBatch) {
+        self.batch = Some(batch);
+        self.offset = 0;
+    }
+    pub fn next(&mut self, rows: usize) -> Option<RecordBatch> {
+        let batch = self.batch.as_ref()?;
+        let count = rows.min(batch.num_rows() - self.offset);
+        if count == 0 {
+            self.batch = None;
+            return None;
+        }
+        if self.offset == 0 && count == batch.num_rows() {
+            return self.batch.take();
+        }
+        let out = batch.slice(self.offset, count);
+        self.offset += count;
+        if self.offset == batch.num_rows() {
+            self.batch = None;
+        }
+        Some(out)
     }
 }
 
@@ -53,7 +96,7 @@ pub enum ConsumeStatus {
     End,
     /// Hand off local data, then continue receiving input.
     Flush,
-    /// Stop dispatching new input to the entire pipeline.
+    /// Stop reading new input across the entire pipeline.
     Stop,
 }
 
@@ -71,7 +114,7 @@ impl<'a> StateContext<'a> {
         self.local.state_mut(id)?.get_mut()
     }
 
-    /// Moves a slot out at End, in local finish or coordinator consume.
+    /// Moves a slot out at End, in local finish or global consume.
     /// No later Program run may use this instance.
     pub fn take<T: 'static>(&mut self, id: StateId) -> Result<T> {
         self.local
@@ -156,11 +199,11 @@ pub async fn run_all<T: Send + 'static>(
         .collect()
 }
 
-/// Exclusively owned by one execution instance; called inside CPU jobs.
+/// Exclusively owned and called by one async execution instance.
 pub trait LocalSink: Send + 'static {
     /// Called exactly once after each run, including runs without output.
     /// End promises capacity for another batch_rows input rows; otherwise
-    /// return Flush so the coordinator can reset the instance first.
+    /// return Flush so the global sink can reset the instance first.
     fn consume(
         &mut self,
         chunk: Option<RecordBatch>,
@@ -187,7 +230,7 @@ pub trait SinkExec: Send + 'static {
 
     fn local_sink(&self, ctx: &LocalSinkContext) -> Result<Box<dyn LocalSink>>;
 
-    /// Take prepared data on the coordinator. Flush/Stop must restore local
+    /// Take prepared data under the pipeline's async lock. Flush/Stop restore local
     /// data and kernel slots for reuse; every instance later hands off End.
     fn consume<'a>(
         &'a mut self,

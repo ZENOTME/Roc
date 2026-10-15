@@ -144,7 +144,13 @@ fn sources_observe_the_callers_shared_shutdown_without_forwarding() {
         same_execution.start(&guard).unwrap();
         other_execution.start(&other_guard).unwrap();
         block_on(async {
-            let mut next = pin!(worker.next_batch(&guard));
+            let mut local = worker
+                .local_source(&roc::exec::LocalSourceContext {
+                    batch_rows: 2048,
+                    instances: 1,
+                })
+                .unwrap();
+            let mut next = pin!(local.next(&guard));
             assert!(poll!(&mut next).is_pending());
             shutdown.request_shutdown();
             // Service observers see the request before the executor is polled.

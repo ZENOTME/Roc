@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::SourceExec;
+use super::{BatchSlices, LocalSource, LocalSourceContext, SourceExec};
 use crate::arrow::record_batch::RecordBatch;
 use crate::{
     error::{Error, Result, ResultExt},
@@ -25,7 +25,6 @@ use std::{future::Future, sync::Arc, task::Poll};
 pub struct ScanExec<StorageTaskDesc> {
     operator: ScanOperator<StorageTaskDesc>,
     handle: Option<Arc<dyn ScanHandle>>,
-    consumer: Option<Box<dyn ScanConsumer>>,
 }
 
 impl<StorageTaskDesc> ScanExec<StorageTaskDesc> {
@@ -33,7 +32,6 @@ impl<StorageTaskDesc> ScanExec<StorageTaskDesc> {
         Self {
             operator,
             handle: None,
-            consumer: None,
         }
     }
 }
@@ -54,30 +52,49 @@ where
                 guard.clone(),
             ))
             .with_location()?;
-        self.consumer = Some(handle.consumer());
         self.handle = Some(handle);
         Ok(())
     }
     fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            self.consumer.take();
             if let Some(handle) = self.handle.take() {
                 handle.finish().await.with_location()?;
             }
             Ok(())
         })
     }
-    fn next_batch<'a>(
+    fn local_source(&self, ctx: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(ScanLocalSource {
+            consumer: self
+                .handle
+                .as_ref()
+                .ok_or_else(|| Error::internal("scan is not started".into()))?
+                .consumer(),
+            slices: BatchSlices::default(),
+            batch_rows: ctx.batch_rows,
+        }))
+    }
+}
+
+struct ScanLocalSource {
+    consumer: Box<dyn ScanConsumer>,
+    slices: BatchSlices,
+    batch_rows: usize,
+}
+impl LocalSource for ScanLocalSource {
+    fn next<'a>(
         &'a mut self,
         shutdown_guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
+            if shutdown_guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            if let Some(batch) = self.slices.next(self.batch_rows) {
+                return Ok(Some(batch));
+            }
             let cancelled = shutdown_guard.shutdown_requested();
-            let next = self
-                .consumer
-                .as_mut()
-                .ok_or_else(|| Error::internal("scan is not started".into()))?
-                .next();
+            let next = self.consumer.next();
             futures::pin_mut!(cancelled, next);
             futures::future::poll_fn(|cx| {
                 // Preserve cancellation priority on every poll, including when
@@ -98,6 +115,15 @@ where
                 }
             })
             .await
+            .map(|batch| {
+                batch.map(|batch| {
+                    if batch.num_rows() == 0 {
+                        return batch;
+                    }
+                    self.slices.set(batch);
+                    self.slices.next(self.batch_rows).unwrap()
+                })
+            })
         })
     }
 }
@@ -110,16 +136,6 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         task::Context,
     };
-
-    struct TestHandle;
-    impl ScanHandle for TestHandle {
-        fn consumer(&self) -> Box<dyn ScanConsumer> {
-            unreachable!("the test constructs its consumer directly")
-        }
-        fn finish(&self) -> BoxFuture<'_, Result<()>> {
-            Box::pin(async { Ok(()) })
-        }
-    }
 
     struct PendingThenReady {
         polls: Arc<AtomicUsize>,
@@ -140,18 +156,11 @@ mod tests {
         }
     }
 
-    struct TestStorage;
-    impl crate::operator::ScanStorage for TestStorage {
-        type StorageTaskDesc = ();
-        fn start_scan(&self, _: ScanRequest<()>) -> Result<Arc<dyn ScanHandle>> {
-            unreachable!()
-        }
-    }
-    fn executor(consumer: PendingThenReady) -> ScanExec<()> {
-        ScanExec {
-            operator: ScanOperator::new((), Arc::new(TestStorage), vec![]),
-            consumer: Some(Box::new(consumer)),
-            handle: Some(Arc::new(TestHandle)),
+    fn executor(consumer: PendingThenReady) -> ScanLocalSource {
+        ScanLocalSource {
+            consumer: Box::new(consumer),
+            slices: BatchSlices::default(),
+            batch_rows: 2048,
         }
     }
 
@@ -163,7 +172,7 @@ mod tests {
             polls: polls.clone(),
             shutdown_during_poll: None,
         });
-        let mut next = executor.next_batch(&guard);
+        let mut next = executor.next(&guard);
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         assert!(next.as_mut().poll(&mut cx).is_pending());
@@ -183,7 +192,7 @@ mod tests {
             polls: polls.clone(),
             shutdown_during_poll: Some(shutdown),
         });
-        let mut next = executor.next_batch(&guard);
+        let mut next = executor.next(&guard);
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         assert!(matches!(

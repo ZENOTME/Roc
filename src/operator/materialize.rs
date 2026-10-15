@@ -22,7 +22,8 @@ use crate::arrow::{
 };
 use crate::column::ColumnId;
 use crate::exec::{
-    Buffer, BufferSinkExec, BufferSourceExec, Finish, SinkExec,
+    Buffer, BufferSinkExec, BufferSourceExec, Finish, PartitionedResult, PartitionedSourceExec,
+    SinkExec,
     sort::{SortKey, SortSinkExec},
     window::{Window, WindowFrame, WindowFunction, WindowSinkExec},
 };
@@ -140,10 +141,12 @@ impl Operator for SortOperator {
             })
             .collect::<Vec<_>>();
         let fetch = self.fetch;
-        let buffer = Arc::new(Buffer::default());
+        let buffer = Arc::new(PartitionedResult::default());
         let sink = SortSinkExec::new(buffer.clone(), schema, keys, fetch);
         materialize(child, current, graph, &self.columns, sink)?;
-        read(buffer, current, graph, &self.columns)?;
+        graph
+            .pipeline_mut(current)?
+            .set_source(Box::new(PartitionedSourceExec::new(buffer)), &self.columns)?;
         graph.pipeline_mut(current)?.set_ordered();
         Ok(())
     }
@@ -465,10 +468,12 @@ impl Operator for WindowOperator {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let buffer = Arc::new(Buffer::default());
+        let buffer = Arc::new(PartitionedResult::default());
         let sink = WindowSinkExec::new(buffer.clone(), schema, windows);
         materialize(child, current, graph, &self.columns, sink)?;
-        read(buffer, current, graph, &outputs)?;
+        graph
+            .pipeline_mut(current)?
+            .set_source(Box::new(PartitionedSourceExec::new(buffer)), &outputs)?;
         Ok(())
     }
 }

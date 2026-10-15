@@ -561,3 +561,27 @@ async fn reset_failure_is_reported_and_releases_shutdown_guard() {
         .await
         .expect("failed scan initialization leaked its shutdown guard");
 }
+
+#[tokio::test]
+async fn runtime_consumers_pull_directly_and_release_streams_without_background_decoders() {
+    let (_shutdown, guard) = asyncband::shutdown::new();
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let handle = DataFusionStorage
+        .start_scan(ScanRequest::new(
+            test_scan(Mode::BatchThenPending, dropped.clone()),
+            guard,
+        ))
+        .unwrap();
+    let mut consumer = handle.consumer();
+    {
+        let mut next = consumer.next();
+        assert!(matches!(
+            futures::poll!(&mut next),
+            Poll::Ready(Ok(Some(_)))
+        ));
+    }
+    // Dropping an instance immediately drops the stream, even with Tokio active.
+    drop(consumer);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    handle.finish().await.unwrap();
+}

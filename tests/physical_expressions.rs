@@ -519,14 +519,20 @@ async fn scan_forwards_host_task_and_preserves_storage_batches_and_cancellation(
     ));
     let (shutdown, shutdown_guard) = asyncband::shutdown::new();
     exec.start(&shutdown_guard).unwrap();
+    let mut local = exec
+        .local_source(&roc::exec::LocalSourceContext {
+            batch_rows: 2048,
+            instances: 1,
+        })
+        .unwrap();
     assert_eq!(
-        exec.next_batch(&shutdown_guard).await.unwrap().unwrap(),
+        local.next(&shutdown_guard).await.unwrap().unwrap(),
         expected
     );
-    assert!(exec.next_batch(&shutdown_guard).await.unwrap().is_none());
+    assert!(local.next(&shutdown_guard).await.unwrap().is_none());
     shutdown.request_shutdown();
     assert!(matches!(
-        exec.next_batch(&shutdown_guard).await,
+        local.next(&shutdown_guard).await,
         Err(ref error) if error.kind() == ErrorKind::Cancelled
     ));
     exec.finish(&shutdown_guard).await.unwrap();

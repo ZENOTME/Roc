@@ -17,7 +17,8 @@
 //! values in the original row order.
 use super::sort::{RowKeys, SortKey};
 use super::{
-    Buffer, ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, StateContext, downcast_local,
+    ConsumeStatus, LocalSink, LocalSinkContext, PartitionedResult, SinkExec, StateContext,
+    downcast_local,
 };
 use crate::arrow::{
     array::ArrayRef,
@@ -151,14 +152,14 @@ struct WindowRun {
 }
 
 pub struct WindowSinkExec {
-    buffer: Arc<Buffer>,
+    buffer: Arc<PartitionedResult>,
     schema: SchemaRef,
     windows: Vec<Window>,
     specs: Arc<Vec<Spec>>,
     runs: Vec<WindowRun>,
 }
 impl WindowSinkExec {
-    pub fn new(buffer: Arc<Buffer>, schema: SchemaRef, windows: Vec<Window>) -> Self {
+    pub fn new(buffer: Arc<PartitionedResult>, schema: SchemaRef, windows: Vec<Window>) -> Self {
         let mut specs: Vec<Spec> = vec![];
         for (i, w) in windows.iter().enumerate() {
             let partition = w
@@ -231,6 +232,9 @@ impl SinkExec for WindowSinkExec {
         cpu: &'a dyn super::Cpu,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if self.specs.len() == 1 {
+                return self.publish_buckets(guard);
+            }
             let runs = Arc::new(std::mem::take(&mut self.runs));
             let mut chunks = vec![];
             let mut bases = vec![];
@@ -243,7 +247,7 @@ impl SinkExec for WindowSinkExec {
             }
             let rows = locations.len();
             if rows == 0 {
-                return Ok(());
+                return self.buffer.publish(vec![], guard);
             }
             let bases = Arc::new(bases);
             let locations = Arc::new(locations);
@@ -382,9 +386,154 @@ impl SinkExec for WindowSinkExec {
             if guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
-            self.buffer.0.lock().unwrap().push(out);
-            Ok(())
+            self.buffer
+                .publish(vec![Box::new(move |_| Ok(vec![out]))], guard)
         })
+    }
+}
+
+// Payload and encoded keys stay shared until the last bucket that uses them
+// finishes. Bucket row orders move into individual work units and are freed
+// immediately after consumption; no global scatter or payload concat is needed.
+struct WindowData {
+    chunks: Vec<RecordBatch>,
+    ends: Vec<usize>,
+    parts: RowKeys,
+    orders: RowKeys,
+}
+struct WindowBucket {
+    runs: Vec<(Arc<WindowData>, Vec<usize>)>,
+    schema: SchemaRef,
+    windows: Arc<Vec<Window>>,
+}
+impl WindowBucket {
+    fn compute(self, guard: &ShutdownGuard) -> Result<RecordBatch> {
+        let orders = self
+            .runs
+            .iter()
+            .map(|(_, rows)| rows.as_slice())
+            .collect::<Vec<_>>();
+        let sorted = super::sort::merge_sorted(
+            &orders,
+            |run, row| {
+                (
+                    self.runs[run].0.parts.row(row),
+                    self.runs[run].0.orders.row(row),
+                )
+            },
+            usize::MAX,
+            guard,
+        )?;
+        let mut chunks = vec![];
+        let mut bases = vec![];
+        for (data, _) in &self.runs {
+            bases.push(chunks.len());
+            chunks.extend(data.chunks.iter().cloned());
+        }
+        let mut locations = Vec::with_capacity(sorted.len());
+        for (i, &(run, row)) in sorted.iter().enumerate() {
+            if i % 4096 == 0 && guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            let ends = &self.runs[run].0.ends;
+            let chunk = ends.partition_point(|&end| end <= row);
+            locations.push((
+                bases[run] + chunk,
+                row - if chunk == 0 { 0 } else { ends[chunk - 1] },
+            ));
+        }
+        let inputs = self.schema.fields().len() - self.windows.len();
+        let input_schema = Arc::new(crate::arrow::datatypes::Schema::new(
+            self.schema.fields()[..inputs].to_vec(),
+        ));
+        let batch = super::sort::interleave_chunks(&input_schema, &chunks, &locations, guard)?;
+        let parts = |r: usize| {
+            let (run, row) = sorted[r];
+            self.runs[run].0.parts.row(row)
+        };
+        let orders = |r: usize| {
+            let (run, row) = sorted[r];
+            self.runs[run].0.orders.row(row)
+        };
+        let identity = (0..sorted.len()).collect::<Vec<_>>();
+        let mut columns = batch.columns().to_vec();
+        for w in self.windows.iter() {
+            let argument = w
+                .argument
+                .map(|c| scalar::decode(batch.column(c)))
+                .transpose()?;
+            let computed = values(
+                &identity,
+                &parts,
+                &orders,
+                w,
+                argument.as_deref(),
+                w.argument.map(|c| batch.column(c).data_type()),
+                guard,
+            )?;
+            columns.push(scalar::encode(&w.output, &computed)?);
+        }
+        RecordBatch::try_new_with_options(
+            self.schema,
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(sorted.len())),
+        )
+        .map_err(|source| {
+            Error::invalid_plan("window outputs do not match their columns".into())
+                .with_source(source)
+        })
+    }
+}
+impl WindowSinkExec {
+    fn publish_buckets(&mut self, guard: &ShutdownGuard) -> Result<()> {
+        let mut buckets: Vec<Vec<(Arc<WindowData>, Vec<usize>)>> = vec![];
+        for run in std::mem::take(&mut self.runs) {
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            let mut key = run.keys.into_iter().next().expect("one specification");
+            if buckets.is_empty() {
+                buckets.resize_with(key.sorted.len(), Vec::new);
+            }
+            if buckets.len() != key.sorted.len() {
+                return Err(Error::internal("inconsistent window partitions".into()));
+            }
+            let mut rows = 0;
+            let ends = run
+                .chunks
+                .iter()
+                .map(|c| {
+                    rows += c.num_rows();
+                    rows
+                })
+                .collect();
+            let data = Arc::new(WindowData {
+                chunks: run.chunks,
+                ends,
+                parts: key.parts,
+                orders: key.orders,
+            });
+            for (bucket, order) in buckets.iter_mut().zip(std::mem::take(&mut key.sorted)) {
+                if !order.is_empty() {
+                    bucket.push((data.clone(), order));
+                }
+            }
+        }
+        let windows = Arc::new(self.windows.clone());
+        let work = buckets
+            .into_iter()
+            .filter(|runs| !runs.is_empty())
+            .map(|runs| {
+                let bucket = WindowBucket {
+                    runs,
+                    schema: self.schema.clone(),
+                    windows: windows.clone(),
+                };
+                Box::new(move |guard: &ShutdownGuard| Ok(vec![bucket.compute(guard)?]))
+                    as super::partitioned::PartitionWork
+            })
+            .collect();
+        self.buffer.publish(work, guard)
     }
 }
 
@@ -689,7 +838,7 @@ mod tests {
             for (instances, partitions) in
                 [1, 3].into_iter().flat_map(|i| [1, 2, 8].map(|p| (i, p)))
             {
-                let buffer = Arc::new(Buffer::default());
+                let buffer = Arc::new(PartitionedResult::default());
                 let mut sink = WindowSinkExec::new(buffer.clone(), schema.clone(), windows.clone());
                 let guard = asyncband::shutdown::new().1;
                 let mut locals = (0..instances)
@@ -727,12 +876,12 @@ mod tests {
                     .unwrap();
                 }
                 block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
-                let chunks = buffer.0.lock().unwrap();
+                let chunks = buffer.read_all(&guard);
                 if rows == 0 {
                     assert!(chunks.is_empty());
                     continue;
                 }
-                let batch = &chunks[0];
+                let batch = &arrow_select::concat::concat_batches(&schema, &chunks).unwrap();
                 let col = |c: usize, r| {
                     batch
                         .column(c)
@@ -821,7 +970,7 @@ mod tests {
         );
         let schema = Arc::new(Schema::new(fields));
         for partitions in [1, 2, 8] {
-            let buffer = Arc::new(Buffer::default());
+            let buffer = Arc::new(PartitionedResult::default());
             let mut sink = WindowSinkExec::new(buffer.clone(), schema.clone(), windows.clone());
             assert_eq!(sink.specs.len(), 2);
             let guard = asyncband::shutdown::new().1;
@@ -862,8 +1011,8 @@ mod tests {
                 .unwrap();
             }
             block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
-            let output = buffer.0.lock().unwrap();
-            let out = &output[0];
+            let output = buffer.read_all(&guard);
+            let out = &arrow_select::concat::concat_batches(&schema, &output).unwrap();
             let ids = out.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
             let sums = out.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
             for r in 0..24 {
@@ -881,6 +1030,123 @@ mod tests {
                     assert_eq!((!a.is_null(r)).then(|| a.value(r)), expected.as_deref());
                 }
                 assert_eq!(sums.value(r), id * (id + 1) / 2);
+            }
+        }
+    }
+    #[test]
+    fn single_spec_is_lazy_and_gathers_string_values_without_scatter() {
+        use crate::arrow::array::{Array, StringArray};
+        for global in [false, true] {
+            let input_schema = Arc::new(Schema::new(vec![
+                Field::new("p", DataType::Int64, false),
+                Field::new("id", DataType::Int64, false),
+                Field::new("v", DataType::Utf8, true),
+            ]));
+            let input = RecordBatch::try_new(
+                input_schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from_iter_values((0..64).map(|i| i % 7))),
+                    Arc::new(Int64Array::from_iter_values(0..64)),
+                    Arc::new(StringArray::from_iter(
+                        (0..64).map(|i| (i % 5 != 0).then(|| format!("value-{i:03}"))),
+                    )),
+                ],
+            )
+            .unwrap();
+            let windows = [WindowFunction::Max, WindowFunction::Count]
+                .into_iter()
+                .map(|function| Window {
+                    function,
+                    argument: if function == WindowFunction::Max {
+                        Some(2)
+                    } else {
+                        None
+                    },
+                    partition: if global { vec![] } else { vec![0] },
+                    order: vec![SortKey {
+                        column: 1,
+                        descending: false,
+                        nulls_first: true,
+                    }],
+                    frame: WindowFrame::RowsToCurrent,
+                    output: if function == WindowFunction::Max {
+                        DataType::Utf8
+                    } else {
+                        DataType::Int64
+                    },
+                })
+                .collect();
+            let mut fields = input_schema.fields().to_vec();
+            fields.extend([
+                Arc::new(Field::new("max", DataType::Utf8, true)),
+                Arc::new(Field::new("count", DataType::Int64, false)),
+            ]);
+            let schema = Arc::new(Schema::new(fields));
+            let result = Arc::new(PartitionedResult::default());
+            let mut sink = WindowSinkExec::new(result.clone(), schema.clone(), windows);
+            let guard = asyncband::shutdown::new().1;
+            let mut state = LocalState::default();
+            let mut locals = (0..3)
+                .map(|_| {
+                    sink.local_sink(&LocalSinkContext {
+                        batch_rows: 2,
+                        partitions: 8,
+                    })
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            for (i, offset) in (0..64).step_by(2).enumerate() {
+                locals[i % 3]
+                    .consume(
+                        Some(input.slice(offset, 2)),
+                        &mut StateContext::new(&mut state),
+                    )
+                    .unwrap();
+            }
+            for mut local in locals {
+                local
+                    .finish(
+                        ConsumeStatus::End,
+                        &mut StateContext::new(&mut state),
+                        &guard,
+                    )
+                    .unwrap();
+                block_on(sink.consume(
+                    ConsumeStatus::End,
+                    &mut *local,
+                    StateContext::new(&mut state),
+                    &guard,
+                ))
+                .unwrap();
+            }
+            block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
+            assert_eq!(result.computed_parts(), 0);
+            if global {
+                assert_eq!(result.part_count(), 1);
+            }
+            let chunks = result.read_all(&guard);
+            assert_eq!(chunks.iter().map(RecordBatch::num_rows).sum::<usize>(), 64);
+            for out in chunks {
+                let ids = out.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+                let max = out
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let count = out.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+                for r in 0..out.num_rows() {
+                    let id = ids.value(r);
+                    let part = (0..=id)
+                        .filter(|&i| global || i % 7 == id % 7)
+                        .collect::<Vec<_>>();
+                    let expected = part
+                        .iter()
+                        .filter(|&&i| i % 5 != 0)
+                        .map(|i| format!("value-{i:03}"))
+                        .max();
+                    assert_eq!((!max.is_null(r)).then(|| max.value(r)), expected.as_deref());
+                    assert_eq!(count.value(r), part.len() as i64);
+                }
             }
         }
     }

@@ -1,0 +1,149 @@
+{
+  "date": "2026-10-15",
+  "host": "Apple M4 Pro",
+  "target": "aarch64-apple-darwin",
+  "rust": "1.95.0 (59807616e 2026-04-14)",
+  "kernel_llvm": "19.1.7",
+  "baseline": "cc7d80382f80e7e25fbcb1b095bc04b7c46b0e50",
+  "data": "/Users/dongzejiong/Project/roc-data/tpcds/sf1",
+  "method": "Default locked release build. Best of three validated repetitions. Workers equal runtime threads (1 or 4). No overlapping task builds, tests, profiling or query runs during timing.",
+  "stages": {
+    "instances": "Async LocalSource instances; eager finalizers",
+    "aggregate": "+ lazy aggregate merge",
+    "window": "+ lazy single-spec windows",
+    "sort": "+ lazy sort ranges",
+    "final": "+ direct DataFusion partition pulls"
+  },
+  "checkpoint_note": "Cumulative patches against baseline. The common partitioned.rs file includes later test-only additions; production code matches the aggregate/window/sort checkpoints.",
+  "cargo_lock_sha256": "ea5ca08b7c751bce4d74080484d8959291883c01d6a6890ed57dada09ae1ed3c",
+  "binary_sha256": {
+    "baseline": "1a837d0060788455d7c67d890267dbacafcec93592f9642adc558f028be5c163",
+    "instances": "45578a6f96ccd6ff5818f529333e8a143bd83b036bd78acfc3ac464eda7d43fd",
+    "aggregate": "b9cc42f29adea43d2660fd4f284ee499050a8559d986b63ed8da8b6813c1f3e6",
+    "window": "29d3188e478099f7ada144075b21a273ac630a1d569e288b41956481fcdc6794",
+    "sort": "25f863c2dcbd0591967dec88efedb8b08daacd14345add185ce258f231f193b1",
+    "final": "f8fa28d1d2f49f15c7a0aaee9a90568713b092139cb25834cad0aca6a8fd7558"
+  },
+  "workspace_tests_passed": 198,
+  "checkpoints_apply_check": "all four cumulative patches apply to the baseline",
+  "sf1_validation": {
+    "zero": "103/103",
+    "compile": "103/103"
+  },
+  "validated_matrix_configurations": 256,
+  "recheck_method": "Two extra rounds, best of three each. Final first in round 1, baseline first in round 2. Report median of the two per-round results.",
+  "rechecks": [
+    {
+      "query": "q23a",
+      "mode": "zero",
+      "baseline_ms": 1015.2,
+      "final_ms": 1057.25,
+      "change_percent": 4.142040977147365
+    },
+    {
+      "query": "q23a",
+      "mode": "compile",
+      "baseline_ms": 1202.4,
+      "final_ms": 1213.35,
+      "change_percent": 0.9106786427145463
+    },
+    {
+      "query": "q23b",
+      "mode": "zero",
+      "baseline_ms": 987.65,
+      "final_ms": 1025.8,
+      "change_percent": 3.86270439933174
+    },
+    {
+      "query": "q23b",
+      "mode": "compile",
+      "baseline_ms": 1201.0500000000002,
+      "final_ms": 1245.5,
+      "change_percent": 3.7009283543565807
+    },
+    {
+      "query": "q47",
+      "mode": "zero",
+      "baseline_ms": 303.95,
+      "final_ms": 291.65,
+      "change_percent": -4.046718210231948
+    },
+    {
+      "query": "q47",
+      "mode": "compile",
+      "baseline_ms": 444.8,
+      "final_ms": 444.85,
+      "change_percent": 0.011241007194251473
+    },
+    {
+      "query": "q51",
+      "mode": "zero",
+      "baseline_ms": 201.55,
+      "final_ms": 144.15,
+      "change_percent": -28.479285537087573
+    },
+    {
+      "query": "q51",
+      "mode": "compile",
+      "baseline_ms": 212.75,
+      "final_ms": 161.55,
+      "change_percent": -24.06580493537015
+    },
+    {
+      "query": "q57",
+      "mode": "zero",
+      "baseline_ms": 110.30000000000001,
+      "final_ms": 98.0,
+      "change_percent": -11.151405258386227
+    },
+    {
+      "query": "q57",
+      "mode": "compile",
+      "baseline_ms": 258.85,
+      "final_ms": 246.25,
+      "change_percent": -4.86768398686499
+    },
+    {
+      "query": "q67",
+      "mode": "zero",
+      "baseline_ms": 498.95,
+      "final_ms": 530.4,
+      "change_percent": 6.30323679727427
+    },
+    {
+      "query": "q67",
+      "mode": "compile",
+      "baseline_ms": 521.25,
+      "final_ms": 557.5,
+      "change_percent": 6.95443645083933
+    },
+    {
+      "query": "groups",
+      "mode": "zero",
+      "baseline_ms": 22.15,
+      "final_ms": 26.85,
+      "change_percent": 21.218961625282184
+    },
+    {
+      "query": "groups",
+      "mode": "compile",
+      "baseline_ms": 21.7,
+      "final_ms": 26.0,
+      "change_percent": 19.81566820276499
+    },
+    {
+      "query": "limit",
+      "mode": "zero",
+      "baseline_ms": 30.25,
+      "final_ms": 28.85,
+      "change_percent": -4.6280991735537125
+    },
+    {
+      "query": "limit",
+      "mode": "compile",
+      "baseline_ms": 30.05,
+      "final_ms": 29.65,
+      "change_percent": -1.3311148086522562
+    }
+  ]
+}

@@ -269,7 +269,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        error::{Error, Result},
+        error::Result,
         exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
     };
     use asyncband::shutdown::ShutdownGuard;
@@ -278,17 +278,14 @@ mod tests {
     struct UnusedExec;
 
     impl SourceExec for UnusedExec {
-        fn next_batch<'a>(
-            &'a mut self,
-            _: &'a ShutdownGuard,
-        ) -> BoxFuture<'a, Result<Option<crate::arrow::record_batch::RecordBatch>>> {
-            Box::pin(async {
-                Err(Error::internal(
-                    "not executed in graph construction tests".into(),
-                ))
-            })
+        fn local_source(
+            &self,
+            _: &crate::exec::LocalSourceContext,
+        ) -> Result<Box<dyn crate::exec::LocalSource>> {
+            unreachable!("construction only")
         }
     }
+
     impl SinkExec for UnusedExec {
         fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
             unreachable!("construction only")

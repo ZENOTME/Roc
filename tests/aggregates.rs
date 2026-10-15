@@ -108,7 +108,7 @@ fn decimal(v: i128, scale: u32) -> String {
 }
 
 #[test]
-fn decimal_aggregates_and_stddev_merge_exactly() {
+fn decimal_aggregates_merge_exactly_and_stddev_within_roundoff() {
     let d = data(10_000);
     let mut p = plan(&d);
     let sum = p
@@ -143,7 +143,18 @@ fn decimal_aggregates_and_stddev_merge_exactly() {
     )
     .unwrap();
     let node = OperatorTreeNode::new(aggregate, vec![p.node]);
-    let rows = execute_all(&p.columns, &node).unwrap();
+    // Dynamic claims change floating-point merge order. Check every mode and
+    // worker count against the oracle, retaining exact decimal comparisons.
+    let results = [
+        roc::kernel::ExecutionMode::Compile,
+        roc::kernel::ExecutionMode::ZeroCompile,
+    ]
+    .into_iter()
+    .flat_map(|mode| [1, 4].into_iter().map(move |workers| (mode, workers)))
+    .map(|(mode, workers)| {
+        support::exec::rows(&support::exec::execute(&p.columns, &node, mode, workers).unwrap())
+    })
+    .collect::<Vec<_>>();
     let mut groups: BTreeMap<Option<&str>, (i128, i64, Vec<f64>)> = BTreeMap::new();
     for i in 0..d.group.len() {
         let g = groups.entry(d.group[i]).or_default();
@@ -155,23 +166,26 @@ fn decimal_aggregates_and_stddev_merge_exactly() {
             g.2.push(x);
         }
     }
-    let mut actual = rows;
-    actual.sort();
-    for row in &actual {
-        let key = (row[0] != "NULL").then_some(row[0].as_str());
-        let (sum, count, xs) = &groups[&key];
-        assert_eq!(row[1], decimal(*sum, 2), "{key:?}");
-        // AVG of decimal(7, 2) is decimal(11, 6): sum * 10^4 / count, truncated.
-        assert_eq!(row[2], decimal(sum * 10_000 / *count as i128, 6), "{key:?}");
-        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
-        let variance = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
-        let sd: f64 = row[3].parse().unwrap();
-        assert!(
-            (sd - variance.sqrt()).abs() < 1e-9 * sd.abs().max(1.0),
-            "{key:?}"
-        );
+    for rows in results {
+        let mut actual = rows;
+        actual.sort();
+        for row in &actual {
+            let key = (row[0] != "NULL").then_some(row[0].as_str());
+            let (sum, count, xs) = &groups[&key];
+            assert_eq!(row[1], decimal(*sum, 2), "{key:?}");
+            // AVG of decimal(7, 2) is decimal(11, 6): sum * 10^4 / count, truncated.
+            assert_eq!(row[2], decimal(sum * 10_000 / *count as i128, 6), "{key:?}");
+            let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+            let variance =
+                xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
+            let sd: f64 = row[3].parse().unwrap();
+            assert!(
+                (sd - variance.sqrt()).abs() < 1e-9 * sd.abs().max(1.0),
+                "{key:?}"
+            );
+        }
+        assert_eq!(actual.len(), groups.len());
     }
-    assert_eq!(actual.len(), groups.len());
 }
 
 #[test]

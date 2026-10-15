@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use super::{
-    ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext, downcast_local,
+    BatchSlices, ConsumeStatus, LocalSink, LocalSinkContext, LocalSource, LocalSourceContext,
+    SinkExec, SourceExec, StateContext, downcast_local,
 };
 use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::{
@@ -35,7 +36,7 @@ pub struct ExchangeSourceExec {
     exchange: ExchangeId,
     service: Arc<dyn ExchangeService>,
     handle: Option<Arc<dyn ExchangeHandle>>,
-    consumer: Option<Box<dyn ExchangeConsumer>>,
+    consumer: Option<Arc<asyncband::mutex::Mutex<Box<dyn ExchangeConsumer>>>>,
 }
 
 impl ExchangeSourceExec {
@@ -60,7 +61,7 @@ impl SourceExec for ExchangeSourceExec {
             .with_context(|| {
                 ErrorContext::new("exchange.start").field("exchange", self.exchange)
             })?;
-        self.consumer = Some(handle.consumer());
+        self.consumer = Some(Arc::new(asyncband::mutex::Mutex::new(handle.consumer())));
         self.handle = Some(handle);
         Ok(())
     }
@@ -75,25 +76,50 @@ impl SourceExec for ExchangeSourceExec {
             Ok(())
         })
     }
-    fn next_batch<'a>(
+    fn local_source(&self, ctx: &LocalSourceContext) -> Result<Box<dyn LocalSource>> {
+        Ok(Box::new(ExchangeLocalSource {
+            exchange: self.exchange,
+            consumer: self
+                .consumer
+                .clone()
+                .ok_or_else(|| Error::internal("exchange source is not started".into()))?,
+            slices: BatchSlices::default(),
+            batch_rows: ctx.batch_rows,
+        }))
+    }
+}
+struct ExchangeLocalSource {
+    exchange: ExchangeId,
+    consumer: Arc<asyncband::mutex::Mutex<Box<dyn ExchangeConsumer>>>,
+    slices: BatchSlices,
+    batch_rows: usize,
+}
+impl LocalSource for ExchangeLocalSource {
+    fn next<'a>(
         &'a mut self,
-        shutdown_guard: &'a ShutdownGuard,
+        guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<Option<RecordBatch>>> {
         Box::pin(async move {
-            let cancelled = shutdown_guard.shutdown_requested().fuse();
-            let next = self
-                .consumer
-                .as_mut()
-                .ok_or_else(|| Error::internal("exchange source is not started".into()))?
-                .next()
-                .fuse();
-            futures::pin_mut!(cancelled, next);
-            futures::select_biased! {
-                _ = cancelled => {
-                    Err(Error::cancelled())
-                },
-                batch = next => batch.with_context(|| ErrorContext::new("exchange.next").field("exchange", self.exchange)),
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
             }
+            if let Some(batch) = self.slices.next(self.batch_rows) {
+                return Ok(Some(batch));
+            }
+            let cancelled = guard.shutdown_requested().fuse();
+            let next = async { self.consumer.lock().await.next().await }.fuse();
+            futures::pin_mut!(cancelled, next);
+            let batch = futures::select_biased! {
+                _ = cancelled => return Err(Error::cancelled()),
+                batch = next => batch.with_context(|| ErrorContext::new("exchange.next").field("exchange", self.exchange))?,
+            };
+            Ok(batch.map(|batch| {
+                if batch.num_rows() == 0 {
+                    return batch;
+                }
+                self.slices.set(batch);
+                self.slices.next(self.batch_rows).unwrap()
+            }))
         })
     }
 }
