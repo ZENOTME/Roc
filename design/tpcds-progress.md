@@ -126,10 +126,11 @@ the why.
   join table builds (a job per column), buffer finishes: sorts (ranges
   sorted in jobs, then merged) and windows (rows split by partition-key
   hash, one job per part). The IR and the pipeline model are unchanged.
-  Open question for the maintainer: the alternative is to express these
-  finishes as pipelines of their own (e.g. a sort as range-sort and merge
-  pipelines), which keeps all scheduling in the pipeline graph but is a
-  larger change.
+  Under discussion, likely to be reverted: `finish_on` runs Rust closures
+  outside the kernel IR and schedules outside the pipeline graph. See
+  [`sink-parallelism.md`](sink-parallelism.md) for the analysis and the
+  options (parallel `combine` for aggregates; state kernels or
+  sub-operator pipelines for table builds, sorts and windows).
 - Lowering: decimal casts that cannot overflow skip their precision check.
 
 ## Known gaps and next steps
