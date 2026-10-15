@@ -126,25 +126,23 @@ the why.
   join table builds (a job per column), buffer finishes: sorts (ranges
   sorted in jobs, then merged) and windows (rows split by partition-key
   hash, one job per part). The IR and the pipeline model are unchanged.
-  Design decision, 2026-10-15 (implementation pending): rename
-  `ScalarKernel` / `DomainKernel` to `RowKernel` / `RowDomainKernel` to make
-  the row compute contracts for vectorization and fusion explicit. Keep one
-  Program per pipeline. Register a separate `KernelGraph.state_kernels`
-  list through the same KernelBuilder and StateIds; Program stores it
-  separately from Steps, outside row lowering/codegen. Effectful Append
-  collects rows into local state. Program::finish executes native state
-  kernels once per instance, in registration order, before combine. Both
-  modes use the same implementation. The executor runs local finishes in
-  parallel and combines only after every finish succeeds. Builder checks
-  reject row reads of states transformed at finish, while allowing local
-  accumulation; state liveness includes StateKernel accesses. Replace
-  `finish_on` with this path and remove `SinkExec::finish_on` / `exec::Cpu`.
-  Initially accept serial cross-instance merges, table builds and windows;
-  later operator-built partition pipelines restore parallelism and leave
-  sinks responsible only for handoff and publication. See
-  [`sink-parallelism.md`](sink-parallelism.md) for contracts, the four-sink
-  migration, execution edge cases and validation, including q51, q47, q57,
-  q67 and q23.
+  Design decision, 2026-10-15 (implementation pending): remove
+  `SinkExec::finish_on` and `exec::Cpu`; sinks submit no CPU jobs. Each
+  execution instance pairs its LocalState with a `LocalSink` that runs
+  inside CPU jobs: `consume(Option<chunk>)` after every program run returns
+  `ConsumeStatus::{End, Flush, Stop}` (it predicts capacity so every run
+  completes), and `finish(status)` organizes local data in parallel. The
+  sink takes the data over on the coordinator in `SinkExec::consume(status)`
+  (resetting the instance after Flush / Stop) and does the cross-instance
+  work single-threaded in `SinkExec::finish`. Program, KernelGraph and
+  liveness are unchanged: kernel-written state belongs to the sink and is
+  reached by StateId. Sorts and windows sort locally and only merge (windows
+  then compute linearly), table builds hash keys locally and gather each
+  column once, aggregates export partials and merge them serially.
+  High-cardinality aggregates and large table builds are the known serial
+  bottlenecks. See [`sink-parallelism.md`](sink-parallelism.md) for the
+  interfaces, handoff protocol, executor changes, per-sink implementation
+  and validation, including q51, q47, q57, q67 and q23.
 - Lowering: decimal casts that cannot overflow skip their precision check.
 
 ## Known gaps and next steps
