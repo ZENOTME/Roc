@@ -17,7 +17,7 @@ use futures::future::BoxFuture;
 use roc::{
     column::{ColumnContext, ColumnId},
     error::{Error, ErrorKind, Result},
-    exec::{SinkExec, SourceExec},
+    exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
     operator::{Operator, OperatorTree, OperatorTreeNode},
     pipeline::{PipelineGraphBuilder, PipelineId, build_pipeline_graph, build_pipeline_on_node},
 };
@@ -36,7 +36,27 @@ impl SourceExec for NoopExec {
         })
     }
 }
-impl SinkExec for NoopExec {}
+impl SinkExec for NoopExec {
+    fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        unreachable!("construction only")
+    }
+    fn consume<'a>(
+        &'a mut self,
+        _: ConsumeStatus,
+        _: &'a mut dyn LocalSink,
+        _: StateContext<'a>,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>> {
+        unreachable!("construction only")
+    }
+    fn finish<'a>(
+        &'a mut self,
+        _: &'a ShutdownGuard,
+        _cpu: &'a dyn roc::exec::Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
+        unreachable!("construction only")
+    }
+}
 
 #[derive(Debug)]
 struct CustomSource;

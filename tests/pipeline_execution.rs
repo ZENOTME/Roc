@@ -17,7 +17,7 @@ use asyncband::shutdown::ShutdownGuard;
 use futures::{channel::oneshot, future::BoxFuture};
 use roc::{
     error::{Error, ErrorKind, Result},
-    exec::{SinkExec, SourceExec},
+    exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
     kernel::Program,
     pipeline::{Executor, Pipeline, PipelineExecutionConfig, PipelineGraph, PipelineGraphExecutor},
 };
@@ -123,8 +123,46 @@ impl SourceExec for FailingSource {
     }
 }
 struct CountingSink(Arc<AtomicUsize>);
+struct NoopLocal;
+impl LocalSink for NoopLocal {
+    fn consume(
+        &mut self,
+        _: Option<RecordBatch>,
+        _: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus> {
+        Ok(ConsumeStatus::End)
+    }
+    fn finish(
+        &mut self,
+        _: ConsumeStatus,
+        _: &mut StateContext<'_>,
+        _: &ShutdownGuard,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
 impl SinkExec for CountingSink {
-    fn finish<'a>(&'a mut self, _: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
+    fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        Ok(Box::new(NoopLocal))
+    }
+    fn consume<'a>(
+        &'a mut self,
+        _: ConsumeStatus,
+        _: &'a mut dyn LocalSink,
+        _: StateContext<'a>,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn finish<'a>(
+        &'a mut self,
+        _: &'a ShutdownGuard,
+        _cpu: &'a dyn roc::exec::Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())

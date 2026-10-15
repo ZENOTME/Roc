@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{SinkExec, SinkStatus, SourceExec};
+use super::{
+    ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext, downcast_local,
+};
 use crate::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
 use crate::{
     error::{Error, ErrorContext, Result, ResultExt},
@@ -129,18 +131,75 @@ impl SinkExec for ExchangeSinkExec {
             .collect::<Result<_>>()?;
         Ok(())
     }
+    fn local_sink(&self, ctx: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        Ok(Box::new(ExchangeLocalSink {
+            chunks: vec![],
+            rows: 0,
+            flush_rows: EXCHANGE_FLUSH_ROWS.saturating_mul(ctx.batch_rows),
+        }))
+    }
     fn consume<'a>(
         &'a mut self,
-        chunk: RecordBatch,
+        _: ConsumeStatus,
+        local: &'a mut dyn LocalSink,
+        _: StateContext<'a>,
         guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<SinkStatus>> {
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            for (exchange, output) in self.exchanges.iter().zip(&mut self.outputs) {
-                output.send(&chunk, guard).await.with_context(|| {
-                    ErrorContext::new("exchange.send").field("exchange", exchange)
-                })?;
+            let local = downcast_local::<ExchangeLocalSink>(local)?;
+            local.rows = 0;
+            for chunk in std::mem::take(&mut local.chunks) {
+                for (exchange, output) in self.exchanges.iter().zip(&mut self.outputs) {
+                    output.send(&chunk, guard).await.with_context(|| {
+                        ErrorContext::new("exchange.send").field("exchange", exchange)
+                    })?;
+                }
             }
-            Ok(SinkStatus::Continue)
+            Ok(())
         })
+    }
+    fn finish<'a>(
+        &'a mut self,
+        _: &'a ShutdownGuard,
+        _cpu: &'a dyn crate::exec::Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Number of input-sized batches buffered before sending to an exchange.
+const EXCHANGE_FLUSH_ROWS: usize = 8;
+
+struct ExchangeLocalSink {
+    chunks: Vec<RecordBatch>,
+    rows: usize,
+    flush_rows: usize,
+}
+impl LocalSink for ExchangeLocalSink {
+    fn consume(
+        &mut self,
+        chunk: Option<RecordBatch>,
+        _: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus> {
+        if let Some(chunk) = chunk {
+            self.rows += chunk.num_rows();
+            self.chunks.push(chunk);
+        }
+        Ok(if self.rows >= self.flush_rows {
+            ConsumeStatus::Flush
+        } else {
+            ConsumeStatus::End
+        })
+    }
+    fn finish(
+        &mut self,
+        _: ConsumeStatus,
+        _: &mut StateContext<'_>,
+        _: &ShutdownGuard,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

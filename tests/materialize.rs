@@ -144,7 +144,7 @@ fn sorts_order_by_every_key_and_keep_the_first_rows() {
             (x, y) => y.cmp(&x),
         })
     });
-    for fetch in [None, Some(10), Some(5000)] {
+    for fetch in [None, Some(0), Some(10), Some(5000)] {
         let sort = SortOperator::try_new(keys.clone(), t.all(), fetch).unwrap();
         let node = OperatorTreeNode::new(sort, vec![t.scan()]);
         let actual = sorted_rows(&t.columns, &node);

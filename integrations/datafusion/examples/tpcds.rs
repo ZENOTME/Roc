@@ -91,10 +91,14 @@ async fn run_all() -> datafusion::error::Result<()> {
     let mut table = String::new();
     writeln!(
         table,
-        "| statement | stage | rows | Roc ms | DataFusion ms | translate / build / execute ms | detail |"
+        "| statement | stage | rows | Roc ms | DataFusion ms | translate / build / execute ms | sink finish ms | detail |"
     )
     .unwrap();
-    writeln!(table, "| --- | --- | ---: | ---: | ---: | ---: | --- |").unwrap();
+    writeln!(
+        table,
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"
+    )
+    .unwrap();
     let mut passed = 0;
     let mut statements = tpcds::statements(&tpcds::query_dir())?;
     if let Some(sql) = sql {
@@ -129,7 +133,11 @@ async fn run_all() -> datafusion::error::Result<()> {
                     .unwrap();
                 best = best.min(start.elapsed());
             }
-            println!("{}: best of {repeat}: {:.1} ms", s.name, best.as_secs_f64() * 1e3);
+            println!(
+                "{}: best of {repeat}: {:.1} ms",
+                s.name,
+                best.as_secs_f64() * 1e3
+            );
             continue;
         }
         let limit = std::time::Duration::from_secs(timeout);
@@ -172,7 +180,7 @@ async fn run_all() -> datafusion::error::Result<()> {
         };
         let p = outcome.phases;
         let line = format!(
-            "| {} | {stage} | {} | {} | {} | {} / {} / {} | {} |",
+            "| {} | {stage} | {} | {} | {} | {} / {} / {} | {} | {} |",
             s.name,
             outcome.rows,
             ms(outcome.roc),
@@ -180,6 +188,7 @@ async fn run_all() -> datafusion::error::Result<()> {
             ms(Some(p.translate)),
             ms(Some(p.build)),
             ms(Some(p.execute)),
+            ms(Some(p.sink_finish)),
             detail.chars().take(300).collect::<String>()
         );
         println!("{line}");

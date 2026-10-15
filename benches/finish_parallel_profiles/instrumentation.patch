@@ -1,0 +1,403 @@
+--- a/integrations/datafusion/src/run.rs
++++ b/integrations/datafusion/src/run.rs
+@@ -115,6 +115,8 @@
+     parallelism: usize,
+     phases: &mut Phases,
+ ) -> Result<Vec<RecordBatch>, Stage> {
++    roc::exec::profile::RUN.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
++    let _query=roc::exec::profile::Span::new("query",0);
+     let state = ctx.state();
+     let start = Instant::now();
+     let query = translate(plan, &state)
+@@ -132,8 +134,9 @@
+     let pipelines = graph
+         .into_pipelines()
+         .into_iter()
+-        .map(|mut pipeline| {
++        .enumerate().map(|(id,mut pipeline)| {
+             pipeline.sink = Box::new(TimedSink {
++                id,
+                 inner: pipeline.sink,
+                 nanos: sink_finish.clone(),
+             });
+@@ -161,10 +164,13 @@
+ 
+ /// Benchmark-only instrumentation; the core executor has no timing overhead.
+ struct TimedSink {
++    id:usize,
+     inner: Box<dyn roc::exec::SinkExec>,
+     nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+ }
+ impl roc::exec::SinkExec for TimedSink {
++    fn profile_name(&self)->&'static str {self.inner.profile_name()}
++    fn profile_id(&self)->usize {self.id}
+     fn start(&mut self, guard: &asyncband::shutdown::ShutdownGuard) -> roc::error::Result<()> {
+         self.inner.start(guard)
+     }
+@@ -172,6 +178,7 @@
+         &self,
+         ctx: &roc::exec::LocalSinkContext,
+     ) -> roc::error::Result<Box<dyn roc::exec::LocalSink>> {
++        roc::exec::profile::pipeline(self.id);
+         self.inner.local_sink(ctx)
+     }
+     fn consume<'a>(
+@@ -190,6 +197,8 @@
+     ) -> futures::future::BoxFuture<'a, roc::error::Result<()>> {
+         Box::pin(async move {
+             let start = Instant::now();
++            roc::exec::profile::pipeline(self.id);
++            let _finish=roc::exec::profile::Span::new(self.inner.profile_name(),0);
+             let result = self.inner.finish(guard, cpu).await;
+             self.nanos.fetch_add(
+                 start.elapsed().as_nanos() as u64,
+--- a/src/exec/aggregate/mod.rs
++++ b/src/exec/aggregate/mod.rs
+@@ -187,11 +187,14 @@
+         if partial.num_rows() == 0 {
+             return Ok(());
+         }
++        let _intern=crate::exec::profile::Span::new("aggregate.intern",partial.num_rows());
+         self.index.intern(
+             partial.groups.columns(),
+             partial.num_rows(),
+             &mut self.group_ids,
+         )?;
++        drop(_intern);
++        let _acc=crate::exec::profile::Span::new("aggregate.accumulator",partial.num_rows());
+         for (index, (accumulator, state)) in self
+             .accumulators
+             .iter_mut()
+@@ -208,13 +211,17 @@
+     /// The group columns, the aggregate columns and the row count.
+     fn finish_columns(self) -> Result<(Vec<ArrayRef>, Vec<ArrayRef>, usize)> {
+         let count = self.index.len();
++        let _cols=crate::exec::profile::Span::new("aggregate.group_columns",count);
+         let groups = self.index.columns()?;
++        drop(_cols);
+         let mut columns = vec![];
+         for (index, accumulator) in self.accumulators.into_iter().enumerate() {
+             columns.push(accumulator.evaluate().with_context(|| {
+                 ErrorContext::new("aggregate.evaluate").field("aggregate", index)
+             })?);
+         }
++        let _drop=crate::exec::profile::Span::new("aggregate.drop_index",count);
++        drop(self.index);drop(_drop);
+         Ok((groups, columns, count))
+     }
+     #[cfg(test)]
+@@ -290,6 +297,7 @@
+ }
+ 
+ struct AggregateLocalSink {
++    profile: crate::exec::profile::Context,
+     partitions: usize,
+     states: Vec<Vec<StateId>>,
+     batch_rows: usize,
+@@ -323,6 +331,9 @@
+         states_context: &mut StateContext<'_>,
+         guard: &ShutdownGuard,
+     ) -> Result<()> {
++
++        let _entered=self.profile.enter();
++        let _local=crate::exec::profile::Span::new("local.AggregateLocalSink",0);
+         self.partials.clear();
+         for set in &self.states {
+             if guard.is_shutdown_requested() {
+@@ -456,6 +467,7 @@
+             ));
+         }
+         Ok(Box::new(AggregateLocalSink {
++            profile: crate::exec::profile::Context::current(),
+             partitions: ctx.partitions,
+             states: self.states.clone(),
+             batch_rows: ctx.batch_rows,
+@@ -493,6 +505,7 @@
+         cpu: &'a dyn super::Cpu,
+     ) -> BoxFuture<'a, Result<()>> {
+         Box::pin(async move {
++            let profile=crate::exec::profile::Context::current();
+             let merges = self
+                 .merges
+                 .take()
+@@ -563,6 +576,8 @@
+                         let factory = self.factory.clone();
+                         let guard = guard.clone();
+                         jobs.push(Box::new(move || {
++                            let _entered=profile.enter();
++                            let _job=crate::exec::profile::Span::new("aggregate.merge_evaluate_job",bucket.iter().map(PartialAggregate::num_rows).sum());
+                             if guard.is_shutdown_requested() {
+                                 return Err(Error::cancelled());
+                             }
+@@ -581,9 +596,12 @@
+                     }
+                 }
+                 let mut by_set = vec![vec![]; sets];
++                let _merge=crate::exec::profile::Span::at(profile,"aggregate.merge_evaluate_wall",groups);
+                 for (set, result) in super::run_all(cpu, jobs).await? {
+                     by_set[set].push(result);
+                 }
++                drop(_merge);
++                let _concat=crate::exec::profile::Span::at(profile,"aggregate.concat",0);
+                 for parts in by_set {
+                     if guard.is_shutdown_requested() {
+                         return Err(Error::cancelled());
+@@ -591,7 +609,9 @@
+                     results.push(concat_parts(&parts)?);
+                 }
+             }
++            let _layout=crate::exec::profile::Span::at(profile,"aggregate.layout",results.iter().map(|r|r.2).sum());
+             let batch = self.layout.assemble(results)?;
++            drop(_layout);
+             if guard.is_shutdown_requested() {
+                 return Err(Error::cancelled());
+             }
+--- a/src/exec/mod.rs
++++ b/src/exec/mod.rs
+@@ -18,6 +18,7 @@
+ use asyncband::shutdown::ShutdownGuard;
+ use futures::future::BoxFuture;
+ 
++pub mod profile;
+ pub(crate) mod aggregate;
+ mod buffer;
+ mod exchange;
+@@ -181,6 +182,8 @@
+ }
+ 
+ pub trait SinkExec: Send + 'static {
++    fn profile_name(&self)->&'static str {std::any::type_name::<Self>()}
++    fn profile_id(&self)->usize {usize::MAX}
+     fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
+         Ok(())
+     }
+--- /dev/null
++++ b/src/exec/profile.rs
+@@ -0,0 +1,11 @@
++use std::{sync::{OnceLock,atomic::{AtomicUsize,Ordering}},time::Instant};
++static START:OnceLock<Instant>=OnceLock::new();
++pub static RUN:AtomicUsize=AtomicUsize::new(0);
++thread_local! {static PIPE:std::cell::Cell<usize>=const {std::cell::Cell::new(usize::MAX)};}
++#[derive(Clone,Copy)] pub struct Context {run:usize,pipeline:usize}
++impl Context {pub fn current()->Self {Self{run:RUN.load(Ordering::Relaxed),pipeline:PIPE.with(|p|p.get())}} pub fn enter(self)->Enter {let old=PIPE.with(|p|p.replace(self.pipeline));Enter(old)}}
++pub struct Enter(usize);impl Drop for Enter {fn drop(&mut self){PIPE.with(|p|p.set(self.0));}}
++pub fn pipeline(id:usize){PIPE.with(|p|p.set(id));}
++pub struct Span {ctx:Context,label:String,rows:usize,start:Instant}
++impl Span {pub fn new(label:impl Into<String>,rows:usize)->Self {Self::at(Context::current(),label,rows)} pub fn at(ctx:Context,label:impl Into<String>,rows:usize)->Self {START.get_or_init(Instant::now);Self{ctx,label:label.into(),rows,start:Instant::now()}}}
++impl Drop for Span {fn drop(&mut self){let end=Instant::now();eprintln!("PROFILE\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}",self.ctx.run,self.ctx.pipeline,self.label,self.rows,self.start.duration_since(*START.get().unwrap()).as_nanos(),end.duration_since(*START.get().unwrap()).as_nanos(),std::thread::current().id());}}
+--- a/src/exec/table.rs
++++ b/src/exec/table.rs
+@@ -48,6 +48,7 @@
+     }
+ }
+ struct TableLocalSink {
++    profile: crate::exec::profile::Context,
+     partition_count: usize,
+     partitions: Vec<Vec<(usize, usize)>>,
+     plan: Arc<KeyPlan>,
+@@ -72,6 +73,9 @@
+         _: &mut StateContext<'_>,
+         guard: &ShutdownGuard,
+     ) -> Result<()> {
++
++        let _entered=self.profile.enter();
++        let _local=crate::exec::profile::Span::new("local.TableLocalSink",0);
+         self.partitions = if self.partition_count == 1 {
+             // assemble_on uses the serial layout; no row lists are needed.
+             vec![vec![], vec![]]
+@@ -93,6 +97,7 @@
+             ));
+         }
+         Ok(Box::new(TableLocalSink {
++            profile: crate::exec::profile::Context::current(),
+             partition_count: ctx.partitions,
+             partitions: vec![],
+             plan: self.plan.clone(),
+--- a/src/exec/window.rs
++++ b/src/exec/window.rs
+@@ -80,6 +80,7 @@
+ }
+ 
+ struct WindowLocalSink {
++    profile: crate::exec::profile::Context,
+     partitions: usize,
+     specs: Arc<Vec<Spec>>,
+     chunks: Vec<RecordBatch>,
+@@ -108,6 +109,9 @@
+         _: &mut StateContext<'_>,
+         guard: &ShutdownGuard,
+     ) -> Result<()> {
++        let _entered=self.profile.enter();
++        let _local=crate::exec::profile::Span::new("local.WindowLocalSink",0);
++
+         for (spec, keys) in self.specs.iter().zip(&mut self.keys) {
+             keys.sorted = vec![vec![]; self.partitions];
+             for row in 0..keys.parts.len() {
+@@ -200,6 +204,7 @@
+             ));
+         }
+         Ok(Box::new(WindowLocalSink {
++            profile: crate::exec::profile::Context::current(),
+             partitions: ctx.partitions,
+             specs: self.specs.clone(),
+             chunks: vec![],
+@@ -231,6 +236,7 @@
+         cpu: &'a dyn super::Cpu,
+     ) -> BoxFuture<'a, Result<()>> {
+         Box::pin(async move {
++            let profile=crate::exec::profile::Context::current();
+             let runs = Arc::new(std::mem::take(&mut self.runs));
+             let mut chunks = vec![];
+             let mut bases = vec![];
+@@ -251,9 +257,12 @@
+             let input_schema = Arc::new(crate::arrow::datatypes::Schema::new(
+                 self.schema.fields()[..inputs].to_vec(),
+             ));
++            let _concat=crate::exec::profile::Span::at(profile,"window.concat_wall",rows);
+             let batch = Arc::new(
+                 super::sort::concat_chunks_on(&input_schema, Arc::new(chunks), guard, cpu).await?,
+             );
++            drop(_concat);
++            let _decode=crate::exec::profile::Span::at(profile,"window.decode_wall",rows);
+             let mut decode_jobs: Vec<Box<dyn FnOnce() -> Result<Option<Vec<Cell>>> + Send>> =
+                 vec![];
+             for w in &self.windows {
+@@ -270,6 +279,7 @@
+                 }));
+             }
+             let arguments = Arc::new(super::run_all(cpu, decode_jobs).await?);
++            drop(_decode);
+             let windows = Arc::new(self.windows.clone());
+             let mut outputs: Vec<Option<ArrayRef>> = vec![None; windows.len()];
+             for (s, spec) in self.specs.iter().enumerate() {
+@@ -298,6 +308,7 @@
+                             .iter()
+                             .map(|r| r.keys[s].sorted[bucket].as_slice())
+                             .collect::<Vec<_>>();
++                        let _merge=crate::exec::profile::Span::at(profile,"window.merge_job",orders.iter().map(|o|o.len()).sum());
+                         let sorted = super::sort::merge_sorted(
+                             &orders,
+                             |run, row| {
+@@ -310,6 +321,7 @@
+                         .into_iter()
+                         .map(|(run, row)| bases[run] + row)
+                         .collect::<Vec<_>>();
++                        drop(_merge);
+                         let parts = |r: usize| {
+                             let (run, row) = locations[r];
+                             runs[run].keys[s].parts.row(row)
+@@ -322,6 +334,7 @@
+                             .iter()
+                             .map(|&i| {
+                                 let w = &windows[i];
++                                let _values=crate::exec::profile::Span::at(profile,format!("window.values_job.{:?}",w.function),sorted.len());
+                                 values(
+                                     &sorted,
+                                     &parts,
+@@ -336,7 +349,10 @@
+                         Ok((sorted, computed))
+                     }));
+                 }
++                let _compute=crate::exec::profile::Span::at(profile,"window.merge_values_wall",rows);
+                 let done = super::run_all(cpu, jobs).await?;
++                drop(_compute);
++                let _scatter=crate::exec::profile::Span::at(profile,"window.scatter",rows);
+                 let mut cells = vec![vec![Cell::default(); rows]; spec.members.len()];
+                 for (sorted, values) in done {
+                     for (out, column) in cells.iter_mut().zip(values) {
+@@ -349,6 +365,8 @@
+                     }
+                 }
+                 let mut jobs: Vec<Box<dyn FnOnce() -> Result<(usize, ArrayRef)> + Send>> = vec![];
++                drop(_scatter);
++                let _encode=crate::exec::profile::Span::at(profile,"window.encode_wall",rows);
+                 for (&i, cells) in spec.members.iter().zip(cells) {
+                     let output = windows[i].output.clone();
+                     // Byte cells borrow the payload. Each detached job must
+--- a/src/kernel/table.rs
++++ b/src/kernel/table.rs
+@@ -514,6 +514,7 @@
+         if guard.is_shutdown_requested() {
+             return Err(Error::cancelled());
+         }
++        let _bucket=crate::exec::profile::Span::new("table.bucket_order_job",rows.len());
+         let mut starts = vec![0u32; buckets + 1];
+         let order = if buckets == 0 {
+             rows
+@@ -541,7 +542,11 @@
+             }
+             order
+         };
++        drop(_bucket);
++        let _keys=crate::exec::profile::Span::new("table.keys_job",order.len());
+         let keys = self.gather_keys(prepared, &order, guard)?;
++        drop(_keys);
++        let _payload=crate::exec::profile::Span::new("table.interleave_job",order.len());
+         let batch = crate::exec::sort::interleave_chunks(schema, batches, &order, guard)?;
+         Ok(TablePartition {
+             starts,
+@@ -567,6 +572,7 @@
+                 format!("a table holds at most {} rows", END - 1),
+             ));
+         }
++        let profile=crate::exec::profile::Context::current();
+         let count = partitions.len().saturating_sub(1);
+         let buckets = rows.max(2).next_power_of_two();
+         if self.keys.is_empty() || count <= 1 || buckets < count {
+@@ -588,6 +594,7 @@
+                     guard.clone(),
+                 );
+                 Box::new(move || {
++                    let _entered=profile.enter();
+                     plan.assemble_partition(
+                         &schema,
+                         &batches,
+@@ -601,7 +608,10 @@
+                 }) as Box<dyn FnOnce() -> Result<TablePartition> + Send>
+             })
+             .collect();
++        let _work=crate::exec::profile::Span::at(profile,"table.partition_wall",rows);
+         let mut parts = crate::exec::run_all(cpu, jobs).await?;
++        drop(_work);
++        let _join=crate::exec::profile::Span::at(profile,"table.join_keys",rows);
+         let mut starts = Vec::with_capacity(buckets + 1);
+         let mut base = 0u32;
+         for part in &parts[..count] {
+@@ -651,6 +661,8 @@
+                 offsets,
+             }
+         };
++        drop(_join);
++        let _concat=crate::exec::profile::Span::at(profile,"table.concat_wall",rows);
+         let parts = Arc::new(parts);
+         let jobs = schema
+             .fields()
+--- a/src/pipeline/execution.rs
++++ b/src/pipeline/execution.rs
+@@ -495,6 +495,8 @@
+         }
+         drop(source);
+         // Stage 2 completes for every instance before any End is handed off.
++        crate::exec::profile::pipeline(self.sink.profile_id());
++        let _local=crate::exec::profile::Span::new("local_finish_wall",idle.len());
+         let finishes = idle
+             .into_iter()
+             .map(|pair| {
+@@ -511,6 +513,7 @@
+             Either::Left(_) => return Err(Error::cancelled()),
+             Either::Right((pairs, _)) => pairs?,
+         };
++        drop(_local);
+         // Stage 3 keeps the pool order, independent of finish-job completion.
+         for (mut state, mut local) in pairs {
+             if shutdown_guard.is_shutdown_requested() {
+@@ -525,6 +528,9 @@
+                 )
+                 .await
+                 .with_location()?;
++            crate::exec::profile::pipeline(self.sink.profile_id());
++            let _drop=crate::exec::profile::Span::new("drop_local",0);
++            drop(state);drop(local);drop(_drop);
+         }
+         if shutdown_guard.is_shutdown_requested() {
+             return Err(Error::cancelled());

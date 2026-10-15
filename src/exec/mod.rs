@@ -14,10 +14,9 @@
 
 use crate::arrow::record_batch::RecordBatch;
 use crate::error::{Error, Result};
-use crate::kernel::LocalState;
+use crate::kernel::{LocalState, StateId};
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
-use std::sync::{Arc, Mutex};
 
 pub(crate) mod aggregate;
 mod buffer;
@@ -47,97 +46,168 @@ pub trait SourceExec: Send + 'static {
     }
 }
 
-/// Whether a sink accepts more output chunks.
+/// The result of local consumption, and the reason for handing off an instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SinkStatus {
-    Continue,
-    /// No more input is needed; the pipeline stops reading its source.
-    Finished,
+pub enum ConsumeStatus {
+    /// Continue after a batch; as a handoff reason, this instance's input ended.
+    End,
+    /// Hand off local data, then continue receiving input.
+    Flush,
+    /// Stop dispatching new input to the entire pipeline.
+    Stop,
 }
 
-pub trait SinkExec: Send + 'static {
-    fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
-        Ok(())
+/// Access to sink-owned state used by kernels, without exposing execution scratch space.
+pub struct StateContext<'a> {
+    local: &'a mut LocalState,
+}
+
+impl<'a> StateContext<'a> {
+    pub(crate) fn new(local: &'a mut LocalState) -> Self {
+        Self { local }
     }
-    /// Consumes one non-empty output chunk of the pipeline program, on the
-    /// pipeline coordinator and in completion order.
-    fn consume<'a>(
-        &'a mut self,
-        _chunk: RecordBatch,
-        _guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<SinkStatus>> {
-        Box::pin(async { Ok(SinkStatus::Continue) })
+
+    pub fn get_mut<T: 'static>(&mut self, id: StateId) -> Result<&mut T> {
+        self.local.state_mut(id)?.get_mut()
     }
-    /// Consumes one completed execution instance. The sink takes the states it
-    /// declared while building the pipeline and merges them into its own.
-    fn combine<'a>(
-        &'a mut self,
-        _local: LocalState,
-        _guard: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-    fn finish<'a>(&'a mut self, _guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-    /// `finish`, with CPU work allowed on `cpu`. Pipelines call this one.
-    fn finish_on<'a>(
-        &'a mut self,
-        guard: &'a ShutdownGuard,
-        _cpu: &'a dyn Cpu,
-    ) -> BoxFuture<'a, Result<()>> {
-        self.finish(guard)
+
+    /// Moves a slot out at End, in local finish or coordinator consume.
+    /// No later Program run may use this instance.
+    pub fn take<T: 'static>(&mut self, id: StateId) -> Result<T> {
+        self.local
+            .take_state(id)
+            .ok_or_else(|| Error::internal("state is not available".into()))?
+            .into_inner()
     }
 }
 
-/// One unit of CPU work.
+pub struct LocalSinkContext {
+    /// Upper bound on the input rows of one Program::run.
+    pub batch_rows: usize,
+    /// Shared across instances, including a single ordered instance.
+    pub partitions: usize,
+}
+
+pub fn partition_count(parallelism: usize) -> usize {
+    if parallelism <= 1 {
+        1
+    } else {
+        (2 * parallelism).next_power_of_two()
+    }
+}
+
 pub type CpuJob = Box<dyn FnOnce() -> Result<()> + Send>;
 
-/// Runs CPU work of a finishing sink: on the pipeline's executor, or inline.
+/// CPU work on the same executor as Program jobs. Only final sinks receive this.
 pub trait Cpu: Send + Sync {
-    /// Runs the jobs, concurrently where it can; fails with a failed job's
-    /// error.
-    fn run(&self, jobs: Vec<CpuJob>) -> BoxFuture<'_, Result<()>>;
-    /// How many jobs run at once.
+    /// Submit immediately; polling the returned future only waits for completion.
+    fn spawn(&self, job: CpuJob) -> BoxFuture<'static, Result<()>>;
     fn parallelism(&self) -> usize;
 }
 
-/// Runs jobs one after another on the caller's thread.
 pub struct Inline;
-
 impl Cpu for Inline {
-    fn run(&self, jobs: Vec<CpuJob>) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { jobs.into_iter().try_for_each(|job| job()) })
+    fn spawn(&self, job: CpuJob) -> BoxFuture<'static, Result<()>> {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
+                Err(Error::new(
+                    crate::error::ErrorKind::TaskFailed,
+                    "CPU task panicked",
+                ))
+            });
+        Box::pin(futures::future::ready(result))
     }
     fn parallelism(&self) -> usize {
         1
     }
 }
 
-/// Runs `work` on `cpu`; returns the results in order.
+/// Submit all work before waiting; return outputs in submission order.
 pub async fn run_all<T: Send + 'static>(
     cpu: &dyn Cpu,
     work: Vec<Box<dyn FnOnce() -> Result<T> + Send>>,
 ) -> Result<Vec<T>> {
-    let results = Arc::new(Mutex::new(
-        (0..work.len()).map(|_| None).collect::<Vec<Option<T>>>(),
-    ));
+    use std::sync::{Arc, Mutex};
+    let outputs = Arc::new(
+        (0..work.len())
+            .map(|_| Mutex::new(None))
+            .collect::<Vec<_>>(),
+    );
     let jobs = work
         .into_iter()
         .enumerate()
-        .map(|(i, w)| {
-            let results = results.clone();
-            Box::new(move || {
-                let value = w()?;
-                results.lock().unwrap()[i] = Some(value);
+        .map(|(i, work)| {
+            let outputs = outputs.clone();
+            cpu.spawn(Box::new(move || {
+                *outputs[i].lock().unwrap() = Some(work()?);
                 Ok(())
-            }) as CpuJob
+            }))
         })
-        .collect();
-    cpu.run(jobs).await?;
-    let results = std::mem::take(&mut *results.lock().unwrap());
-    results
-        .into_iter()
-        .map(|r| r.ok_or_else(|| Error::internal("a CPU job left no result".into())))
+        .collect::<Vec<_>>();
+    futures::future::try_join_all(jobs).await?;
+    outputs
+        .iter()
+        .map(|slot| {
+            slot.lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| Error::internal("a CPU job left no result".into()))
+        })
         .collect()
+}
+
+/// Exclusively owned by one execution instance; called inside CPU jobs.
+pub trait LocalSink: Send + 'static {
+    /// Called exactly once after each run, including runs without output.
+    /// End promises capacity for another batch_rows input rows; otherwise
+    /// return Flush so the coordinator can reset the instance first.
+    fn consume(
+        &mut self,
+        chunk: Option<RecordBatch>,
+        states: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus>;
+
+    /// Prepare local data for handoff. Only End may remove kernel slots,
+    /// allowing their large allocations to be released on the worker.
+    /// Long-running work must check the shutdown guard.
+    fn finish(
+        &mut self,
+        status: ConsumeStatus,
+        states: &mut StateContext<'_>,
+        guard: &ShutdownGuard,
+    ) -> Result<()>;
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+pub trait SinkExec: Send + 'static {
+    fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
+        Ok(())
+    }
+
+    fn local_sink(&self, ctx: &LocalSinkContext) -> Result<Box<dyn LocalSink>>;
+
+    /// Take prepared data on the coordinator. Flush/Stop must restore local
+    /// data and kernel slots for reuse; every instance later hands off End.
+    fn consume<'a>(
+        &'a mut self,
+        status: ConsumeStatus,
+        local: &'a mut dyn LocalSink,
+        states: StateContext<'a>,
+        guard: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// Cross-instance work and publication, after every End handoff succeeds.
+    fn finish<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        cpu: &'a dyn Cpu,
+    ) -> BoxFuture<'a, Result<()>>;
+}
+
+pub(crate) fn downcast_local<T: LocalSink>(local: &mut dyn LocalSink) -> Result<&mut T> {
+    local
+        .as_any_mut()
+        .downcast_mut()
+        .ok_or_else(|| Error::internal("local sink type mismatch".into()))
 }

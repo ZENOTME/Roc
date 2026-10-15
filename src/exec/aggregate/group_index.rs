@@ -154,6 +154,35 @@ impl GroupIndex {
         })
     }
 
+    /// Restore the initial logical state while retaining allocated storage.
+    pub fn clear(&mut self) {
+        self.groups = 0;
+        self.cells.clear();
+        self.slots.fill(0);
+        self.scratch.clear();
+        match &mut self.keys {
+            Keys::None => {}
+            Keys::Word { words, null } => {
+                words.clear();
+                *null = None;
+            }
+            Keys::Fixed { words, hashes, .. } => {
+                words.clear();
+                hashes.clear();
+            }
+            Keys::Encoded {
+                hashes,
+                data,
+                offsets,
+            } => {
+                hashes.clear();
+                data.clear();
+                offsets.clear();
+                offsets.push(0);
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         match self.keys {
             Keys::None => 1,
@@ -495,7 +524,9 @@ mod tests {
             Cell::word(2048),
         ];
         // Enough keys to grow the table several times.
-        let more = (0..1000u64).map(|k| Cell::word(k * 4096 + 7)).collect::<Vec<_>>();
+        let more = (0..1000u64)
+            .map(|k| Cell::word(k * 4096 + 7))
+            .collect::<Vec<_>>();
         for _ in 0..3 {
             for (expected, value) in values.iter().chain(&more).enumerate() {
                 assert_eq!(index.intern_row(&[*value]), expected);
@@ -621,11 +652,19 @@ mod tests {
             .unwrap(),
         );
         let mut ids = vec![];
-        index.intern(&[keys.clone(), amounts.clone()], 6, &mut ids).unwrap();
+        index
+            .intern(&[keys.clone(), amounts.clone()], 6, &mut ids)
+            .unwrap();
         assert_eq!(ids, [0, 1, 0, 2, 1, 3]);
         let columns = index.columns().unwrap();
-        assert_eq!(columns[0].to_data(), Int32Array::from(vec![Some(-1), None, Some(7), Some(-1)]).to_data());
-        let amounts = columns[1].as_any().downcast_ref::<Decimal128Array>().unwrap();
+        assert_eq!(
+            columns[0].to_data(),
+            Int32Array::from(vec![Some(-1), None, Some(7), Some(-1)]).to_data()
+        );
+        let amounts = columns[1]
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
         assert_eq!(
             amounts.iter().collect::<Vec<_>>(),
             [Some(i128::MIN + 5), Some(3), None, Some(0)]
@@ -645,7 +684,9 @@ mod tests {
             (0..n).map(|i| format!("t{}", i % 7)),
         ));
         let mut ids = vec![];
-        index.intern(&[keys.clone(), text.clone()], n as usize, &mut ids).unwrap();
+        index
+            .intern(&[keys.clone(), text.clone()], n as usize, &mut ids)
+            .unwrap();
         // (i % 1000, i % 7) repeats with period 7000: every row is new.
         assert_eq!(index.len(), n as usize);
         let first = ids.clone();

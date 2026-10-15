@@ -83,6 +83,8 @@ pub struct Phases {
     pub translate: Duration,
     pub build: Duration,
     pub execute: Duration,
+    /// Sum of coordinator sink-finish durations across pipelines.
+    pub sink_finish: Duration,
 }
 
 /// The optimized plan of `sql`.
@@ -123,6 +125,23 @@ pub async fn run_roc(
     let graph = build_pipeline_graph_with_mode(&query.tree, mode)
         .map_err(|e| Stage::Execute(format!("{e:?}")))?;
     phases.build = start.elapsed();
+    let sink_finish = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let dependencies = (0..graph.len())
+        .map(|i| graph.dependencies(i).unwrap().to_vec())
+        .collect();
+    let pipelines = graph
+        .into_pipelines()
+        .into_iter()
+        .map(|mut pipeline| {
+            pipeline.sink = Box::new(TimedSink {
+                inner: pipeline.sink,
+                nanos: sink_finish.clone(),
+            });
+            pipeline
+        })
+        .collect();
+    let graph = roc::pipeline::PipelineGraph::new(pipelines, dependencies)
+        .map_err(|e| Stage::Execute(format!("{e:?}")))?;
     let start = Instant::now();
     let executor = PipelineGraphExecutor::new(graph)
         .with_task_executor(TokioExecutor(tokio::runtime::Handle::current()))
@@ -135,7 +154,50 @@ pub async fn run_roc(
     shutdown.await;
     result.map_err(|e| Stage::Execute(format!("{e:?}")))?;
     phases.execute = start.elapsed();
+    phases.sink_finish =
+        Duration::from_nanos(sink_finish.load(std::sync::atomic::Ordering::Relaxed));
     Ok(query.collect.take())
+}
+
+/// Benchmark-only instrumentation; the core executor has no timing overhead.
+struct TimedSink {
+    inner: Box<dyn roc::exec::SinkExec>,
+    nanos: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+impl roc::exec::SinkExec for TimedSink {
+    fn start(&mut self, guard: &asyncband::shutdown::ShutdownGuard) -> roc::error::Result<()> {
+        self.inner.start(guard)
+    }
+    fn local_sink(
+        &self,
+        ctx: &roc::exec::LocalSinkContext,
+    ) -> roc::error::Result<Box<dyn roc::exec::LocalSink>> {
+        self.inner.local_sink(ctx)
+    }
+    fn consume<'a>(
+        &'a mut self,
+        status: roc::exec::ConsumeStatus,
+        local: &'a mut dyn roc::exec::LocalSink,
+        states: roc::exec::StateContext<'a>,
+        guard: &'a asyncband::shutdown::ShutdownGuard,
+    ) -> futures::future::BoxFuture<'a, roc::error::Result<()>> {
+        self.inner.consume(status, local, states, guard)
+    }
+    fn finish<'a>(
+        &'a mut self,
+        guard: &'a asyncband::shutdown::ShutdownGuard,
+        cpu: &'a dyn roc::exec::Cpu,
+    ) -> futures::future::BoxFuture<'a, roc::error::Result<()>> {
+        Box::pin(async move {
+            let start = Instant::now();
+            let result = self.inner.finish(guard, cpu).await;
+            self.nanos.fetch_add(
+                start.elapsed().as_nanos() as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            result
+        })
+    }
 }
 
 /// One value of a result row, comparable across engines.

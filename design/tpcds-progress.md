@@ -70,13 +70,36 @@ Commit history on the branch tells the order of work. Update this section
 and `tpcds/status.md` from the runner output after each milestone.
 
 <!-- STATUS -->
-2026-10-15, SF1, Apple M1 Pro (machine shared with other jobs; timings are
-noisy, compare engines within one run). Full per-statement report:
+2026-10-15 LocalSink + parallel finish milestone, SF1 on Apple M4 Pro: **103 / 103** in both
+Compile and ZeroCompile with 4 workers. Targeted q23a/b, q47, q51, q57, q67
+and a 240,000-group aggregation also pass in both modes with 1 / 4 workers.
+`cargo test --locked --workspace` passes 192 tests including the doctest.
+Full ZeroCompile correctness report:
 [`integrations/datafusion/tpcds/status.md`](../integrations/datafusion/tpcds/status.md).
+Both modes' validation rows are in
+[`finish_parallel_validation.csv`](../benches/finish_parallel_validation.csv).
 
-Correctness: 103 / 103 in ZeroCompile with 4 workers at the last commit,
-and in both modes with 4 workers at every milestone before it; with 1
-worker q72 used to time out (it now takes about 1 s).
+The serial LocalSink migration regressed q51, q67 and high-cardinality grouping.
+Section 12 of [`sink-parallelism.md`](sink-parallelism.md) is now implemented:
+4-worker ZeroCompile q51 falls from 393.3 to 194.3 ms and q67 from 823.0 to
+471.2 ms. All 14 targeted 4-worker configurations are within 10% of `37e6978`.
+The single-worker non-regression goal is not fully met: alternating runs still
+show a 5–7% ZeroCompile slowdown for q23a versus the serial LocalSink version.
+The complete matrix and follow-up measurements are retained in section 12.11.
+The implementation keeps the LocalSink protocol and gives only
+`SinkExec::finish` a `Cpu` handle: local
+sinks split their data into hash partitions (Table by the high hash bits, so
+the bucket layout is unchanged), and the finish runs one task per partition
+for window values, aggregate merges with key output, and table segments.
+The next design, [`source-parallelism.md`](source-parallelism.md), moves the
+per-partition finish work into the downstream source, following DuckDB:
+each instance becomes an async task with its own `LocalSource`, and
+aggregate, window and sort results are published as partitions that reading
+instances claim and finish on demand.
+
+Historical measurements below are from the prior Apple M1 Pro environment
+(shared with other jobs), before the LocalSink migration; do not compare their
+absolute times with the new M4 results.
 
 Performance, ZeroCompile, 4 workers, both engines on a 4-thread runtime
 with 4 DataFusion partitions, best of 3 runs (`--repeat 3`):
@@ -116,33 +139,25 @@ the why.
   dimension tables joined above them (`plan.rs::Reduction`).
 - Aggregates: open-addressing group index with word, fixed-width compound
   and encoded keys (`exec/aggregate/group_index.rs`); 128-bit sums over
-  whole windows; partials of all workers merge as hash partitions in
-  parallel CPU jobs at finish.
+  whole windows; LocalSink exports and partitions partials in CPU jobs, then
+  final finish merges and evaluates each grouping-set partition on workers.
+  Empty grouping sets use one partition. End preparation releases local index
+  and accumulator state on the worker. Optional root-domain group
+  thresholds reset group indexes and accumulators together after Flush.
 - Pipelines: a program that needs a match in an empty table for every
   effect does not read its input (`Steps::idle`).
-- Sinks: `SinkExec::finish_on(guard, &dyn Cpu)` lets a sink run its finish
-  work as CPU jobs on the pipeline's executor (the same worker threads,
-  same parallelism; the default calls `finish`). Users: aggregate merges,
-  join table builds (a job per column), buffer finishes: sorts (ranges
-  sorted in jobs, then merged) and windows (rows split by partition-key
-  hash, one job per part). The IR and the pipeline model are unchanged.
-  Design decision, 2026-10-15 (implementation pending): remove
-  `SinkExec::finish_on` and `exec::Cpu`; sinks submit no CPU jobs. Each
-  execution instance pairs its LocalState with a `LocalSink` that runs
-  inside CPU jobs: `consume(Option<chunk>)` after every program run returns
-  `ConsumeStatus::{End, Flush, Stop}` (it predicts capacity so every run
-  completes), and `finish(status)` organizes local data in parallel. The
-  sink takes the data over on the coordinator in `SinkExec::consume(status)`
-  (resetting the instance after Flush / Stop) and does the cross-instance
-  work single-threaded in `SinkExec::finish`. Program, KernelGraph and
-  liveness are unchanged: kernel-written state belongs to the sink and is
-  reached by StateId. Sorts and windows sort locally and only merge (windows
-  then compute linearly), table builds hash keys locally and gather each
-  column once, aggregates export partials and merge them serially.
-  High-cardinality aggregates and large table builds are the known serial
-  bottlenecks. See [`sink-parallelism.md`](sink-parallelism.md) for the
-  interfaces, handoff protocol, executor changes, per-sink implementation
-  and validation, including q51, q47, q57, q67 and q23.
+- Sinks (2026-10-15): implemented the LocalSink handoff design in
+  [`sink-parallelism.md`](sink-parallelism.md). Each execution instance owns
+  `(LocalState, LocalSink)`; local consume and preparation run inside CPU jobs,
+  and the coordinator takes Flush/Stop/End handoffs. All End preparations must
+  succeed before the first End handoff. Only final finish can submit CPU jobs.
+  Window runs merge by hash partition, Table assembles independent bucket
+  ranges, and Sort gathers its result by column. Aggregate partials below
+  16,384 rows still merge serially. Coalesced jobs stop at 128 batches or
+  16 times the configured batch row count. The IR and liveness model are
+  unchanged. The TPC-DS runner now
+  reports the sum of `SinkExec::finish` durations separately; the design
+  document records the same-machine before/after measurements.
 - Lowering: decimal casts that cannot overflow skip their precision check.
 
 ## Known gaps and next steps
@@ -159,9 +174,12 @@ Correctness:
   filter is unsupported (`JoinOperator::try_new`).
 - Not yet covered: larger scale factors; an automated test that runs the
   corpus (it needs the generated data, so it is an example today); a full
-  Compile-mode and 1-worker corpus run at the last commit.
+  1-worker corpus run at this milestone.
 
-Performance, largest gaps first (profile before changing anything):
+Performance, largest gaps first (profile before changing anything). The
+validated plan for these and newer findings (duplicated scan filters, IN
+lists re-translating their operand, semi joins that never swap build sides)
+is [`performance-roadmap.md`](performance-roadmap.md):
 
 1. **Group-bys with string keys** (q23 `substr(i_item_desc)`, q67): the
    encoded-key path encodes every row's cells (`scalar::key_bytes` from
@@ -171,8 +189,9 @@ Performance, largest gaps first (profile before changing anything):
    for every function, and merges decode partial arrays into cells. Typed
    per-function storage and merges of indexes and accumulators without
    Arrow arrays would cut q23, q14, q78.
-3. **Serial parts of finishes**: `RowKeys::new` (sort and window keys),
-   the sort runs' merge, `table::index` (hashing and bucket sort).
+3. **Remaining serial parts of finishes**: sort runs' heap merge, window
+   scatter, aggregate result concatenation/layout, and Table starts/key
+   concatenation. Local encoding/sorting and partition merges now run on workers.
 4. **Semi joins with a large build side** (q23's `best_ss_customer`): the
    2.9M-row table is built only to test existence; joining with the
    distinct keys, or a build-side mark, would avoid it.

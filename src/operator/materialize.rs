@@ -22,9 +22,9 @@ use crate::arrow::{
 };
 use crate::column::ColumnId;
 use crate::exec::{
-    Buffer, BufferSinkExec, BufferSourceExec, Finish,
-    sort::{SortKey, sort_chunks},
-    window::{self, Window, WindowFrame, WindowFunction},
+    Buffer, BufferSinkExec, BufferSourceExec, Finish, SinkExec,
+    sort::{SortKey, SortSinkExec},
+    window::{Window, WindowFrame, WindowFunction, WindowSinkExec},
 };
 use crate::{
     error::{Error, ErrorKind, Result},
@@ -41,7 +41,7 @@ fn materialize(
     current: PipelineId,
     graph: &mut PipelineGraphBuilder<'_>,
     columns: &[ColumnId],
-    sink: BufferSinkExec,
+    sink: impl SinkExec,
 ) -> Result<PipelineId> {
     let input = graph.new_dependency(current)?;
     build_pipeline_on_node(child, input, graph)?;
@@ -140,11 +140,8 @@ impl Operator for SortOperator {
             })
             .collect::<Vec<_>>();
         let fetch = self.fetch;
-        let finish: Finish = Box::new(move |chunks, cpu| {
-            Box::pin(async move { sort_chunks(&schema, chunks, &keys, fetch, cpu).await })
-        });
         let buffer = Arc::new(Buffer::default());
-        let sink = BufferSinkExec::new(buffer.clone(), Some(finish));
+        let sink = SortSinkExec::new(buffer.clone(), schema, keys, fetch);
         materialize(child, current, graph, &self.columns, sink)?;
         read(buffer, current, graph, &self.columns)?;
         graph.pipeline_mut(current)?.set_ordered();
@@ -468,11 +465,8 @@ impl Operator for WindowOperator {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let finish: Finish = Box::new(move |chunks, cpu| {
-            Box::pin(async move { window::compute(&schema, chunks, &windows, cpu).await })
-        });
         let buffer = Arc::new(Buffer::default());
-        let sink = BufferSinkExec::new(buffer.clone(), Some(finish));
+        let sink = WindowSinkExec::new(buffer.clone(), schema, windows);
         materialize(child, current, graph, &self.columns, sink)?;
         read(buffer, current, graph, &outputs)?;
         Ok(())

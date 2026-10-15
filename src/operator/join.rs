@@ -146,7 +146,7 @@ impl Operator for JoinOperator {
             keys,
             self.nulls_equal,
             table.clone(),
-        );
+        )?;
         graph
             .pipeline_mut(build_pipeline)?
             .set_sink(Box::new(sink), Some(stored))?;

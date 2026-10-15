@@ -198,6 +198,14 @@ impl Accumulator {
     fn decimal_average(&self) -> bool {
         self.function == AggregateFunction::Avg && matches!(self.output, DataType::Decimal128(..))
     }
+    pub fn clear(&mut self) {
+        self.groups.clear();
+        self.generated = GroupView {
+            data: self.groups.as_mut_ptr(),
+            len: 0,
+        };
+    }
+
     pub fn resize(&mut self, count: usize) {
         if count > self.groups.len() {
             self.groups.resize_with(count, Group::default);

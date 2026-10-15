@@ -1,0 +1,17 @@
+mode,round,version,query,stage,roc_ms,sink_finish_ms
+zero,1,parallel,q23a,passed,3313.8,1606.7
+zero,1,parallel,q23b,passed,3234.9,1471.4
+zero,1,serial,q23a,passed,3095.7,865.2
+zero,1,serial,q23b,passed,3139.2,837.6
+zero,2,serial,q23a,passed,3068.1,839.8
+zero,2,serial,q23b,passed,3225.6,878.4
+zero,2,parallel,q23a,passed,3218.9,1421.0
+zero,2,parallel,q23b,passed,3225.1,1439.5
+compile,1,parallel,q23a,passed,3366.5,1458.5
+compile,1,parallel,q23b,passed,3570.0,1710.6
+compile,1,serial,q23a,passed,3359.5,934.0
+compile,1,serial,q23b,passed,3575.3,992.7
+compile,2,serial,q23a,passed,3279.2,848.4
+compile,2,serial,q23b,passed,3535.4,996.7
+compile,2,parallel,q23a,passed,3344.5,1484.8
+compile,2,parallel,q23b,passed,3484.5,1552.8

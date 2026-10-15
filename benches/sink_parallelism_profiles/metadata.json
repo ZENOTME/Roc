@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-15",
+  "baseline": "37e69782efb87a6b0e8d0b415170b0b8d25e0695",
+  "mode": "ZeroCompile",
+  "workers": 4,
+  "runtime_threads": 4,
+  "repetitions": 6,
+  "discard_first": 1,
+  "control_repeats": 2,
+  "metric": "per-run stage sum, then median; query is wall time",
+  "data": "/Users/dongzejiong/Project/roc-data/tpcds/sf1",
+  "machine": "Apple M4 Pro",
+  "variants": {
+    "before": "baseline with stage timers",
+    "control": "current implementation with diagnostic timers",
+    "control_end": "same control repeated after experiments",
+    "drop": "End local aggregate state destruction on the CPU worker",
+    "coalesce": "maximum 16 immediately ready input batches per job instead of 128",
+    "both": "drop + coalesce"
+  },
+  "raw_directory": "/tmp/roc-sink-parallelism.uNYFgD/hotspots",
+  "sampling": "macOS sample, 6 seconds, 1 ms interval, original uninstrumented release binaries; top-of-stack counts restricted to coordinator sink finish call trees",
+  "notes": [
+    "No builds, correctness tests, or samplers run concurrently with traced timings.",
+    "Stage durations include nested work; never sum a parent and its children.",
+    "Independent pipelines overlap; sums across pipelines are not a query critical path.",
+    "before aggregate finish includes partial export/partition jobs; after export is timed separately as pipeline.local_finish_wall.",
+    "before Window is implemented through BufferSinkExec; after has WindowSinkExec.",
+    "Diagnostic timers and logging perturb timings; use phase values for attribution and separate uninstrumented runs for overall comparisons.",
+    "The before q67 intermediate ROLLUP has 501983 rows vs after 501976: the old 8-way empty grouping set emits 7 extra empty groups. Final q67 top-100 agrees in the validation runs."
+  ],
+  "uninstrumented_best_of_10_ms": {
+    "before": {
+      "q51": 201.9,
+      "q67": 473.5
+    },
+    "after": {
+      "q51": 404.1,
+      "q67": 847.3
+    }
+  },
+  "validation": "drop/coalesce/both x q51/q67 x ZeroCompile/Compile = 12/12 passed vs DataFusion; performance sampling/trace runs use --profile and do not validate"
+}

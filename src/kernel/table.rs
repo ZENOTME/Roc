@@ -28,6 +28,7 @@ use crate::arrow::{
 };
 use crate::error::{Error, Result};
 use arrow_data::transform::MutableArrayData;
+use asyncband::shutdown::ShutdownGuard;
 use std::sync::{Arc, OnceLock};
 
 /// Tables hold fewer rows than this.
@@ -66,7 +67,7 @@ fn hash_word(key: u64) -> u64 {
     (key ^ (key >> 29)).wrapping_mul(0xbf58_476d_1ce4_e5b9)
 }
 
-fn hash_bytes(key: &[u8]) -> u64 {
+pub(crate) fn hash_bytes(key: &[u8]) -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = foldhash::fast::FixedState::with_seed(0x51_7cc1_b727_220a).build_hasher();
     h.write(key);
@@ -99,21 +100,15 @@ impl Table {
         keys: &[usize],
         nulls_equal: bool,
     ) -> Result<Self> {
-        let columns = (0..schema.fields().len())
-            .map(|i| column(batches, &schema, i))
+        let plan = KeyPlan::new(&schema, keys.to_vec(), nulls_equal)?;
+        let prepared = batches
+            .iter()
+            .map(|b| plan.prepare(b))
             .collect::<Result<Vec<_>>>()?;
-        let (index, order) = index(&columns, keys, nulls_equal)?;
-        let columns = match order {
-            Some(order) => columns
-                .iter()
-                .map(|c| reorder(c, &order))
-                .collect::<Result<_>>()?,
-            None => columns,
-        };
-        Ok(Self::from_parts(schema, columns, index))
+        plan.assemble(schema, batches, &prepared, None)
     }
 
-    /// A table of columns already in the order of `index`; see `index`.
+    /// A table of columns already arranged by KeyPlan::assemble.
     pub(crate) fn from_parts(
         schema: SchemaRef,
         columns: Vec<ArrayRef>,
@@ -214,154 +209,493 @@ impl WordIndex<'_> {
     }
 }
 
-impl Index {
-    /// The index of the rows, and the order the table stores them in
-    /// (`None` when they already are in it).
-    fn new(
-        columns: &[ArrayRef],
-        rows: usize,
-        keys: &[usize],
-        nulls_equal: bool,
-    ) -> Result<(Self, Option<Vec<u32>>)> {
+/// Key binding is fixed for the whole build; row preparation is local to a job.
+#[derive(Clone)]
+pub(crate) struct KeyPlan {
+    keys: Vec<usize>,
+    nulls_equal: bool,
+    word: bool,
+    encoders: Vec<KeyEncoder>,
+}
+
+pub(crate) struct PreparedKeys {
+    hashes: Vec<Option<u64>>,
+    words: Vec<u64>,
+    data: Vec<u8>,
+    offsets: Vec<usize>,
+}
+
+impl KeyPlan {
+    pub fn new(schema: &SchemaRef, keys: Vec<usize>, nulls_equal: bool) -> Result<Self> {
         let types = keys
             .iter()
-            .map(|&k| columns[k].data_type().clone())
+            .map(|&k| schema.field(k).data_type())
             .collect::<Vec<_>>();
-        let buckets = rows.max(2).next_power_of_two();
-        let shift = 64 - buckets.trailing_zeros();
-        let word = types.len() == 1 && word_key(&types[0]) && !nulls_equal;
-        let decoded = if word {
+        let word = types.len() == 1 && word_key(types[0]) && !nulls_equal;
+        let encoders = if word {
             vec![]
         } else {
-            keys.iter()
+            types
+                .into_iter()
+                .map(scalar::bind_key)
+                .collect::<Result<_>>()?
+        };
+        Ok(Self {
+            keys,
+            nulls_equal,
+            word,
+            encoders,
+        })
+    }
+
+    pub fn prepare(&self, batch: &RecordBatch) -> Result<PreparedKeys> {
+        let mut prepared = PreparedKeys {
+            hashes: vec![],
+            words: vec![],
+            data: vec![],
+            offsets: vec![0],
+        };
+        if self.keys.is_empty() {
+            return Ok(prepared);
+        }
+        let columns = batch.columns();
+        let decoded = if self.word {
+            vec![]
+        } else {
+            self.keys
+                .iter()
                 .map(|&k| scalar::decode(&columns[k]))
                 .collect::<Result<Vec<_>>>()?
         };
-        let nulls = keys
+        if self.word {
+            prepared.words = key_words(&columns[self.keys[0]]).expect("word keys have word types");
+        }
+        let nulls = self
+            .keys
             .iter()
             .map(|&k| columns[k].logical_nulls())
             .collect::<Vec<_>>();
-        let indexed =
-            |r: usize| nulls_equal || nulls.iter().all(|n| n.as_ref().is_none_or(|n| n.is_valid(r)));
-        let (words, encoders, mut data, mut offsets) = if word {
-            let words = key_words(&columns[keys[0]]).expect("word keys have word types");
-            (words, vec![], vec![], vec![])
-        } else {
-            let encoders = types
-                .iter()
-                .map(scalar::bind_key)
+        for r in 0..batch.num_rows() {
+            let hash = if self.word {
+                hash_word(prepared.words[r])
+            } else {
+                let start = prepared.data.len();
+                for (cells, encode) in decoded.iter().zip(&self.encoders) {
+                    encode(cells[r], &mut prepared.data);
+                }
+                prepared.offsets.push(prepared.data.len());
+                hash_bytes(&prepared.data[start..])
+            };
+            let indexed = self.nulls_equal
+                || nulls
+                    .iter()
+                    .all(|n| n.as_ref().is_none_or(|n| n.is_valid(r)));
+            prepared.hashes.push(indexed.then_some(hash));
+        }
+        Ok(prepared)
+    }
+
+    /// Stable counting sort by the existing bucket hash, followed by one
+    /// interleave per payload column. No concatenated payload is reordered.
+    pub fn assemble(
+        &self,
+        schema: SchemaRef,
+        batches: &[RecordBatch],
+        prepared: &[PreparedKeys],
+        guard: Option<&ShutdownGuard>,
+    ) -> Result<Table> {
+        let check = || {
+            if guard.is_some_and(|g| g.is_shutdown_requested()) {
+                Err(Error::cancelled())
+            } else {
+                Ok(())
+            }
+        };
+        check()?;
+        let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        if rows >= END as usize {
+            return Err(Error::new(
+                crate::error::ErrorKind::ResourceExhausted,
+                format!("a table holds at most {} rows", END - 1),
+            ));
+        }
+        if self.keys.is_empty() {
+            let columns = (0..schema.fields().len())
+                .map(|i| {
+                    check()?;
+                    concat(
+                        batches.iter().map(|b| b.column(i)),
+                        schema.field(i).data_type(),
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
+            let mut table = Table::from_parts(schema, columns, None);
+            table.rows = rows;
+            return Ok(table);
+        }
+        let buckets = rows.max(2).next_power_of_two();
+        let shift = 64 - buckets.trailing_zeros();
+        let bucket = |hash: Option<u64>| hash.map_or(buckets, |h| (h >> shift) as usize);
+        let mut starts = vec![0u32; buckets + 2];
+        for chunk in prepared {
+            check()?;
+            for (r, &hash) in chunk.hashes.iter().enumerate() {
+                if r % 4096 == 0 {
+                    check()?;
+                }
+                starts[bucket(hash) + 1] += 1;
+            }
+        }
+        for b in 1..starts.len() {
+            if b % 4096 == 0 {
+                check()?;
+            }
+            starts[b] += starts[b - 1];
+        }
+        let mut order = vec![(0, 0); rows];
+        let mut at = starts.clone();
+        for (chunk, keys) in prepared.iter().enumerate() {
+            for (r, &hash) in keys.hashes.iter().enumerate() {
+                if r % 4096 == 0 {
+                    check()?;
+                }
+                let b = bucket(hash);
+                order[at[b] as usize] = (chunk, r);
+                at[b] += 1;
+            }
+        }
+        starts.truncate(buckets + 1);
+        let keys = if self.word {
+            let mut words = Vec::with_capacity(rows);
+            for (i, &(c, r)) in order.iter().enumerate() {
+                if i % 4096 == 0 {
+                    check()?;
+                }
+                words.push(prepared[c].words[r]);
+            }
+            Keys::Word(words)
+        } else {
             let mut data = vec![];
             let mut offsets = Vec::with_capacity(rows + 1);
             offsets.push(0);
-            for r in 0..rows {
-                for (c, encode) in decoded.iter().zip(&encoders) {
-                    encode(c[r], &mut data);
+            for (i, &(c, r)) in order.iter().enumerate() {
+                if i % 4096 == 0 {
+                    check()?;
                 }
-                offsets.push(data.len());
-            }
-            (vec![], encoders, data, offsets)
-        };
-        // The bucket of each row; unindexed rows go after the last one.
-        let bucket = (0..rows)
-            .map(|r| match indexed(r) {
-                false => buckets as u32,
-                true if word => (hash_word(words[r]) >> shift) as u32,
-                true => (hash_bytes(&data[offsets[r]..offsets[r + 1]]) >> shift) as u32,
-            })
-            .collect::<Vec<_>>();
-        // A stable counting sort of the rows by bucket.
-        let mut starts = vec![0u32; buckets + 2];
-        for &b in &bucket {
-            starts[b as usize + 1] += 1;
-        }
-        for b in 1..starts.len() {
-            starts[b] += starts[b - 1];
-        }
-        let mut order = vec![0u32; rows];
-        let mut at = starts.clone();
-        for (r, &b) in bucket.iter().enumerate() {
-            order[at[b as usize] as usize] = r as u32;
-            at[b as usize] += 1;
-        }
-        starts.truncate(buckets + 1);
-        let sorted = order.iter().enumerate().all(|(i, &r)| i == r as usize);
-        let keys = if word {
-            Keys::Word(order.iter().map(|&r| words[r as usize]).collect())
-        } else {
-            let (old, old_offsets) = (std::mem::take(&mut data), std::mem::take(&mut offsets));
-            offsets.push(0);
-            for &r in &order {
-                let r = r as usize;
-                data.extend_from_slice(&old[old_offsets[r]..old_offsets[r + 1]]);
+                let p = &prepared[c];
+                data.extend_from_slice(&p.data[p.offsets[r]..p.offsets[r + 1]]);
                 offsets.push(data.len());
             }
             Keys::Encoded {
-                encoders,
+                encoders: self.encoders.clone(),
                 data,
                 offsets,
             }
         };
-        let index = Self {
-            starts,
-            shift,
-            keys,
+        let columns = (0..schema.fields().len())
+            .map(|i| {
+                check()?;
+                let arrays = batches
+                    .iter()
+                    .map(|b| b.column(i).as_ref())
+                    .collect::<Vec<_>>();
+                if arrays.is_empty() {
+                    return Ok(crate::arrow::array::new_empty_array(
+                        schema.field(i).data_type(),
+                    ));
+                }
+                arrow_select::interleave::interleave(&arrays, &order).map_err(|source| {
+                    Error::new(
+                        crate::error::ErrorKind::ResourceExhausted,
+                        "a column exceeds the offsets of its type",
+                    )
+                    .with_source(source)
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        check()?;
+        Ok(Table::from_parts(
+            schema,
+            columns,
+            Some(TableIndex(Index {
+                starts,
+                shift,
+                keys,
+            })),
+        ))
+    }
+}
+
+/// One contiguous bucket range, or the unindexed tail.
+struct TablePartition {
+    starts: Vec<u32>,
+    keys: Keys,
+    columns: Vec<ArrayRef>,
+    rows: usize,
+}
+
+impl KeyPlan {
+    /// High hash bits select contiguous bucket ranges. The last partition
+    /// retains non-indexed NULL rows in input order.
+    pub(crate) fn partitions(
+        &self,
+        prepared: &[PreparedKeys],
+        count: usize,
+        guard: &ShutdownGuard,
+    ) -> Result<Vec<Vec<(usize, usize)>>> {
+        if !count.is_power_of_two() {
+            return Err(Error::invalid_plan(
+                "table partitions must be a power of two".into(),
+            ));
+        }
+        let mut out = vec![vec![]; count + 1];
+        for (chunk, keys) in prepared.iter().enumerate() {
+            for (row, hash) in keys.hashes.iter().enumerate() {
+                if row % 4096 == 0 && guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let p = match hash {
+                    None => count,
+                    Some(_) if count == 1 => 0,
+                    Some(h) => (h >> (64 - count.trailing_zeros())) as usize,
+                };
+                out[p].push((chunk, row));
+            }
+        }
+        Ok(out)
+    }
+
+    fn gather_keys(
+        &self,
+        prepared: &[PreparedKeys],
+        order: &[(usize, usize)],
+        guard: &ShutdownGuard,
+    ) -> Result<Keys> {
+        if self.word {
+            let mut words = Vec::with_capacity(order.len());
+            for (i, &(c, r)) in order.iter().enumerate() {
+                if i % 4096 == 0 && guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                words.push(prepared[c].words[r]);
+            }
+            Ok(Keys::Word(words))
+        } else {
+            let mut data = vec![];
+            let mut offsets = Vec::with_capacity(order.len() + 1);
+            offsets.push(0);
+            for (i, &(c, r)) in order.iter().enumerate() {
+                if i % 4096 == 0 && guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let p = &prepared[c];
+                data.extend_from_slice(&p.data[p.offsets[r]..p.offsets[r + 1]]);
+                offsets.push(data.len());
+            }
+            Ok(Keys::Encoded {
+                encoders: self.encoders.clone(),
+                data,
+                offsets,
+            })
+        }
+    }
+
+    fn assemble_partition(
+        &self,
+        schema: &SchemaRef,
+        batches: &[RecordBatch],
+        prepared: &[PreparedKeys],
+        rows: Vec<(usize, usize)>,
+        first: usize,
+        buckets: usize,
+        shift: u32,
+        guard: &ShutdownGuard,
+    ) -> Result<TablePartition> {
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        let mut starts = vec![0u32; buckets + 1];
+        let order = if buckets == 0 {
+            rows
+        } else {
+            for (i, &(c, r)) in rows.iter().enumerate() {
+                if i % 4096 == 0 && guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let b =
+                    (prepared[c].hashes[r].expect("indexed partition") >> shift) as usize - first;
+                starts[b + 1] += 1;
+            }
+            for b in 1..starts.len() {
+                starts[b] += starts[b - 1];
+            }
+            let mut at = starts.clone();
+            let mut order = vec![(0, 0); rows.len()];
+            for (i, &(c, r)) in rows.iter().enumerate() {
+                if i % 4096 == 0 && guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let b = (prepared[c].hashes[r].unwrap() >> shift) as usize - first;
+                order[at[b] as usize] = (c, r);
+                at[b] += 1;
+            }
+            order
         };
-        Ok((index, (!sorted).then_some(order)))
+        let keys = self.gather_keys(prepared, &order, guard)?;
+        let batch = crate::exec::sort::interleave_chunks(schema, batches, &order, guard)?;
+        Ok(TablePartition {
+            starts,
+            keys,
+            columns: batch.columns().to_vec(),
+            rows: order.len(),
+        })
     }
-}
 
-/// Column `i` of the batches, one after another.
-pub(crate) fn column(batches: &[RecordBatch], schema: &SchemaRef, i: usize) -> Result<ArrayRef> {
-    concat(
-        batches.iter().map(|b| b.column(i)),
-        schema.field(i).data_type(),
-    )
-}
-
-/// The index of a table's columns `keys`, and the order its rows must be
-/// stored in (`None` when they already are). A row with a NULL key is not
-/// indexed unless `nulls_equal`.
-pub(crate) fn index(
-    columns: &[ArrayRef],
-    keys: &[usize],
-    nulls_equal: bool,
-) -> Result<(Option<TableIndex>, Option<Vec<u32>>)> {
-    let rows = columns.first().map_or(0, |c| c.len());
-    if rows >= END as usize {
-        return Err(Error::new(
-            crate::error::ErrorKind::ResourceExhausted,
-            format!("a table holds at most {} rows", END - 1),
-        ));
+    pub(crate) async fn assemble_on(
+        self: &Arc<Self>,
+        schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+        prepared: Vec<PreparedKeys>,
+        partitions: Vec<Vec<(usize, usize)>>,
+        guard: &ShutdownGuard,
+        cpu: &dyn crate::exec::Cpu,
+    ) -> Result<Table> {
+        let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        if rows >= END as usize {
+            return Err(Error::new(
+                crate::error::ErrorKind::ResourceExhausted,
+                format!("a table holds at most {} rows", END - 1),
+            ));
+        }
+        let count = partitions.len().saturating_sub(1);
+        let buckets = rows.max(2).next_power_of_two();
+        if self.keys.is_empty() || count <= 1 || buckets < count {
+            return self.assemble(schema, &batches, &prepared, Some(guard));
+        }
+        let shift = 64 - buckets.trailing_zeros();
+        let width = buckets / count;
+        let batches = Arc::new(batches);
+        let prepared = Arc::new(prepared);
+        let jobs = partitions
+            .into_iter()
+            .enumerate()
+            .map(|(k, rows)| {
+                let (plan, schema, batches, prepared, guard) = (
+                    self.clone(),
+                    schema.clone(),
+                    batches.clone(),
+                    prepared.clone(),
+                    guard.clone(),
+                );
+                Box::new(move || {
+                    plan.assemble_partition(
+                        &schema,
+                        &batches,
+                        &prepared,
+                        rows,
+                        k * width,
+                        if k == count { 0 } else { width },
+                        shift,
+                        &guard,
+                    )
+                }) as Box<dyn FnOnce() -> Result<TablePartition> + Send>
+            })
+            .collect();
+        let mut parts = crate::exec::run_all(cpu, jobs).await?;
+        let mut starts = Vec::with_capacity(buckets + 1);
+        let mut base = 0u32;
+        for part in &parts[..count] {
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            starts.extend(part.starts[..width].iter().map(|s| s + base));
+            base += part.rows as u32;
+        }
+        starts.push(base);
+        let keys = if self.word {
+            let mut words = Vec::with_capacity(rows);
+            for part in &mut parts {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let Keys::Word(mut values) = std::mem::replace(&mut part.keys, Keys::Word(vec![]))
+                else {
+                    unreachable!("word segment")
+                };
+                words.append(&mut values);
+            }
+            Keys::Word(words)
+        } else {
+            let mut data = vec![];
+            let mut offsets = Vec::with_capacity(rows + 1);
+            offsets.push(0);
+            for part in &mut parts {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                let Keys::Encoded {
+                    data: mut bytes,
+                    offsets: local,
+                    ..
+                } = std::mem::replace(&mut part.keys, Keys::Word(vec![]))
+                else {
+                    unreachable!("encoded segment")
+                };
+                let base = data.len();
+                offsets.extend(local.into_iter().skip(1).map(|o| o + base));
+                data.append(&mut bytes);
+            }
+            Keys::Encoded {
+                encoders: self.encoders.clone(),
+                data,
+                offsets,
+            }
+        };
+        let parts = Arc::new(parts);
+        let jobs = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let parts = parts.clone();
+                let ty = f.data_type().clone();
+                let guard = guard.clone();
+                Box::new(move || {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    concat(parts.iter().map(|p| &p.columns[i]), &ty)
+                }) as Box<dyn FnOnce() -> Result<ArrayRef> + Send>
+            })
+            .collect();
+        let columns = crate::exec::run_all(cpu, jobs).await?;
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        Ok(Table::from_parts(
+            schema,
+            columns,
+            Some(TableIndex(Index {
+                starts,
+                shift,
+                keys,
+            })),
+        ))
     }
-    if keys.is_empty() {
-        return Ok((None, None));
-    }
-    let (index, order) = Index::new(columns, rows, keys, nulls_equal)?;
-    Ok((Some(TableIndex(index)), order))
 }
 
 /// The index of a table under construction.
 pub(crate) struct TableIndex(Index);
-
-/// A column in the order `index` gave.
-pub(crate) fn reorder(column: &ArrayRef, order: &[u32]) -> Result<ArrayRef> {
-    let order = crate::arrow::array::UInt32Array::from(order.to_vec());
-    arrow_select::take::take(column, &order, None).map_err(|source| {
-        Error::new(
-            crate::error::ErrorKind::ResourceExhausted,
-            "a column exceeds the offsets of its type",
-        )
-        .with_source(source)
-    })
-}
 
 /// The canonical word of every row of a key column of a word type, as
 /// `scalar::decode` gives them, NULL rows zero; None for other types.
 fn key_words(a: &ArrayRef) -> Option<Vec<u64>> {
     use crate::arrow::array::{AsArray, PrimitiveArray};
     use crate::arrow::datatypes::*;
-    fn words<T: ArrowPrimitiveType>(a: &PrimitiveArray<T>, f: impl Fn(T::Native) -> u64) -> Vec<u64> {
+    fn words<T: ArrowPrimitiveType>(
+        a: &PrimitiveArray<T>,
+        f: impl Fn(T::Native) -> u64,
+    ) -> Vec<u64> {
         match a.nulls() {
             None => a.values().iter().map(|v| f(*v)).collect(),
             Some(n) => a
@@ -436,4 +770,107 @@ impl SharedTable {
 /// The state of an Expand or TableGather.
 pub struct TableState {
     pub table: Arc<Table>,
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+    use crate::arrow::{
+        array::{Int64Array, StringArray},
+        datatypes::{Field, Schema},
+    };
+
+    #[test]
+    fn parallel_segments_preserve_every_bucket_key_and_payload_row() {
+        for word in [false, true] {
+            for nulls_equal in [false, true] {
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new(
+                        "key",
+                        if word {
+                            DataType::Int64
+                        } else {
+                            DataType::Utf8
+                        },
+                        true,
+                    ),
+                    Field::new("row", DataType::Int64, false),
+                ]));
+                let plan = Arc::new(KeyPlan::new(&schema, vec![0], nulls_equal).unwrap());
+                for rows in [0, 1, 3, 513] {
+                    let keys: ArrayRef = if word {
+                        Arc::new(Int64Array::from_iter(
+                            (0..rows).map(|i| (i % 7 != 0).then_some(i % 17)),
+                        ))
+                    } else {
+                        Arc::new(StringArray::from_iter(
+                            (0..rows).map(|i| (i % 7 != 0).then(|| format!("key{}", i % 17))),
+                        ))
+                    };
+                    let batch = RecordBatch::try_new(
+                        schema.clone(),
+                        vec![keys, Arc::new(Int64Array::from_iter_values(0..rows))],
+                    )
+                    .unwrap();
+                    let batches = (0..rows as usize)
+                        .step_by(19)
+                        .map(|i| batch.slice(i, 19.min(rows as usize - i)))
+                        .collect::<Vec<_>>();
+                    let prepared = batches
+                        .iter()
+                        .map(|b| plan.prepare(b).unwrap())
+                        .collect::<Vec<_>>();
+                    let serial = plan
+                        .assemble(schema.clone(), &batches, &prepared, None)
+                        .unwrap();
+                    for k in [1, 2, 8] {
+                        let guard = asyncband::shutdown::new().1;
+                        let prepared = batches
+                            .iter()
+                            .map(|b| plan.prepare(b).unwrap())
+                            .collect::<Vec<_>>();
+                        let parts = plan.partitions(&prepared, k, &guard).unwrap();
+                        let parallel = futures::executor::block_on(plan.assemble_on(
+                            schema.clone(),
+                            batches.clone(),
+                            prepared,
+                            parts,
+                            &guard,
+                            &crate::exec::Inline,
+                        ))
+                        .unwrap();
+                        assert_eq!(serial.rows, parallel.rows);
+                        for (a, b) in serial.columns.iter().zip(&parallel.columns) {
+                            assert_eq!(a.to_data(), b.to_data());
+                        }
+                        let (a, b) = (
+                            serial.index.as_ref().unwrap(),
+                            parallel.index.as_ref().unwrap(),
+                        );
+                        assert_eq!(a.starts, b.starts);
+                        assert_eq!(a.shift, b.shift);
+                        match (&a.keys, &b.keys) {
+                            (Keys::Word(a), Keys::Word(b)) => assert_eq!(a, b),
+                            (
+                                Keys::Encoded {
+                                    data: a,
+                                    offsets: ao,
+                                    ..
+                                },
+                                Keys::Encoded {
+                                    data: b,
+                                    offsets: bo,
+                                    ..
+                                },
+                            ) => {
+                                assert_eq!(a, b);
+                                assert_eq!(ao, bo);
+                            }
+                            _ => panic!("different key representations"),
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

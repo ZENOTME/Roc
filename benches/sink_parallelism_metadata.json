@@ -1,0 +1,38 @@
+{
+  "date": "2026-10-15",
+  "baseline_commit": "37e69782efb87a6b0e8d0b415170b0b8d25e0695",
+  "after": "section 11 serial LocalSink implementation",
+  "cpu": "Apple M4 Pro",
+  "rust": "1.95.0 (59807616e 2026-04-14)",
+  "llvm": "19.1.7",
+  "profile": "release, cargo --locked",
+  "data": "TPC-DS SF1, DuckDB 1.4.5 tpcds extension, one Parquet file per table",
+  "workers": [
+    1,
+    4
+  ],
+  "runtime_threads": "same as workers",
+  "modes": [
+    "ZeroCompile",
+    "Compile"
+  ],
+  "repetitions": 3,
+  "timing": "best total Roc run; translate/build/execute/sink_finish from that same run; milliseconds rounded to 0.1",
+  "sink_finish": "after and finish_parallel only; sum of SinkExec::finish wall durations across all pipelines, including awaited CPU jobs; excludes local finish and handoff; overlapping pipelines and queue waits mean sums may exceed execute",
+  "queries": [
+    "q23a",
+    "q23b",
+    "q47",
+    "q51",
+    "q57",
+    "q67"
+  ],
+  "high_cardinality_sql": "SELECT ss_ticket_number, COUNT(*), SUM(ss_net_paid) FROM store_sales GROUP BY ss_ticket_number",
+  "high_cardinality_groups": 240000,
+  "validation": "84/84 matrix cases across all three versions passed",
+  "order": "ZeroCompile then Compile; 1 worker before/after; 4 workers after/before; query set then high-cardinality SQL; no other agent builds/tests during these measurements",
+  "finish_parallel": "section 12 implementation; only final SinkExec::finish receives Cpu",
+  "finish_parallel_order": "ZeroCompile then Compile; 1 then 4 workers; query set then high-cardinality SQL; best of 3; no concurrent builds/tests/profiling",
+  "finish_parallel_validation": "benches/finish_parallel_validation.csv: 103/103 each mode at 4 workers",
+  "finish_parallel_diagnostics": "benches/finish_parallel_profiles; single-worker q23 paired runs and rejected K=1 inline merge experiment retained separately"
+}

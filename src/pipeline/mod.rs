@@ -50,7 +50,7 @@ impl Pipeline {
 }
 
 /// A sink and the columns of the chunks it consumes; without columns it only
-/// combines states.
+/// passes kernel state to its LocalSink.
 type Sink = (Box<dyn SinkExec>, Option<Vec<ColumnId>>);
 
 /// Collects one pipeline while operators are built from the sink upward:
@@ -92,8 +92,8 @@ impl<'plan> PipelineBuilder<'plan> {
     }
 
     /// Sets the sink. With `outputs`, the program produces a chunk of these
-    /// columns from the current domain for `SinkExec::consume`; without, the
-    /// sink only combines states.
+    /// columns from the current domain for `LocalSink::consume`; without, the
+    /// LocalSink receives None and accesses the sink's kernel state.
     pub fn set_sink(
         &mut self,
         sink: Box<dyn SinkExec>,

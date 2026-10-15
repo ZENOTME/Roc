@@ -13,15 +13,20 @@
 // limitations under the License.
 
 //! Sorting by keys as byte strings that compare like the keys.
+use super::{
+    Buffer, ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, StateContext, downcast_local,
+};
 use crate::arrow::{
     array::ArrayRef,
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
-use super::{Cpu, run_all};
 use crate::error::{Error, Result};
 use crate::kernel::scalar;
+use asyncband::shutdown::ShutdownGuard;
+use futures::future::BoxFuture;
 use std::sync::Arc;
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 /// One sort key: a column of the sorted chunks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,8 +44,17 @@ pub(crate) struct RowKeys {
     offsets: Vec<usize>,
 }
 
+impl Default for RowKeys {
+    fn default() -> Self {
+        Self {
+            data: vec![],
+            offsets: vec![0],
+        }
+    }
+}
+
 impl RowKeys {
-    pub fn new(columns: &[ArrayRef], keys: &[SortKey], rows: usize) -> Result<Self> {
+    pub fn push(&mut self, columns: &[ArrayRef], keys: &[SortKey], rows: usize) -> Result<()> {
         let decoded = keys
             .iter()
             .map(|k| scalar::decode(&columns[k.column]))
@@ -49,9 +63,8 @@ impl RowKeys {
             .iter()
             .map(|k| scalar::bind_key(columns[k.column].data_type()))
             .collect::<Result<Vec<_>>>()?;
-        let mut data = vec![];
-        let mut offsets = Vec::with_capacity(rows + 1);
-        offsets.push(0);
+        let (data, offsets) = (&mut self.data, &mut self.offsets);
+        offsets.reserve(rows);
         let mut value = vec![];
         for r in 0..rows {
             for ((key, cells), encode) in keys.iter().zip(&decoded).zip(&encoders) {
@@ -73,7 +86,11 @@ impl RowKeys {
             }
             offsets.push(data.len());
         }
-        Ok(Self { data, offsets })
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len() - 1
     }
 
     pub fn row(&self, r: usize) -> &[u8] {
@@ -82,15 +99,26 @@ impl RowKeys {
 }
 
 /// One chunk of the columns of `chunks`.
-pub(crate) fn concat_chunks(schema: &SchemaRef, chunks: &[RecordBatch]) -> Result<RecordBatch> {
-    let columns = (0..schema.fields().len())
+pub(crate) async fn concat_chunks_on(
+    schema: &SchemaRef,
+    chunks: Arc<Vec<RecordBatch>>,
+    guard: &ShutdownGuard,
+    cpu: &dyn super::Cpu,
+) -> Result<RecordBatch> {
+    let jobs = (0..schema.fields().len())
         .map(|i| {
-            crate::kernel::table::concat(
-                chunks.iter().map(|c| c.column(i)),
-                schema.field(i).data_type(),
-            )
+            let chunks = chunks.clone();
+            let ty = schema.field(i).data_type().clone();
+            let guard = guard.clone();
+            Box::new(move || {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
+                crate::kernel::table::concat(chunks.iter().map(|c| c.column(i)), &ty)
+            }) as Box<dyn FnOnce() -> Result<crate::arrow::array::ArrayRef> + Send>
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
+    let columns = super::run_all(cpu, jobs).await?;
     let rows = chunks.iter().map(RecordBatch::num_rows).sum();
     RecordBatch::try_new_with_options(
         schema.clone(),
@@ -100,105 +128,396 @@ pub(crate) fn concat_chunks(schema: &SchemaRef, chunks: &[RecordBatch]) -> Resul
     .map_err(|source| Error::internal("chunks do not concatenate".into()).with_source(source))
 }
 
-/// The rows at `indices`.
-pub(crate) fn take(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch> {
-    let indices = crate::arrow::array::UInt32Array::from(indices.to_vec());
-    let columns = batch
-        .columns()
-        .iter()
-        .map(|c| arrow_select::take::take(c.as_ref(), &indices, None))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| Error::internal("rows cannot be taken".into()).with_source(source))?;
-    RecordBatch::try_new_with_options(
-        batch.schema(),
-        columns,
-        &RecordBatchOptions::new().with_row_count(Some(indices.len())),
-    )
-    .map_err(|source| Error::internal("rows cannot be taken".into()).with_source(source))
-}
-
-/// Rows below which one job sorts them all.
-const PARALLEL_ROWS: usize = 64 * 1024;
-
-/// The rows of `chunks` ordered by `keys`; with `fetch`, only the first.
-/// Rows with equal keys keep their order. Ranges of rows sort in CPU jobs
-/// of their own; their runs merge at the end.
-pub async fn sort_chunks(
+async fn interleave_chunks_on(
     schema: &SchemaRef,
     chunks: Vec<RecordBatch>,
-    keys: &[SortKey],
-    fetch: Option<usize>,
-    cpu: &dyn Cpu,
-) -> Result<Vec<RecordBatch>> {
-    let batch = concat_chunks(schema, &chunks)?;
-    drop(chunks);
-    let rows = batch.num_rows();
-    if rows == 0 || fetch == Some(0) {
-        return Ok(vec![]);
-    }
-    let encoded = Arc::new(RowKeys::new(batch.columns(), keys, rows)?);
-    let runs = if rows < PARALLEL_ROWS {
-        1
-    } else {
-        (2 * cpu.parallelism()).max(1)
-    };
-    let size = rows.div_ceil(runs);
-    let jobs = (0..runs)
-        .map(|i| {
-            let encoded = encoded.clone();
-            let range = i * size..((i + 1) * size).min(rows);
-            Box::new(move || -> Result<Vec<u32>> {
-                let mut order = range.map(|r| r as u32).collect::<Vec<_>>();
-                let compare = |a: &u32, b: &u32| {
-                    encoded
-                        .row(*a as usize)
-                        .cmp(encoded.row(*b as usize))
-                        .then(a.cmp(b))
-                };
-                match fetch {
-                    Some(n) if n < order.len() => {
-                        order.select_nth_unstable_by(n, compare);
-                        order.truncate(n);
-                        order.sort_unstable_by(compare);
-                    }
-                    _ => order.sort_unstable_by(compare),
+    order: Vec<(usize, usize)>,
+    guard: &ShutdownGuard,
+    cpu: &dyn super::Cpu,
+) -> Result<RecordBatch> {
+    let chunks = Arc::new(chunks);
+    let rows = order.len();
+    let order = Arc::new(order);
+    let jobs = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let chunks = chunks.clone();
+            let order = order.clone();
+            let guard = guard.clone();
+            let ty = field.data_type().clone();
+            Box::new(move || {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
                 }
-                Ok(order)
-            }) as Box<dyn FnOnce() -> Result<Vec<u32>> + Send>
+                let arrays = chunks
+                    .iter()
+                    .map(|c| c.column(i).as_ref())
+                    .collect::<Vec<_>>();
+                if arrays.is_empty() {
+                    return Ok(crate::arrow::array::new_empty_array(&ty));
+                }
+                arrow_select::interleave::interleave(&arrays, &order).map_err(|source| {
+                    Error::internal("rows cannot be interleaved".into()).with_source(source)
+                })
+            }) as Box<dyn FnOnce() -> Result<crate::arrow::array::ArrayRef> + Send>
         })
         .collect();
-    let runs = run_all(cpu, jobs).await?;
-    let order = merge(&encoded, runs, fetch.unwrap_or(rows));
-    Ok(vec![take(&batch, &order)?])
+    let columns = super::run_all(cpu, jobs).await?;
+    RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(rows)),
+    )
+    .map_err(|source| {
+        Error::internal("interleaved columns do not match their schema".into()).with_source(source)
+    })
 }
 
-/// The first `limit` rows of sorted runs, merged by key and then row.
-fn merge(keys: &RowKeys, mut runs: Vec<Vec<u32>>, limit: usize) -> Vec<u32> {
-    if runs.len() == 1 {
-        let mut run = runs.pop().unwrap();
-        run.truncate(limit);
-        return run;
+/// Gather payload columns exactly once, directly from their original chunks.
+pub(crate) fn interleave_chunks(
+    schema: &SchemaRef,
+    chunks: &[RecordBatch],
+    order: &[(usize, usize)],
+    guard: &ShutdownGuard,
+) -> Result<RecordBatch> {
+    let columns = (0..schema.fields().len())
+        .map(|i| {
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            let arrays = chunks
+                .iter()
+                .map(|c| c.column(i).as_ref())
+                .collect::<Vec<_>>();
+            if arrays.is_empty() {
+                return Ok(crate::arrow::array::new_empty_array(
+                    schema.field(i).data_type(),
+                ));
+            }
+            arrow_select::interleave::interleave(&arrays, order).map_err(|source| {
+                Error::internal("rows cannot be interleaved".into()).with_source(source)
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(order.len())),
+    )
+    .map_err(|source| {
+        Error::internal("interleaved columns do not match their schema".into()).with_source(source)
+    })
+}
+
+/// Heap merge by encoded keys, run number and position within the run.
+/// Borrow keys in the heap instead of copying them for every output row.
+pub(crate) fn merge_sorted<'a>(
+    orders: &[&[usize]],
+    key: impl Fn(usize, usize) -> (&'a [u8], &'a [u8]),
+    limit: usize,
+    guard: &ShutdownGuard,
+) -> Result<Vec<(usize, usize)>> {
+    let mut heap = BinaryHeap::new();
+    for (run, rows) in orders.iter().enumerate() {
+        if let Some(&row) = rows.first() {
+            let (part, order) = key(run, row);
+            heap.push(Reverse((part, order, run, 0usize, row)));
+        }
     }
-    let total = runs.iter().map(Vec::len).sum::<usize>().min(limit);
-    let mut at = vec![0; runs.len()];
+    let total = orders.iter().map(|r| r.len()).sum::<usize>().min(limit);
     let mut out = Vec::with_capacity(total);
     while out.len() < total {
-        let mut best: Option<(usize, u32)> = None;
-        for (i, run) in runs.iter().enumerate() {
-            let Some(&r) = run.get(at[i]) else { continue };
-            let better = best.is_none_or(|(_, b)| {
-                keys.row(r as usize)
-                    .cmp(keys.row(b as usize))
-                    .then(r.cmp(&b))
-                    .is_lt()
-            });
-            if better {
-                best = Some((i, r));
+        if out.len() % 4096 == 0 && guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        let Reverse((_, _, run, pos, row)) = heap.pop().expect("a nonempty run");
+        out.push((run, row));
+        if let Some(&row) = orders[run].get(pos + 1) {
+            let (part, order) = key(run, row);
+            heap.push(Reverse((part, order, run, pos + 1, row)));
+        }
+    }
+    Ok(out)
+}
+
+struct SortedRun {
+    chunks: Vec<RecordBatch>,
+    keys: RowKeys,
+    order: Vec<usize>,
+}
+
+struct SortLocalSink {
+    sort_keys: Vec<SortKey>,
+    fetch: Option<usize>,
+    chunks: Vec<RecordBatch>,
+    keys: RowKeys,
+    run: Option<SortedRun>,
+}
+
+impl LocalSink for SortLocalSink {
+    fn consume(
+        &mut self,
+        chunk: Option<RecordBatch>,
+        _: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus> {
+        if let Some(chunk) = chunk {
+            self.keys
+                .push(chunk.columns(), &self.sort_keys, chunk.num_rows())?;
+            self.chunks.push(chunk);
+        }
+        Ok(ConsumeStatus::End)
+    }
+    fn finish(
+        &mut self,
+        _: ConsumeStatus,
+        _: &mut StateContext<'_>,
+        guard: &ShutdownGuard,
+    ) -> Result<()> {
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        let mut order = (0..self.keys.len()).collect::<Vec<_>>();
+        let compare =
+            |a: &usize, b: &usize| self.keys.row(*a).cmp(self.keys.row(*b)).then(a.cmp(b));
+        if let Some(n) = self.fetch.filter(|n| *n < order.len()) {
+            if n != 0 {
+                order.select_nth_unstable_by(n, compare);
+            }
+            order.truncate(n);
+        }
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        order.sort_unstable_by(compare);
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        self.run = Some(SortedRun {
+            chunks: std::mem::take(&mut self.chunks),
+            keys: std::mem::take(&mut self.keys),
+            order,
+        });
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+pub struct SortSinkExec {
+    buffer: Arc<Buffer>,
+    schema: SchemaRef,
+    keys: Vec<SortKey>,
+    fetch: Option<usize>,
+    runs: Vec<SortedRun>,
+}
+impl SortSinkExec {
+    pub fn new(
+        buffer: Arc<Buffer>,
+        schema: SchemaRef,
+        keys: Vec<SortKey>,
+        fetch: Option<usize>,
+    ) -> Self {
+        Self {
+            buffer,
+            schema,
+            keys,
+            fetch,
+            runs: vec![],
+        }
+    }
+}
+impl SinkExec for SortSinkExec {
+    fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        Ok(Box::new(SortLocalSink {
+            sort_keys: self.keys.clone(),
+            fetch: self.fetch,
+            chunks: vec![],
+            keys: RowKeys::default(),
+            run: None,
+        }))
+    }
+    fn consume<'a>(
+        &'a mut self,
+        _: ConsumeStatus,
+        local: &'a mut dyn LocalSink,
+        _: StateContext<'a>,
+        _: &'a ShutdownGuard,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let run = downcast_local::<SortLocalSink>(local)?
+                .run
+                .take()
+                .ok_or_else(|| Error::internal("sort local was not finished".into()))?;
+            self.runs.push(run);
+            Ok(())
+        })
+    }
+    fn finish<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        cpu: &'a dyn crate::exec::Cpu,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let runs = std::mem::take(&mut self.runs);
+            let orders = runs.iter().map(|r| r.order.as_slice()).collect::<Vec<_>>();
+            let merged = merge_sorted(
+                &orders,
+                |run, row| (runs[run].keys.row(row), &[]),
+                self.fetch.unwrap_or(usize::MAX),
+                guard,
+            )?;
+            if merged.is_empty() {
+                return Ok(());
+            }
+            let mut chunks = vec![];
+            let mut locations = Vec::with_capacity(runs.len());
+            for run in runs {
+                let mut rows = vec![];
+                for chunk in run.chunks {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    rows.extend((0..chunk.num_rows()).map(|r| (chunks.len(), r)));
+                    chunks.push(chunk);
+                }
+                locations.push(rows);
+            }
+            let order = merged
+                .into_iter()
+                .map(|(run, row)| locations[run][row])
+                .collect::<Vec<_>>();
+            let batch = interleave_chunks_on(&self.schema, chunks, order, guard, cpu).await?;
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            self.buffer.0.lock().unwrap().push(batch);
+            Ok(())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        arrow::{
+            array::Int64Array,
+            datatypes::{DataType, Field, Schema},
+        },
+        kernel::LocalState,
+    };
+    use futures::executor::block_on;
+
+    #[test]
+    fn multiple_runs_append_keys_and_merge_ties_nulls_and_topk() {
+        for descending in [false, true] {
+            for nulls_first in [false, true] {
+                for fetch in [None, Some(0), Some(1), Some(5), Some(100)] {
+                    let buffer = Arc::new(Buffer::default());
+                    let schema = Arc::new(Schema::new(vec![
+                        Field::new("k", DataType::Int64, true),
+                        Field::new("id", DataType::Int64, false),
+                    ]));
+                    let mut sink = SortSinkExec::new(
+                        buffer.clone(),
+                        schema.clone(),
+                        vec![SortKey {
+                            column: 0,
+                            descending,
+                            nulls_first,
+                        }],
+                        fetch,
+                    );
+                    let guard = asyncband::shutdown::new().1;
+                    let mut expected = vec![];
+                    for run in 0..3 {
+                        let mut state = LocalState::default();
+                        let mut local = sink
+                            .local_sink(&LocalSinkContext {
+                                batch_rows: 2,
+                                partitions: 1,
+                            })
+                            .unwrap();
+                        for chunk in 0..2 {
+                            let keys = [Some(1), None, Some(2), Some(1)];
+                            let ids = (0..4)
+                                .map(|r| run * 8 + chunk * 4 + r)
+                                .collect::<Vec<i64>>();
+                            expected.extend(keys.into_iter().zip(ids.iter().copied()));
+                            let batch = RecordBatch::try_new(
+                                schema.clone(),
+                                vec![
+                                    Arc::new(Int64Array::from(keys.to_vec())),
+                                    Arc::new(Int64Array::from(ids)),
+                                ],
+                            )
+                            .unwrap();
+                            local
+                                .consume(Some(batch), &mut StateContext::new(&mut state))
+                                .unwrap();
+                        }
+                        local
+                            .finish(
+                                ConsumeStatus::End,
+                                &mut StateContext::new(&mut state),
+                                &guard,
+                            )
+                            .unwrap();
+                        block_on(sink.consume(
+                            ConsumeStatus::End,
+                            &mut *local,
+                            StateContext::new(&mut state),
+                            &guard,
+                        ))
+                        .unwrap();
+                    }
+                    expected.sort_by(|(a, _), (b, _)| match (a, b) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, _) => {
+                            if nulls_first {
+                                std::cmp::Ordering::Less
+                            } else {
+                                std::cmp::Ordering::Greater
+                            }
+                        }
+                        (_, None) => {
+                            if nulls_first {
+                                std::cmp::Ordering::Greater
+                            } else {
+                                std::cmp::Ordering::Less
+                            }
+                        }
+                        (Some(a), Some(b)) => {
+                            if descending {
+                                b.cmp(a)
+                            } else {
+                                a.cmp(b)
+                            }
+                        }
+                    });
+                    expected.truncate(fetch.unwrap_or(usize::MAX));
+                    block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
+                    let chunks = buffer.0.lock().unwrap();
+                    let actual = chunks
+                        .iter()
+                        .flat_map(|c| {
+                            c.column(1)
+                                .as_any()
+                                .downcast_ref::<Int64Array>()
+                                .unwrap()
+                                .values()
+                                .to_vec()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        actual,
+                        expected.into_iter().map(|r| r.1).collect::<Vec<_>>()
+                    );
+                }
             }
         }
-        let (i, r) = best.expect("rows are left");
-        at[i] += 1;
-        out.push(r);
     }
-    out
 }

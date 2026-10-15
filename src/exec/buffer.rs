@@ -14,7 +14,9 @@
 
 //! Materialized results: pipelines sink chunks into a buffer, optionally
 //! transformed once their input ends, and dependent pipelines read it.
-use super::{Cpu, Inline, SinkExec, SinkStatus, SourceExec};
+use super::{
+    ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext, downcast_local,
+};
 use crate::arrow::{
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -23,36 +25,34 @@ use crate::error::{Error, Result};
 use asyncband::shutdown::ShutdownGuard;
 use futures::future::BoxFuture;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// Rows per chunk a buffer source emits.
 const MORSEL_ROWS: usize = 8192;
 
 /// The chunks of one or more producing pipelines.
 #[derive(Default)]
-pub struct Buffer(Mutex<Vec<RecordBatch>>);
+pub struct Buffer(pub(super) Mutex<Vec<RecordBatch>>);
 
-/// Transforms the chunks of one producing pipeline once its input ends,
-/// with CPU work allowed on the given `Cpu`.
-pub type Finish = Box<
-    dyn for<'a> FnOnce(Vec<RecordBatch>, &'a dyn Cpu) -> BoxFuture<'a, Result<Vec<RecordBatch>>>
-        + Send,
->;
+/// Transforms one producing pipeline's chunks on the coordinator.
+pub type Finish = Box<dyn FnOnce(Vec<RecordBatch>) -> Result<Vec<RecordBatch>> + Send>;
 
-/// A finish that runs on the coordinator.
 pub fn finish(
     f: impl FnOnce(Vec<RecordBatch>) -> Result<Vec<RecordBatch>> + Send + 'static,
 ) -> Finish {
-    Box::new(move |chunks, _| Box::pin(async move { f(chunks) }))
+    Box::new(f)
 }
 
 pub struct BufferSinkExec {
     buffer: Arc<Buffer>,
-    chunks: Vec<RecordBatch>,
+    chunks: Vec<Vec<RecordBatch>>,
     finish: Option<Finish>,
     /// Stop after this many rows.
     limit: Option<usize>,
-    rows: usize,
+    rows: Arc<AtomicUsize>,
 }
 
 impl BufferSinkExec {
@@ -62,7 +62,7 @@ impl BufferSinkExec {
             chunks: vec![],
             finish,
             limit: None,
-            rows: 0,
+            rows: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -73,40 +73,85 @@ impl BufferSinkExec {
     }
 }
 
+struct BufferLocalSink {
+    chunks: Vec<RecordBatch>,
+    limit: Option<usize>,
+    rows: Arc<AtomicUsize>,
+}
+
+impl LocalSink for BufferLocalSink {
+    fn consume(
+        &mut self,
+        chunk: Option<RecordBatch>,
+        _: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus> {
+        if let Some(chunk) = chunk {
+            let rows = chunk.num_rows();
+            self.chunks.push(chunk);
+            if let Some(limit) = self.limit {
+                let before = self.rows.fetch_add(rows, Ordering::Relaxed);
+                if before.saturating_add(rows) >= limit {
+                    return Ok(ConsumeStatus::Stop);
+                }
+            }
+        }
+        Ok(ConsumeStatus::End)
+    }
+    fn finish(
+        &mut self,
+        _: ConsumeStatus,
+        _: &mut StateContext<'_>,
+        _: &ShutdownGuard,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 impl SinkExec for BufferSinkExec {
+    fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        Ok(Box::new(BufferLocalSink {
+            chunks: vec![],
+            limit: self.limit,
+            rows: self.rows.clone(),
+        }))
+    }
     fn consume<'a>(
         &'a mut self,
-        chunk: RecordBatch,
+        _: ConsumeStatus,
+        local: &'a mut dyn LocalSink,
+        _: StateContext<'a>,
         _: &'a ShutdownGuard,
-    ) -> BoxFuture<'a, Result<SinkStatus>> {
-        self.rows += chunk.num_rows();
-        self.chunks.push(chunk);
-        let status = if self.limit.is_some_and(|l| self.rows >= l) {
-            SinkStatus::Finished
-        } else {
-            SinkStatus::Continue
-        };
-        Box::pin(async move { Ok(status) })
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.chunks.push(std::mem::take(
+                &mut downcast_local::<BufferLocalSink>(local)?.chunks,
+            ));
+            Ok(())
+        })
     }
-
-    fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
-        self.finish_on(guard, &Inline)
-    }
-
-    fn finish_on<'a>(
+    fn finish<'a>(
         &'a mut self,
         guard: &'a ShutdownGuard,
-        cpu: &'a dyn Cpu,
+        _cpu: &'a dyn crate::exec::Cpu,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             if guard.is_shutdown_requested() {
                 return Err(Error::cancelled());
             }
-            let chunks = std::mem::take(&mut self.chunks);
+            let chunks = std::mem::take(&mut self.chunks)
+                .into_iter()
+                .flatten()
+                .collect();
             let chunks = match self.finish.take() {
-                Some(f) => f(chunks, cpu).await?,
+                Some(f) => f(chunks)?,
                 None => chunks,
             };
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
             self.buffer.0.lock().unwrap().extend(chunks);
             Ok(())
         })

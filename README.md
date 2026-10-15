@@ -148,16 +148,21 @@ the umbrella `arrow` crate is only a test oracle. Output columns that pass an
 input through keep its Arrow array when all rows survive.
 
 One async `Pipeline::execute` coordinator owns the source cursor and a bounded
-pool of `LocalState`s, one per in-flight execution instance. Program calls run as
-tasks of the caller's executor (inline with one worker): one pool of threads both
-computes and runs async work. A job is a bounded run of chunks with no locks or
-shared state, so async tasks run between jobs. The coordinator passes each output
-chunk to
-`SinkExec::consume`. Once all work succeeds, it hands every `LocalState` to
-`SinkExec::combine`, which takes the states the sink registered while building
-the pipeline and merges them into state it owns exclusively, then calls
-`SinkExec::finish`. Aggregation shares only its finalized result with the
-pipeline reading it; exchange sinks flush asynchronously.
+pool of `(LocalState, LocalSink)` pairs. Program calls and local sink work run as
+tasks of the caller's executor; a single worker runs inline, and ordered
+pipelines use one instance. After each program run, `LocalSink::consume` receives
+the optional output and returns `End` (continue), `Flush` (hand off and reuse),
+or `Stop` (stop dispatching new input). `LocalSink::finish` prepares each handoff;
+`SinkExec::consume` takes the prepared data on the coordinator and restores the
+instance after Flush or Stop. Once input and in-flight jobs end, every instance
+prepares End in parallel, all End handoffs complete, and `SinkExec::finish`
+merges and publishes the result. Only this final finish receives `Cpu`, which
+submits work to the same executor: aggregates and windows finish hash partitions
+in parallel, tables assemble contiguous bucket ranges, and sorts gather columns
+in parallel. Local aggregate End preparation also releases its kernel state on
+the worker; Flush keeps the slots available for reuse. Exchange sinks send
+buffered chunks asynchronously on handoff. See
+[`design/sink-parallelism.md`](design/sink-parallelism.md) for the protocol.
 
 Run the fixed-condition CPU benchmark (preparation and execution reported separately):
 

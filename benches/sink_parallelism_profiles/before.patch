@@ -1,0 +1,190 @@
+--- a/integrations/datafusion/src/run.rs
++++ b/integrations/datafusion/src/run.rs
+@@ -113,6 +113,8 @@
+     parallelism: usize,
+     phases: &mut Phases,
+ ) -> Result<Vec<RecordBatch>, Stage> {
++    roc::exec::profile::RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++    let _query_span = roc::exec::profile::Span::new("query",0);
+     let state = ctx.state();
+     let start = Instant::now();
+     let query = translate(plan, &state)
+@@ -123,6 +125,11 @@
+     let graph = build_pipeline_graph_with_mode(&query.tree, mode)
+         .map_err(|e| Stage::Execute(format!("{e:?}")))?;
+     phases.build = start.elapsed();
++    let dependencies = (0..graph.len()).map(|i|graph.dependencies(i).unwrap().to_vec()).collect();
++    let pipelines = graph.into_pipelines().into_iter().enumerate().map(|(id,mut p)| {
++        p.sink=Box::new(ProfileSink { id, inner:p.sink }); p
++    }).collect();
++    let graph=roc::pipeline::PipelineGraph::new(pipelines,dependencies).unwrap();
+     let start = Instant::now();
+     let executor = PipelineGraphExecutor::new(graph)
+         .with_task_executor(TokioExecutor(tokio::runtime::Handle::current()))
+@@ -458,3 +465,13 @@
+         );
+     }
+ }
++
++struct ProfileSink { id:usize, inner:Box<dyn roc::exec::SinkExec> }
++impl roc::exec::SinkExec for ProfileSink {
++ fn start(&mut self,g:&asyncband::shutdown::ShutdownGuard)->roc::error::Result<()> { self.inner.start(g) }
++ fn consume<'a>(&'a mut self,c:RecordBatch,g:&'a asyncband::shutdown::ShutdownGuard)->futures::future::BoxFuture<'a,roc::error::Result<roc::exec::SinkStatus>> { self.inner.consume(c,g) }
++ fn combine<'a>(&'a mut self,l:roc::kernel::LocalState,g:&'a asyncband::shutdown::ShutdownGuard)->futures::future::BoxFuture<'a,roc::error::Result<()>> { self.inner.combine(l,g) }
++ fn finish_on<'a>(&'a mut self,g:&'a asyncband::shutdown::ShutdownGuard,c:&'a dyn roc::exec::Cpu)->futures::future::BoxFuture<'a,roc::error::Result<()>> {
++  Box::pin(async move { roc::exec::profile::pipeline(self.id); let _span=roc::exec::profile::Span::new(self.inner.profile_name(),0); self.inner.finish_on(g,c).await })
++ }
++}
+--- a/src/exec/aggregate/mod.rs
++++ b/src/exec/aggregate/mod.rs
+@@ -442,7 +442,9 @@
+                     }) as Box<dyn FnOnce() -> Result<Parts> + Send>
+                 })
+                 .collect();
++            let _partial = crate::exec::profile::Span::new(format!("aggregate.export_partition.parts{}",parts),groups);
+             let partials = run_all(cpu, work).await?;
++            drop(_partial);
+             // Merge every partition of every set.
+             let mut work: Vec<Box<dyn FnOnce() -> Result<Merged> + Send>> = vec![];
+             for (set, merge) in merges.drain(..).enumerate() {
+@@ -469,13 +471,17 @@
+                     }));
+                 }
+             }
++            let _merge = crate::exec::profile::Span::new("aggregate.parallel_merge_evaluate",partials.iter().flatten().flatten().map(PartialAggregate::num_rows).sum());
+             let merged = run_all(cpu, work).await?;
++            drop(_merge);
++            let _layout = crate::exec::profile::Span::new("aggregate.concat_layout",merged.iter().map(|r|r.2).sum());
+             drop(partials);
+             let mut results = vec![];
+             for set in merged.chunks(parts) {
+                 results.push(concat_parts(set)?);
+             }
+             let batch = self.layout.assemble(results)?;
++            drop(_layout);
+             self.result
+                 .finalized
+                 .set(batch)
+--- a/src/exec/mod.rs
++++ b/src/exec/mod.rs
+@@ -19,6 +19,7 @@
+ use futures::future::BoxFuture;
+ use std::sync::{Arc, Mutex};
+ 
++pub mod profile;
+ pub(crate) mod aggregate;
+ mod buffer;
+ mod exchange;
+@@ -56,6 +57,7 @@
+ }
+ 
+ pub trait SinkExec: Send + 'static {
++    fn profile_name(&self) -> &'static str { std::any::type_name::<Self>() }
+     fn start(&mut self, _guard: &ShutdownGuard) -> Result<()> {
+         Ok(())
+     }
+--- /dev/null
++++ b/src/exec/profile.rs
+@@ -0,0 +1,10 @@
++use std::{sync::{OnceLock, atomic::{AtomicUsize,Ordering}}, time::Instant};
++static START: OnceLock<Instant> = OnceLock::new();
++pub static RUN: AtomicUsize = AtomicUsize::new(0);
++thread_local! { static PIPE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) }; }
++pub fn pipeline(p: usize) { PIPE.with(|x|x.set(p)); }
++pub struct Span { stage: String, rows:usize, start:Instant, run:usize, pipeline:usize }
++impl Span {
++ pub fn new(stage:impl Into<String>, rows:usize)->Self { START.get_or_init(Instant::now); Self { stage:stage.into(), rows,start:Instant::now(),run:RUN.load(Ordering::Relaxed),pipeline:PIPE.with(|p|p.get()) } }
++}
++impl Drop for Span { fn drop(&mut self) { let end=Instant::now(); eprintln!("PROFILE\t{}\t{}\t{}\t{}\t{}\t{}\t{:?}",self.run,self.pipeline,self.stage,self.rows,self.start.duration_since(*START.get().unwrap()).as_nanos(),end.duration_since(*START.get().unwrap()).as_nanos(),std::thread::current().id()); } }
+--- a/src/exec/window.rs
++++ b/src/exec/window.rs
+@@ -74,11 +74,14 @@
+     windows: &[Window],
+     cpu: &dyn Cpu,
+ ) -> Result<Vec<RecordBatch>> {
++    let _window = crate::exec::profile::Span::new("window.compute",chunks.iter().map(RecordBatch::num_rows).sum());
++    let _concat = crate::exec::profile::Span::new("window.concat",0);
+     let inputs = schema.fields().len() - windows.len();
+     let input_schema = Arc::new(crate::arrow::datatypes::Schema::new(
+         schema.fields()[..inputs].to_vec(),
+     ));
+     let batch = Arc::new(super::sort::concat_chunks(&input_schema, &chunks)?);
++    drop(_concat);
+     drop(chunks);
+     let rows = batch.num_rows();
+     let mut outputs: Vec<Option<ArrayRef>> = vec![None; windows.len()];
+@@ -137,10 +140,13 @@
+             nulls_first: true,
+         })
+         .collect::<Vec<_>>();
++    let _keys = crate::exec::profile::Span::new("window.keys",rows);
+     let keys = Arc::new((
+         RowKeys::new(batch.columns(), &partition, rows)?,
+         RowKeys::new(batch.columns(), order, rows)?,
+     ));
++    drop(_keys);
++    let _args = crate::exec::profile::Span::new("window.decode",rows);
+     // Each window's argument, decoded once.
+     let arguments = Arc::new(
+         windows
+@@ -148,6 +154,8 @@
+             .map(|(_, w)| w.argument.map(|c| scalar::decode(batch.column(c))).transpose())
+             .collect::<Result<Vec<_>>>()?,
+     );
++    drop(_args);
++    let _bucket = crate::exec::profile::Span::new("window.hash_partition",rows);
+     let mut buckets = vec![vec![]; parts];
+     for r in 0..rows {
+         let b = if parts == 1 {
+@@ -157,6 +165,7 @@
+         };
+         buckets[b].push(r);
+     }
++    drop(_bucket);
+     let windows = Arc::new(windows.to_vec());
+     let jobs = buckets
+         .into_iter()
+@@ -164,6 +173,7 @@
+             let (keys, arguments, windows, batch) =
+                 (keys.clone(), arguments.clone(), windows.clone(), batch.clone());
+             Box::new(move || -> Result<(Vec<usize>, Vec<Vec<Cell>>)> {
++                let _sort = crate::exec::profile::Span::new("window.local_sort",rows.len());
+                 let mut sorted = rows;
+                 let (parts, orders) = (&keys.0, &keys.1);
+                 sorted.sort_unstable_by(|&a, &b| {
+@@ -173,6 +183,8 @@
+                         .then_with(|| orders.row(a).cmp(orders.row(b)))
+                         .then(a.cmp(&b))
+                 });
++                drop(_sort);
++                let _values = crate::exec::profile::Span::new("window.local_values",sorted.len());
+                 let values = windows
+                     .iter()
+                     .zip(arguments.iter())
+@@ -185,7 +197,10 @@
+             }) as Box<dyn FnOnce() -> Result<(Vec<usize>, Vec<Vec<Cell>>)> + Send>
+         })
+         .collect();
++    let _work = crate::exec::profile::Span::new(format!("window.parallel_work.parts{}",parts),rows);
+     let done = run_all(cpu, jobs).await?;
++    drop(_work);
++    let _scatter = crate::exec::profile::Span::new("window.scatter",rows);
+     let mut out = vec![vec![Cell::default(); rows]; windows.len()];
+     for (sorted, values) in &done {
+         for (column, values) in out.iter_mut().zip(values) {
+@@ -194,12 +209,15 @@
+             }
+         }
+     }
++    drop(_scatter);
++    let _encode = crate::exec::profile::Span::new("window.encode",rows);
+     // Byte cells point into the batch, alive until here.
+     let arrays = windows
+         .iter()
+         .zip(&out)
+         .map(|((i, w), cells)| Ok((*i, scalar::encode(&w.output, cells)?)))
+         .collect::<Result<Vec<_>>>()?;
++    drop(_encode);
+     drop(done);
+     Ok(arrays)
+ }

@@ -38,11 +38,12 @@
 //!
 //! 5. Execution (src/pipeline/execution.rs). One async coordinator per
 //!    pipeline reads the source and runs the program on CPU workers, each
-//!    with an exclusive `LocalState`. Non-empty output chunks go to
-//!    `SinkExec::consume` on the coordinator, which may finish early. After
-//!    the source ends, every local state is passed to `SinkExec::combine`,
-//!    then the source and sink finish. Aggregates combine group indexes and
-//!    accumulators; the next pipeline reads the finalized result.
+//!    with an exclusive `(LocalState, LocalSink)` pair. Each run calls
+//!    `LocalSink::consume` with its optional output; it may request Flush or Stop.
+//!    `LocalSink::finish` prepares each handoff before `SinkExec::consume`;
+//!    End preparation releases aggregate kernel state on the worker. After
+//!    all handoffs, only `SinkExec::finish` receives `Cpu` to merge partitions
+//!    on the same executor; the next pipeline reads the finalized result.
 
 use arrow::{
     array::{ArrayRef, AsArray, Int64Array},

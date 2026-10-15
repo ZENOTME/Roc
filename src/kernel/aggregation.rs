@@ -14,12 +14,13 @@
 
 //! State objects updated by GroupLookup and AggregateUpdate. Only partial
 //! state export constructs Arrow arrays.
-use super::{LocalState, StateId};
+use super::StateId;
 use crate::arrow::{
     array::ArrayRef,
     datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
+use crate::exec::StateContext;
 use crate::{
     error::{Error, Result},
     exec::aggregate::group_index::GroupIndex,
@@ -37,17 +38,14 @@ pub(crate) struct AccumulatorState {
     pub accumulator: Accumulator,
 }
 
-/// Moves the grouping state (first) and accumulator states out of `local`.
+/// Exports borrowed grouping and accumulator state without removing slots.
 pub(crate) fn partial(
-    local: &mut LocalState,
+    local: &mut StateContext<'_>,
     states: &[StateId],
 ) -> Result<(RecordBatch, Vec<Vec<ArrayRef>>)> {
-    let grouping = local
-        .take_state(states[0])
-        .ok_or_else(|| Error::internal("missing group state".into()))?
-        .into_inner::<GroupState>()?;
+    let grouping = local.get_mut::<GroupState>(states[0])?;
     let groups = RecordBatch::try_new_with_options(
-        grouping.schema,
+        grouping.schema.clone(),
         grouping.index.columns()?,
         &RecordBatchOptions::new().with_row_count(Some(grouping.index.len())),
     )
@@ -58,10 +56,7 @@ pub(crate) fn partial(
     let values = states[1..]
         .iter()
         .map(|&id| {
-            let mut state = local
-                .take_state(id)
-                .ok_or_else(|| Error::internal("missing accumulator state".into()))?
-                .into_inner::<AccumulatorState>()?;
+            let state = local.get_mut::<AccumulatorState>(id)?;
             state.accumulator.resize(groups.num_rows());
             state.accumulator.state()
         })

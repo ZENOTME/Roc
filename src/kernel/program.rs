@@ -95,14 +95,6 @@ impl LocalState {
     pub fn take_state(&mut self, id: StateId) -> Option<State> {
         self.states.get_mut(id.0)?.take()
     }
-    /// The number of groups of a group state.
-    pub(crate) fn group_count(&self, id: StateId) -> Option<usize> {
-        let state = self.states.get(id.0)?.as_ref()?;
-        state
-            .get::<super::aggregation::GroupState>()
-            .ok()
-            .map(|g| g.index.len())
-    }
     pub fn state_mut(&mut self, id: StateId) -> Result<&mut State> {
         self.states
             .get_mut(id.0)

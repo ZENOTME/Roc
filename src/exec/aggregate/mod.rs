@@ -14,15 +14,18 @@
 
 pub(crate) mod group_index;
 
-use super::{Cpu, Inline, SinkExec, SourceExec, run_all};
-use crate::arrow::datatypes::{Schema, SchemaRef};
+use super::{
+    ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext, downcast_local,
+};
+use crate::arrow::datatypes::SchemaRef;
 use crate::arrow::{
     array::ArrayRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use crate::column::ColumnContext;
 use crate::expr::agg::accumulator::Accumulator;
-use crate::kernel::{LocalState, StateId};
+use crate::kernel::StateId;
+use crate::kernel::aggregation::{AccumulatorState, GroupState};
 use crate::operator::Operator;
 use crate::{
     error::{Error, ErrorContext, Result, ResultExt},
@@ -36,16 +39,15 @@ use std::sync::{Arc, OnceLock};
 // Share output morsels among workers. The pipeline applies its own
 // configured batch size to each morsel.
 const AGGREGATE_MORSEL_ROWS: usize = 2048;
+const PARTITION_GROUPS: usize = 16 * 1024;
 
-/// Partials with fewer groups in all merge as one partition.
-const PARTITION_GROUPS: usize = 16384;
+// Grouping set -> hash partition -> one partial.
+type Partitioned = Vec<Vec<PartialAggregate>>;
 
 /// The merge of local partials. No expression evaluator or executable query
 /// plan is needed here: all inputs are accumulator states.
 struct AggregateMergeState {
     index: GroupIndex,
-    /// The schema of the group columns.
-    schema: SchemaRef,
     group_ids: Vec<usize>,
     /// The output of an operator without grouping sets, for tests.
     #[cfg(test)]
@@ -67,8 +69,13 @@ impl PartialAggregate {
     }
 
     /// The rows of each of `parts` partitions by key hash.
-    fn partitions(&self, index: &GroupIndex, parts: usize) -> Result<Vec<Self>> {
-        if parts == 1 {
+    fn partitions(
+        &self,
+        index: &GroupIndex,
+        parts: usize,
+        guard: &ShutdownGuard,
+    ) -> Result<Vec<Self>> {
+        if parts == 1 || self.groups.num_columns() == 0 {
             return Ok(vec![self.clone()]);
         }
         let hashes = index.hash_rows(self.groups.columns(), self.num_rows())?;
@@ -85,6 +92,9 @@ impl PartialAggregate {
         };
         rows.into_iter()
             .map(|rows| {
+                if guard.is_shutdown_requested() {
+                    return Err(Error::cancelled());
+                }
                 let rows = crate::arrow::array::UInt32Array::from(rows);
                 let groups = RecordBatch::try_new_with_options(
                     self.groups.schema(),
@@ -150,17 +160,12 @@ impl AggregateMergeState {
         }
         Ok(Self {
             index: GroupIndex::new(&schema)?,
-            schema,
             group_ids: vec![],
             #[cfg(test)]
             output_schema: columns.schema(&operator.output_columns())?,
             accumulators,
         })
     }
-    fn index_schema(&self) -> &Schema {
-        self.schema.as_ref()
-    }
-
     fn merge(&mut self, partial: &PartialAggregate) -> Result<()> {
         // Each accumulator owns its partial-state schema. Check the complete
         // bundle before mutating any global group or accumulator state.
@@ -263,19 +268,88 @@ struct Layout {
     grouping_id: bool,
 }
 
-/// Keeps the execution instances it is given; finishing turns each into
-/// partials, partitions them by key and merges the partitions, all as CPU
-/// jobs.
+/// Collects prepared partitions, then merges and evaluates each on a CPU worker.
 pub struct AggregateSinkExec {
     states: Vec<Vec<StateId>>,
-    /// One merge state per grouping set, built with the pipeline so binding
-    /// errors surface there; the first partition of each set uses it.
     merges: Option<Vec<AggregateMergeState>>,
+    partials: Vec<Partitioned>,
     factory: Arc<MergeFactory>,
-    locals: Vec<LocalState>,
+    flush_groups: Option<usize>,
     layout: Layout,
     result: Arc<AggregateSharedState>,
 }
+
+impl AggregateSinkExec {
+    /// Optional capacity preflight for root-domain grouping kernels. A run
+    /// after Expand can add more than batch_rows groups; leave this disabled
+    /// for those programs until an expansion bound is available.
+    pub fn with_flush_groups(mut self, groups: usize) -> Self {
+        self.flush_groups = Some(groups);
+        self
+    }
+}
+
+struct AggregateLocalSink {
+    partitions: usize,
+    states: Vec<Vec<StateId>>,
+    batch_rows: usize,
+    flush_groups: Option<usize>,
+    partials: Partitioned,
+}
+impl LocalSink for AggregateLocalSink {
+    fn consume(
+        &mut self,
+        _: Option<RecordBatch>,
+        states: &mut StateContext<'_>,
+    ) -> Result<ConsumeStatus> {
+        if let Some(limit) = self.flush_groups {
+            for set in &self.states {
+                if states
+                    .get_mut::<GroupState>(set[0])?
+                    .index
+                    .len()
+                    .saturating_add(self.batch_rows)
+                    > limit
+                {
+                    return Ok(ConsumeStatus::Flush);
+                }
+            }
+        }
+        Ok(ConsumeStatus::End)
+    }
+    fn finish(
+        &mut self,
+        status: ConsumeStatus,
+        states_context: &mut StateContext<'_>,
+        guard: &ShutdownGuard,
+    ) -> Result<()> {
+        self.partials.clear();
+        for set in &self.states {
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
+            let (groups, states) = crate::kernel::aggregation::partial(states_context, set)?;
+            let partial = PartialAggregate { groups, states };
+            let index = &states_context.get_mut::<GroupState>(set[0])?.index;
+            self.partials
+                .push(partial.partitions(index, self.partitions, guard)?);
+            if status == ConsumeStatus::End {
+                drop(states_context.take::<GroupState>(set[0])?);
+                for &id in &set[1..] {
+                    drop(states_context.take::<AccumulatorState>(id)?);
+                }
+            }
+        }
+        if guard.is_shutdown_requested() {
+            return Err(Error::cancelled());
+        }
+        Ok(())
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 pub struct AggregateSourceExec {
     result: Arc<AggregateSharedState>,
     next_row: usize,
@@ -316,7 +390,8 @@ impl AggregateOperator {
             states: locals,
             merges: Some(state.merges),
             factory: state.factory,
-            locals: vec![],
+            partials: vec![],
+            flush_groups: None,
             layout: state.layout,
             result: state.result,
         };
@@ -374,108 +449,152 @@ impl Layout {
 }
 
 impl SinkExec for AggregateSinkExec {
-    fn combine<'a>(
+    fn local_sink(&self, ctx: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+        if !ctx.partitions.is_power_of_two() {
+            return Err(Error::invalid_plan(
+                "aggregate partitions must be a power of two".into(),
+            ));
+        }
+        Ok(Box::new(AggregateLocalSink {
+            partitions: ctx.partitions,
+            states: self.states.clone(),
+            batch_rows: ctx.batch_rows,
+            flush_groups: self.flush_groups,
+            partials: vec![],
+        }))
+    }
+    fn consume<'a>(
         &'a mut self,
-        local: LocalState,
+        status: ConsumeStatus,
+        local: &'a mut dyn LocalSink,
+        mut states: StateContext<'a>,
         guard: &'a ShutdownGuard,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if guard.is_shutdown_requested() {
-                return Err(Error::cancelled());
+            let local = downcast_local::<AggregateLocalSink>(local)?;
+            self.partials.push(std::mem::take(&mut local.partials));
+            if status != ConsumeStatus::End {
+                for set in &self.states {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    states.get_mut::<GroupState>(set[0])?.index.clear();
+                    for &id in &set[1..] {
+                        states.get_mut::<AccumulatorState>(id)?.accumulator.clear();
+                    }
+                }
             }
-            self.locals.push(local);
             Ok(())
         })
     }
-    fn finish<'a>(&'a mut self, guard: &'a ShutdownGuard) -> BoxFuture<'a, Result<()>> {
-        self.finish_on(guard, &Inline)
-    }
-    fn finish_on<'a>(
+    fn finish<'a>(
         &'a mut self,
         guard: &'a ShutdownGuard,
-        cpu: &'a dyn Cpu,
+        cpu: &'a dyn super::Cpu,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
-            if guard.is_shutdown_requested() {
-                return Err(Error::cancelled());
-            }
-            let mut merges = self
+            let merges = self
                 .merges
                 .take()
                 .ok_or_else(|| Error::internal("aggregate already finished".into()))?;
-            let locals = std::mem::take(&mut self.locals);
-            let groups = locals
+            let partials = std::mem::take(&mut self.partials);
+            let groups = partials
                 .iter()
-                .map(|l| group_count(l, &self.states))
+                .flatten()
+                .flatten()
+                .map(PartialAggregate::num_rows)
                 .sum::<usize>();
-            let parts = if groups < PARTITION_GROUPS {
-                1
-            } else {
-                (2 * cpu.parallelism()).max(1)
-            };
-            // Each instance's partials, per grouping set and partition.
-            type Parts = Vec<Vec<PartialAggregate>>;
-            let indexes = Arc::new(
-                merges
-                    .iter()
-                    .map(|m| GroupIndex::new(m.index_schema()))
-                    .collect::<Result<Vec<_>>>()?,
-            );
-            let work = locals
-                .into_iter()
-                .map(|mut local| {
-                    let (states, indexes, guard) =
-                        (self.states.clone(), indexes.clone(), guard.clone());
-                    Box::new(move || -> Result<Parts> {
-                        states
-                            .iter()
-                            .zip(indexes.iter())
-                            .map(|(states, index)| {
-                                if guard.is_shutdown_requested() {
-                                    return Err(Error::cancelled());
-                                }
-                                let (groups, states) =
-                                    crate::kernel::aggregation::partial(&mut local, states)?;
-                                PartialAggregate { groups, states }.partitions(index, parts)
-                            })
-                            .collect()
-                    }) as Box<dyn FnOnce() -> Result<Parts> + Send>
-                })
-                .collect();
-            let partials = run_all(cpu, work).await?;
-            // Merge every partition of every set.
-            let mut work: Vec<Box<dyn FnOnce() -> Result<Merged> + Send>> = vec![];
-            for (set, merge) in merges.drain(..).enumerate() {
-                let mut merge = Some(merge);
-                for part in 0..parts {
-                    let inputs = partials
-                        .iter()
-                        .map(|p| p[set][part].clone())
-                        .collect::<Vec<_>>();
-                    let (factory, guard) = (self.factory.clone(), guard.clone());
-                    let merge = merge.take();
-                    work.push(Box::new(move || {
-                        let mut merge = match merge {
-                            Some(merge) => merge,
-                            None => factory.merge(set)?,
-                        };
-                        for partial in &inputs {
+            if partials.iter().any(|p| p.len() != merges.len()) {
+                return Err(Error::internal("missing grouping-set partial".into()));
+            }
+            let mut results = vec![];
+            if groups < PARTITION_GROUPS {
+                let mut merges = merges;
+                for local in partials {
+                    for (merge, parts) in merges.iter_mut().zip(local) {
+                        for partial in parts {
                             if guard.is_shutdown_requested() {
                                 return Err(Error::cancelled());
                             }
-                            merge.merge(partial)?;
+                            merge.merge(&partial)?;
                         }
-                        merge.finish_columns()
-                    }));
+                    }
+                }
+                for merge in merges {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    results.push(merge.finish_columns()?);
+                }
+            } else {
+                let mut inputs = (0..merges.len())
+                    .map(|_| Vec::<Vec<PartialAggregate>>::new())
+                    .collect::<Vec<_>>();
+                for local in partials {
+                    for (buckets, parts) in inputs.iter_mut().zip(local) {
+                        if buckets.is_empty() {
+                            buckets.resize_with(parts.len(), Vec::new);
+                        }
+                        if buckets.len() != parts.len() {
+                            return Err(Error::internal(
+                                "inconsistent aggregate partitions".into(),
+                            ));
+                        }
+                        for (bucket, part) in buckets.iter_mut().zip(parts) {
+                            bucket.push(part);
+                        }
+                    }
+                }
+                let sets = merges.len();
+                let mut jobs: Vec<Box<dyn FnOnce() -> Result<(usize, Merged)> + Send>> = vec![];
+                for (set, (merge, buckets)) in merges.into_iter().zip(inputs).enumerate() {
+                    let mut merge = Some(merge);
+                    let mut buckets = buckets
+                        .into_iter()
+                        .filter(|b| b.iter().any(|p| p.num_rows() != 0))
+                        .collect::<Vec<_>>();
+                    // Empty keyed sets still need typed empty columns; an empty
+                    // global set has exactly one initialized aggregate group.
+                    if buckets.is_empty() {
+                        buckets.push(vec![]);
+                    }
+                    for bucket in buckets {
+                        let first = merge.take();
+                        let factory = self.factory.clone();
+                        let guard = guard.clone();
+                        jobs.push(Box::new(move || {
+                            if guard.is_shutdown_requested() {
+                                return Err(Error::cancelled());
+                            }
+                            let mut merge = match first {
+                                Some(m) => m,
+                                None => factory.merge(set)?,
+                            };
+                            for partial in bucket {
+                                if guard.is_shutdown_requested() {
+                                    return Err(Error::cancelled());
+                                }
+                                merge.merge(&partial)?;
+                            }
+                            Ok((set, merge.finish_columns()?))
+                        }));
+                    }
+                }
+                let mut by_set = vec![vec![]; sets];
+                for (set, result) in super::run_all(cpu, jobs).await? {
+                    by_set[set].push(result);
+                }
+                for parts in by_set {
+                    if guard.is_shutdown_requested() {
+                        return Err(Error::cancelled());
+                    }
+                    results.push(concat_parts(&parts)?);
                 }
             }
-            let merged = run_all(cpu, work).await?;
-            drop(partials);
-            let mut results = vec![];
-            for set in merged.chunks(parts) {
-                results.push(concat_parts(set)?);
-            }
             let batch = self.layout.assemble(results)?;
+            if guard.is_shutdown_requested() {
+                return Err(Error::cancelled());
+            }
             self.result
                 .finalized
                 .set(batch)
@@ -506,13 +625,6 @@ fn concat_parts(parts: &[Merged]) -> Result<Merged> {
     Ok((groups, aggregates, parts.iter().map(|p| p.2).sum()))
 }
 
-/// The groups of an instance's first grouping set.
-fn group_count(local: &LocalState, states: &[Vec<StateId>]) -> usize {
-    states
-        .first()
-        .and_then(|s| local.group_count(s[0]))
-        .unwrap_or(0)
-}
 impl SourceExec for AggregateSourceExec {
     fn start(&mut self, _: &ShutdownGuard) -> Result<()> {
         if self.result.finalized.get().is_none() {
@@ -562,7 +674,7 @@ mod tests {
             ScalarExprRef, test_support::TestPlan,
         },
     };
-    use crate::kernel::{ExecutionMode, KernelBuilder, MODES, Program, agree};
+    use crate::kernel::{ExecutionMode, KernelBuilder, LocalState, MODES, Program, agree};
     use asyncband::shutdown::Shutdown;
 
     /// One worker per execution mode: the aggregate's input program and its
@@ -638,8 +750,11 @@ mod tests {
                 .workers
                 .iter_mut()
                 .map(|(mode, _, local, _)| {
-                    let partial = crate::kernel::aggregation::partial(local, &self.states)
-                        .map(|(groups, states)| PartialAggregate { groups, states });
+                    let partial = crate::kernel::aggregation::partial(
+                        &mut StateContext::new(local),
+                        &self.states,
+                    )
+                    .map(|(groups, states)| PartialAggregate { groups, states });
                     (*mode, partial)
                 })
                 .collect();
@@ -660,8 +775,10 @@ mod tests {
                 .into_iter()
                 .map(|(mode, _, mut local, mut merged)| {
                     let result = (|| {
-                        let (groups, states) =
-                            crate::kernel::aggregation::partial(&mut local, &states)?;
+                        let (groups, states) = crate::kernel::aggregation::partial(
+                            &mut StateContext::new(&mut local),
+                            &states,
+                        )?;
                         merged.merge(&PartialAggregate { groups, states })?;
                         merged.finish()
                     })();
@@ -807,7 +924,8 @@ mod tests {
                 program.run(&batch, &mut local, &guard).unwrap();
             }
             let (groups, values) =
-                crate::kernel::aggregation::partial(&mut local, &states).unwrap();
+                crate::kernel::aggregation::partial(&mut StateContext::new(&mut local), &states)
+                    .unwrap();
             let keys = groups
                 .column(0)
                 .as_any()
@@ -1506,5 +1624,266 @@ mod tests {
                 (Some(i64::MAX), (Some(7), Some(2))),
             ])
         );
+    }
+    #[test]
+    fn repeated_flush_resets_all_grouping_sets_and_accumulators() {
+        use crate::expr::agg::AggregateFunction::{Count, Min, Sum};
+        use futures::executor::block_on;
+        for key_type in [DataType::Int64, DataType::Utf8] {
+            let mut plan = TestPlan::new(&[(key_type.clone(), true), (DataType::Int64, true)]);
+            let key = ReferenceExpression::new(plan.input(0)).into_ref();
+            let value = ReferenceExpression::new(plan.input(1)).into_ref();
+            let count = aggregate(&mut plan, Count, vec![], DataType::Int64, false);
+            let sum = aggregate(&mut plan, Sum, vec![value.clone()], DataType::Int64, true);
+            let min = aggregate(&mut plan, Min, vec![key.clone()], key_type.clone(), true);
+            let distinct = aggregate(
+                &mut plan,
+                Count,
+                vec![value.clone()],
+                DataType::Int64,
+                false,
+            )
+            .with_distinct();
+            let id = plan.column(DataType::UInt64, false);
+            let operator = AggregateOperator::try_new(
+                vec![key, value],
+                vec![
+                    Arc::new(count),
+                    Arc::new(sum),
+                    Arc::new(min),
+                    Arc::new(distinct),
+                ],
+            )
+            .unwrap()
+            .with_grouping_sets(vec![vec![0], vec![0, 1], vec![]], id)
+            .unwrap();
+            let keys: ArrayRef = if key_type == DataType::Int64 {
+                Arc::new(Int64Array::from_iter(
+                    (0..2048).map(|i| (i % 19 != 0).then_some(i % 257)),
+                ))
+            } else {
+                Arc::new(StringArray::from_iter(
+                    (0..2048).map(|i| (i % 19 != 0).then(|| format!("key{}", i % 257))),
+                ))
+            };
+            let batch = input(
+                &plan,
+                vec![
+                    keys,
+                    Arc::new(Int64Array::from_iter_values((0..2048).map(|i| i % 7))),
+                ],
+            );
+            for mode in MODES {
+                let mut expected = None;
+                for (threshold, partitions) in [None, Some(64)]
+                    .into_iter()
+                    .flat_map(|t| [1, 2, 8].map(|p| (t, p)))
+                {
+                    let mut builder = KernelBuilder::new(&plan.columns);
+                    builder.bind_inputs(&plan.inputs).unwrap();
+                    let states = operator.build_set_kernels(&mut builder).unwrap();
+                    let program = Program::new(builder.finish(None).unwrap(), mode).unwrap();
+                    let execute = operator.new_execute_state(&plan.columns).unwrap();
+                    let (_, mut sink) = operator.build_exec(execute, states.clone());
+                    if let Some(limit) = threshold {
+                        sink = sink.with_flush_groups(limit);
+                    }
+                    let guard = asyncband::shutdown::new().1;
+                    let mut pairs = (0..3)
+                        .map(|_| {
+                            (
+                                program.new_local().unwrap(),
+                                sink.local_sink(&LocalSinkContext {
+                                    batch_rows: 32,
+                                    partitions,
+                                })
+                                .unwrap(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut flushes = 0;
+                    for (i, offset) in (0..batch.num_rows()).step_by(32).enumerate() {
+                        let (state, local) = &mut pairs[i % 3];
+                        let chunk = program
+                            .run(&batch.slice(offset, 32), state, &guard)
+                            .unwrap();
+                        assert!(chunk.is_none());
+                        let status = local.consume(chunk, &mut StateContext::new(state)).unwrap();
+                        if status == ConsumeStatus::Flush {
+                            flushes += 1;
+                            local
+                                .finish(status, &mut StateContext::new(state), &guard)
+                                .unwrap();
+                            // Export is borrowed: group slots are still populated.
+                            assert!(
+                                StateContext::new(state)
+                                    .get_mut::<GroupState>(states[0][0])
+                                    .unwrap()
+                                    .index
+                                    .len()
+                                    > 0
+                            );
+                            block_on(sink.consume(
+                                status,
+                                &mut **local,
+                                StateContext::new(state),
+                                &guard,
+                            ))
+                            .unwrap();
+                            for (set, ids) in operator.sets().iter().zip(&states) {
+                                assert_eq!(
+                                    StateContext::new(state)
+                                        .get_mut::<GroupState>(ids[0])
+                                        .unwrap()
+                                        .index
+                                        .len(),
+                                    usize::from(set.is_empty())
+                                );
+                            }
+                        }
+                    }
+                    for (state, local) in &mut pairs {
+                        local
+                            .finish(ConsumeStatus::End, &mut StateContext::new(state), &guard)
+                            .unwrap();
+                        for set in &states {
+                            assert!(
+                                StateContext::new(state)
+                                    .get_mut::<GroupState>(set[0])
+                                    .is_err()
+                            );
+                            for &id in &set[1..] {
+                                assert!(
+                                    StateContext::new(state)
+                                        .get_mut::<AccumulatorState>(id)
+                                        .is_err()
+                                );
+                            }
+                        }
+                    }
+                    for (state, local) in &mut pairs {
+                        block_on(sink.consume(
+                            ConsumeStatus::End,
+                            &mut **local,
+                            StateContext::new(state),
+                            &guard,
+                        ))
+                        .unwrap();
+                    }
+                    block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
+                    assert_eq!(flushes > 1, threshold.is_some());
+                    let result = sink.result.finalized.get().unwrap();
+                    let mut rows = (0..result.num_rows())
+                        .map(|r| {
+                            result
+                                .columns()
+                                .iter()
+                                .map(|c| {
+                                    arrow::util::display::array_value_to_string(c.as_ref(), r)
+                                        .unwrap()
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>();
+                    rows.sort();
+                    if let Some(expected) = &expected {
+                        assert_eq!(&rows, expected, "{key_type:?} {mode:?}");
+                    } else {
+                        expected = Some(rows);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn partitioned_rollup_crosses_merge_threshold_without_extra_global_groups() {
+        use futures::executor::block_on;
+        for key_type in [DataType::Int64, DataType::Utf8] {
+            let mut plan = TestPlan::new(&[(key_type.clone(), true)]);
+            let count = aggregate(
+                &mut plan,
+                AggregateFunction::Count,
+                vec![],
+                DataType::Int64,
+                false,
+            );
+            let id = plan.column(DataType::UInt64, false);
+            let operator = AggregateOperator::try_new(
+                vec![ReferenceExpression::new(plan.input(0)).into_ref()],
+                vec![Arc::new(count)],
+            )
+            .unwrap()
+            .with_grouping_sets(vec![vec![0], vec![]], id)
+            .unwrap();
+            for n in [0, 100, 9000] {
+                for partitions in [1, 2, 8] {
+                    let execute = operator.new_execute_state(&plan.columns).unwrap();
+                    let (_, mut sink) = operator.build_exec(execute, vec![]);
+                    let guard = asyncband::shutdown::new().1;
+                    for _ in 0..2 {
+                        let mut local = vec![];
+                        for set in 0..2 {
+                            let mut merge = sink.factory.merge(set).unwrap();
+                            let schema = plan
+                                .columns
+                                .schema(if set == 0 { &plan.inputs } else { &[] })
+                                .unwrap();
+                            let rows = if set == 0 { n } else { 1 };
+                            let cols: Vec<ArrayRef> = if set != 0 {
+                                vec![]
+                            } else if key_type == DataType::Int64 {
+                                vec![Arc::new(Int64Array::from_iter(
+                                    (0..n).map(|i| (i != 0).then_some(i as i64)),
+                                ))]
+                            } else {
+                                vec![Arc::new(StringArray::from_iter(
+                                    (0..n).map(|i| (i != 0).then(|| format!("k{i}"))),
+                                ))]
+                            };
+                            let groups = RecordBatch::try_new_with_options(
+                                schema,
+                                cols,
+                                &RecordBatchOptions::new().with_row_count(Some(rows)),
+                            )
+                            .unwrap();
+                            let count = if set == 0 { 1 } else { n as i64 };
+                            let partial = PartialAggregate {
+                                groups,
+                                states: vec![vec![Arc::new(Int64Array::from(vec![count; rows]))]],
+                            };
+                            // Both instances map the same key to the same bucket.
+                            local.push(
+                                partial
+                                    .partitions(&merge.index, partitions, &guard)
+                                    .unwrap(),
+                            );
+                            // Direct merge is also a check of the hand-built COUNT state.
+                            merge.merge(&partial).unwrap();
+                        }
+                        sink.partials.push(local);
+                    }
+                    block_on(sink.finish(&guard, &crate::exec::Inline)).unwrap();
+                    let out = sink.result.finalized.get().unwrap();
+                    assert_eq!(out.num_rows(), n + 1);
+                    let count = out.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+                    let grouping = out
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<crate::arrow::array::UInt64Array>()
+                        .unwrap();
+                    assert_eq!(grouping.iter().filter(|v| *v == Some(1)).count(), 1);
+                    for r in 0..out.num_rows() {
+                        assert_eq!(
+                            count.value(r),
+                            if grouping.value(r) == 1 {
+                                2 * n as i64
+                            } else {
+                                2
+                            }
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 # 设计决策：LocalSink 与 sink 的分阶段交接
 
-状态：设计已确定，待实现。基于 `feat/tpcds` 的 `c98b13a`，更新于 2026-10-15。
+状态：LocalSink 协议及第 12 节的并行 finish 已实现并验证，多 worker 回退已消除。第 1–11 节保留第一版设计与验证记录，冲突时以第 12 节为准。设计基于 `feat/tpcds` 的 `c98b13a`，更新于 2026-10-15。
 相关：[`tpcds-progress.md`](tpcds-progress.md)。
 
 本文面向实现者，写明接口、协议、执行层改动、每个 sink 的实现和验证要求。
@@ -506,4 +506,445 @@ Vec<Vec<StateId>>`（每个 grouping set：`[group, accumulators...]`）同时�
 - Limit / SingleRow：ordered 输入保留前 N 行；SingleRow 多于一行报错、零行输出 NULL。
 - Compile 与 ZeroCompile 结果一致。
 
-本文仅记录设计；本次文档更新未修改执行代码或运行性能测试。
+第 1–10 节保留设计约定；实际实现与验证结果见下节。
+
+
+## 11. 实现与验证（2026-10-15）
+
+已实现全部八类 sink 的 LocalSink 协议；移除 `SinkStatus`、`combine`、
+`finish_on`、`Cpu`、`CpuJob`、`Inline`、`ExecutorCpu` 与旧分区/排序收尾路径。
+Program/kernel 的执行模型、存活分析、StateId 类型绑定保持不变。
+
+- 执行层：Flush 剩余 batch 放回 pending 队首；Stop 丢弃待派发输入和 pending
+  source read，等待在途 job 完成；阶段 2 全部成功后才按池顺序交接 End。
+- Sort/Window：逐 chunk 编码、本地排序、BinaryHeap 归并。Sort 直接 interleave
+  原 chunk；Window 仅拼接一次输入，使用已编码键计算三种帧。
+- Table：KeyPlan 在构造时绑定键，局部准备 hash/编码，稳定计数排序后每列一次
+  interleave；probe 的 bucket、hash 与 NULL 语义不变。
+- Aggregate：借用导出 partial，按 set 串行合并；`with_flush_groups` 默认关闭，
+  Flush 同时 clear GroupIndex 和 Accumulator。保留第 9 节的 root-domain 限制。
+- TPC-DS runner 的 `sink finish ms` 为各 pipeline 的 `SinkExec::finish` 墙钟耗时之和，
+  不包含 LocalSink::finish 或 consume 交接；pipeline 可重叠，因此此和可能大于
+  查询 execute 墙钟耗时。计时包装仅在 DataFusion 验证工具中，核心执行器不计时。
+
+### 正确性
+
+- `cargo test --locked --workspace`：187 项测试通过（含 doctest）。
+- 新增协议测试覆盖 Flush 的 batch 顺序及不丢不重、Stop 后在途 Flush 和每实例
+  唯一 End、空输入、真正 idle 的空表 join、无输出的 run、ordered 收尾线程、
+  consume/finish 错误和 panic，以及阶段 2 取消。
+- sink 测试覆盖多 run 相等键/NULL/TopK（含 fetch=0）、跨实例窗口 partition、
+  三种帧、多规格、word/编码建表键与 NULL，以及整数/字符串键、多 grouping set、
+  DISTINCT/MIN/SUM/COUNT 的多次 Flush 与不 Flush 等价。
+- SF1 全量 103 条语句，4 worker：Compile **103/103**、ZeroCompile **103/103**，
+  均与 DataFusion 对照；1/4 worker 的性能矩阵共 **56/56** 配置通过对照。
+  全量逐语句结果见 [`status.md`](../integrations/datafusion/tpcds/status.md) 和
+  [`验证 CSV`](../benches/sink_parallelism_validation.csv)。
+
+### 同机性能
+
+Apple M4 Pro，Rust 1.95.0，LLVM 19.1.7，默认 release 构建；DuckDB 1.4.5 生成
+SF1 Parquet。基线为 `37e69782efb87a6b0e8d0b415170b0b8d25e0695`，与本变更
+使用同一数据和依赖锁文件。每种配置重复 3 次，记录最快一次 Roc 总耗时；该次的
+translate/build/execute/finish 分项一并保留。1/4 worker 分别使用 1/4 个 runtime
+线程；测量时未并行执行本任务的构建或测试。单轮结果不代表稳定的跨环境收益。
+
+下表单位 ms，**迁移前 → 迁移后**：
+
+| 查询 | ZeroCompile / 1 | ZeroCompile / 4 | Compile / 1 | Compile / 4 |
+| --- | ---: | ---: | ---: | ---: |
+| q23a | 3495.7 → 3131.3 | 1007.9 → 1278.0 | 3570.6 → 3350.8 | 1195.2 → 1434.4 |
+| q23b | 3517.2 → 3209.4 | 999.9 → 1269.3 | 3653.9 → 3495.2 | 1176.2 → 1439.0 |
+| q47 | 911.6 → 867.5 | 303.3 → 316.6 | 1063.1 → 1008.0 | 447.2 → 459.8 |
+| q51 | 555.0 → 597.3 | 199.0 → 393.3 | 585.2 → 656.9 | 219.2 → 403.3 |
+| q57 | 339.6 → 313.1 | 114.8 → 112.1 | 496.0 → 465.4 | 259.4 → 260.9 |
+| q67 | 1275.0 → 1273.1 | 487.0 → 823.0 | 1348.5 → 1429.5 | 523.1 → 862.4 |
+| 高基数 GROUP BY | 71.0 → 65.2 | 20.9 → 40.7 | 68.1 → 66.0 | 22.6 → 40.5 |
+
+高基数查询返回 240,000 个 group：
+
+```sql
+SELECT ss_ticket_number, COUNT(*), SUM(ss_net_paid)
+FROM store_sales
+GROUP BY ss_ticket_number;
+```
+
+原始分项数据见 [`sink_parallelism.csv`](../benches/sink_parallelism.csv)，环境与
+口径见 [`metadata`](../benches/sink_parallelism_metadata.json)。复跑指定查询：
+
+```sh
+cargo build --locked --release -p roc-datafusion --example tpcds
+target/release/examples/tpcds <sf1-dir> --mode zero --workers 4 --repeat 3 \
+  q51 q47 q57 q67 q23a q23b
+```
+
+将 mode 换为 `compile`、workers 换为 `1` 补齐矩阵；高基数查询通过 `--sql` 传入。
+
+**这次迁移不能宣称为整体性能提升。** 单 worker 的 q23、q47、q57 和高基数聚合
+有所改善；4 worker 的 q51、q67、q23 和高基数聚合明显回退。ZeroCompile / 4 的
+q51 总耗时增加约 98%，q67 增加约 69%，高基数聚合增加约 95%。对应的串行 sink
+收尾总耗时分别为 276.4、445.8、24.9 ms；高基数聚合的 execute 为 40.2 ms。
+Compile / 4 呈现同样的主要回退方向。这些数据支持继续评估第 9 节的跨实例工作
+分区方案；本次按既定设计保留串行合并，没有重新引入 sink 提交 CPU job。
+
+后续逐阶段计时与 CPU 采样见 [q51/q67 回退定位](sink-parallelism-hotspots.md)。
+已定位 Window 归并/计算、ROLLUP 的键入表/键列输出，以及 `sink_finish` 未覆盖的
+End 交接时 LocalState 串行析构；另以临时实验验证了派发粒度造成的本地排序
+并行度不足。生产实现未随诊断实验变更。
+
+
+## 12. 修订：`SinkExec::finish` 通过 `Cpu` 分区并行（2026-10-15，已实现）
+
+### 12.1 背景与决策
+
+第 11 节和 [回退定位](sink-parallelism-hotspots.md) 表明，"跨实例工作单线程
+即可"只在剩余工作为 O(实例数) 的交接时成立。Window、Aggregate、Table 的跨实例
+工作是 O(N)，单 worker 下已占查询时间的 26%–36%，4 worker 的加速上限因此只有
+约 2 倍。具体来说：
+
+- Window：全局 heap 归并和 `values` 全部串行。实际上窗口只需要同一个 partition
+  的行聚在一起并在 partition 内有序，不需要全局有序；旧实现正是按 partition key
+  分桶并行的。
+- Aggregate：键入表（`GroupIndex::intern`）和键列输出占 finish 的约 80%，只并行
+  accumulator 合并没有用。
+- End 交接时 LocalState 在 coordinator 上析构，q67 约 50 ms。
+- job 合批上限（128 个 batch）使本地排序只用上 1–2 个 worker。
+
+**决策：保留 LocalSink 协议，只给 `SinkExec::finish` 增加一个 `cpu: &dyn Cpu`
+参数。** LocalSink 在本地按 key 分成 K 份；`SinkExec::finish` 把各实例的同一个
+分区打包成一个任务，用 `cpu.spawn` 并行执行，最后串行发布。
+
+本节修订以下前文约定，冲突时以本节为准：
+
+- 第 1 节"sink 不再提交 CPU job"：改为**只有 `SinkExec::finish` 可以通过 `Cpu`
+  提交 CPU 工作**。`LocalSink` 的方法和 `SinkExec::consume` 仍然不能提交。
+- 第 3 节：恢复 `Cpu`（新接口见 12.2），`SinkExec::finish` 增加参数，
+  `LocalSinkContext` 增加 `partitions`。
+- 第 4.2 节"finish 不移出 kernel 槽位"：`finish(End)` 例外，见 12.3。
+- 第 7 节：Window、Aggregate、Table 的 finish 改为分区并行，见 12.5–12.7。
+- 第 8 节删除清单：不再删除 `Cpu` 和 `ExecutorCpu`。
+
+不采用的替代：sink 在 finish 内自己开线程（不遵守 worker 数，并且会阻塞
+coordinator）；把 `Executor` 直接传给 sink（`Executor` 有泛型方法和 GAT，不是
+object safe，`SinkExec` 无法以 trait object 使用）；执行层通用的 `next_round`
+（可行，但这次选择更直接的 `Cpu`）。
+
+### 12.2 接口（`src/exec/mod.rs`）
+
+```rust
+pub type CpuJob = Box<dyn FnOnce() -> Result<()> + Send>;
+
+/// 执行器上的 CPU 工作，与 Program 的 job 共用同一组 worker。
+pub trait Cpu: Send + Sync {
+    /// 调用时立即提交；返回的 future 只用于等待结果。
+    /// 不能推迟到第一次 poll 才提交，否则逐个 await 会串行执行。
+    fn spawn(&self, job: CpuJob) -> BoxFuture<'static, Result<()>>;
+    /// 执行器的 worker 数。
+    fn parallelism(&self) -> usize;
+}
+
+/// 先全部 spawn，再 try_join_all；结果按输入顺序返回。
+/// 每个 job 把结果写入自己的槽位（同 37e6978 中的 run_all）。
+pub async fn run_all<T: Send + 'static>(
+    cpu: &dyn Cpu,
+    work: Vec<Box<dyn FnOnce() -> Result<T> + Send>>,
+) -> Result<Vec<T>>;
+
+pub struct LocalSinkContext {
+    pub batch_rows: usize,
+    /// 跨实例分区数：同一个 pipeline 的所有实例相同。
+    pub partitions: usize,
+}
+
+pub fn partition_count(parallelism: usize) -> usize {
+    if parallelism <= 1 { 1 } else { (2 * parallelism).next_power_of_two() }
+}
+
+trait SinkExec {
+    fn finish<'a>(
+        &'a mut self,
+        guard: &'a ShutdownGuard,
+        cpu: &'a dyn Cpu,
+    ) -> BoxFuture<'a, Result<()>>;
+}
+```
+
+- `partitions` 由执行层用 `partition_count(parallelism)` 计算，`parallelism`
+  是配置的 worker 数，**不是实例数**。ordered 路径只有 1 个实例，但第二轮仍然
+  可以用满 worker。分区数必须是 2 的幂（Table 按 hash 高位分区，见 12.7）。
+- `SinkExec::finish` 按数据里实际的分区数来组织任务，不要再用
+  `cpu.parallelism()` 推算分区数，避免两边不一致。
+- 测试用的 `Inline` 实现：`spawn` 当场执行 job，返回已完成的 future，
+  `parallelism()` 返回 1。
+
+### 12.3 协议修订：`finish(End)` 在 worker 上释放 kernel 状态
+
+`LocalSink::finish(End)` 执行之后，这个实例不会再运行 Program。因此
+`finish(End)` 可以用 `StateContext::take` 移出 kernel 槽位，在 CPU job 里析构，
+避免由 coordinator 在 End 交接后串行析构。
+
+- 只允许在 `status == End` 时这样做。`finish(Flush)` 和 `finish(Stop)` 仍然
+  不能移出或清空槽位（清空由 `SinkExec::consume` 负责），否则 Flush 之后的下一次
+  run 会失败。
+- 这一条对 Aggregate 必须实现（12.6）。其他 sink 的大块数据在 LocalSink 字段里，
+  会被移交给 sink 继续使用，不需要处理。
+- 执行层在 End 交接之后析构 `LocalState` 的位置保持不变；里面已经没有大对象。
+
+### 12.4 执行层（`src/pipeline/execution.rs`）
+
+- 恢复 `ExecutorCpu { executor: Arc<E>, parallelism }`：`spawn` 内部调用现有的
+  `on_cpu`（它在函数体内同步调用 `executor.spawn`，返回 `'static` 的句柄；panic
+  由 `catch_unwind` 转为 `TaskFailed`），再 `Box::pin` 包装。
+- 多 worker 路径和 ordered / 单 worker 路径都构造同一个 `ExecutorCpu`，在阶段 3
+  传给 `sink.finish(&guard, &cpu)`。
+- 两条路径创建 LocalSink 时都传
+  `LocalSinkContext { batch_rows, partitions: partition_count(parallelism) }`。
+- **job 合批上限**：在现有"最多 128 个 batch"之外，再加一个按行数的上限
+  `JOB_ROWS`（初值 `16 * batch_rows`，作为常量放在 execution.rs，可调）。累计
+  行数达到上限就停止合批，让输入更均匀地分到各个实例上。实验中 128 → 16 使
+  q51 的本地 Window 排序墙钟从约 92 ms 降到 45 ms。
+
+### 12.5 Window（`src/exec/window.rs`）
+
+每种规格（partition keys 和 order keys 都相同）各自分区，规格相同的窗口继续共用
+一次排序。
+
+**`LocalSink::consume`**：不变，逐 chunk 编码各规格的 partition 键和 order 键。
+
+**`LocalSink::finish(任意 status)`**：对每种规格，按 partition 键的编码字节计算
+hash（用 `kernel/table.rs` 的 `hash_bytes` 或同等的 64 位 hash），取低位分到
+`partitions` 个桶；每个桶内按 `(partition 字节, order 字节, 本地行号)` 排序。
+结果为 `spec → bucket → 有序的本地行号`。规格没有 partition key 时，所有行都
+进入桶 0。
+
+**`SinkExec::consume(End)`**：移走 chunks、键和各桶的局部顺序（不变）。
+
+**`SinkExec::finish(cpu)`**：
+
+1. 给所有行编全局行号（按实例、chunk 的顺序），拼接一次输入 batch。拼接可以
+   按列通过 `run_all` 并行。
+2. 对每个有参数的窗口成员，`scalar::decode` 其参数列，按列通过 `run_all` 并行。
+3. 对每种规格，提交 K 个任务（`run_all`），任务 k：
+   - 对 P 个实例的桶 k 做 P 路归并（堆只有 P 个元素），得到该桶的全局有序行号；
+   - 对该规格的每个窗口成员调用 `values`，返回 `(有序行号, 各成员的值)`。
+   各个桶之间没有共同的 partition，任务之间完全独立。
+4. 串行地把各桶的值按行号散回每个成员的 `cells`，然后对每个成员
+   `scalar::encode`（按成员通过 `run_all` 并行）。
+5. 组装输出 batch，写入 Buffer（不变）。
+
+### 12.6 Aggregate（`src/exec/aggregate/mod.rs`、`kernel/aggregation.rs`）
+
+**`LocalSink::finish(status)`**：
+
+1. 照现在的做法，从槽位借用导出每个 grouping set 的 partial。
+2. **分区**：对**有 group key** 的 set，按 group key 的 hash **低位**分成
+   `partitions` 份（同 `37e6978` 中的 `PartialAggregate::partitions`，用
+   `GroupIndex::hash_rows`。高位留给合并时的表槽位，所以必须用低位）。**没有
+   group key 的 set（全局聚合，以及 ROLLUP 中的空 set）不分区**，只放在分区 0。
+   否则每个分区都会输出一个 group，旧实现的 q67 就因此多出了 7 行中间结果。
+3. 如果 `status == End`：用 `StateContext::take` 移出所有 set 的 GroupState 和
+   AccumulatorState，在这里析构（12.3）。
+
+**`SinkExec::consume`**：不变（移走 partial；Flush / Stop 时清空槽位）。
+
+**`SinkExec::finish(cpu)`**：
+
+- 统计所有 partial 的总行数。少于 `PARTITION_GROUPS`（恢复该常量，初值 16384）
+  时，在 coordinator 上串行合并所有分区：结果正确，只是不拆任务。
+- 否则对每个 set 的每个非空分区提交一个任务（`run_all`），任务 (set, k)：
+  - 新建 `AggregateMergeState`（对第一个任务沿用 `merges` 中的那个，其他通过
+    `factory.merge(set)` 创建，同 `37e6978`）；
+  - `merge` 所有实例的分区 k；
+  - `finish_columns`（包括 group key 列的输出编码）；
+  - **在任务内析构** merge state（包括 `GroupIndex`），只把列返回。
+  回退定位显示，键入表和键列输出占 finish 的约 80%，最终 `GroupIndex` 的析构约
+  22 ms，三者都必须在任务内完成。
+- 串行地用 `concat_parts`（同 `37e6978`）把每个 set 的各分区结果拼起来，
+  `Layout::assemble`，发布。
+
+### 12.7 Table（`src/exec/table.rs`、`kernel/table.rs`）
+
+桶号是 `hash >> shift`，也就是 hash 的高位。按 hash 的**高 b 位**分区
+（`K = 2^b`），分区 k 正好对应一段连续的桶 `[k·B/K, (k+1)·B/K)`，K 段按顺序
+拼起来就是原来那张表。probe 侧完全不变。
+
+**`LocalSink::finish(任意 status)`**：把本地的 `(chunk, 行)` 按
+`hash >> (64 - b)` 分到 K 个分区；不参与索引的行（`hashes[r] == None`）单独放
+一组。
+
+**`SinkExec::finish(cpu)`**：
+
+1. 算出总行数、`buckets`、`shift`（与现在相同）。如果 `buckets < K`，或者
+   `K == 1`，就走现有的串行 `assemble`。
+2. 否则提交 K 个任务，加上一个处理不参与索引的行的任务。任务 k：
+   - 对分区 k 的所有行（来自所有实例）按桶号做稳定计数排序，只覆盖本分区的
+     桶区间；
+   - 按得到的顺序生成本段的键（words，或 data/offsets）和每一列的数据
+     （对所有 chunk 的数组做 `interleave`，数组列表用 `Arc` 共享）；
+   - 返回本段的局部 `starts`、键和列。
+   不参与索引的行那个任务不排序，直接按原顺序 gather。
+3. 串行拼接：`starts` 加上前面各段的行数偏移后依次拼接；键依次拼接（encoded
+   键的 offsets 要加上偏移）；每一列把 K+1 段 `concat` 起来（按列通过 `run_all`
+   并行）。不参与索引的行放在最后一个桶之后，与现在的布局相同。
+4. `Table::from_parts`，发布。
+
+结果必须与串行 `assemble` 逐字节一致：桶布局、桶内的行顺序（稳定排序，按实例、
+chunk、行的顺序）、键、列都相同。
+
+### 12.8 Sort
+
+本次不改变归并方式（读取排序结果的 pipeline 是单实例消费，回退的查询里 Sort
+不是热点）。只做一处小改动：最终的 `interleave` 按列通过 `run_all` 并行。
+按键范围切分的并行归并留到以后。
+
+### 12.9 实施顺序
+
+1. `Cpu`、`run_all`、`Inline`、`ExecutorCpu`、`partition_count`、
+   `LocalSinkContext::partitions`、`SinkExec::finish` 的新签名；更新所有 sink 和
+   测试中的 `SinkExec` 实现（不需要并行的 sink 忽略 `cpu`）。
+2. Aggregate（12.6），包括 `finish(End)` 中释放 kernel 状态（12.3）。
+3. Window（12.5）。
+4. job 合批的行数上限（12.4）。
+5. Table（12.7）。实现之前先给 `SinkExec::finish` 加临时分段计时，确认 q23 的
+   finish 时间主要花在哪里，并与实现之后对比。
+6. Sort 的按列 interleave（12.8）。
+
+### 12.10 验证
+
+正确性（在第 10 节的测试之外新增）：
+
+- 分区一致性：同一个 key 在不同实例中一定进入同一个分区。用 `partitions` 为
+  1、2、8，以及实例数与分区数不同的组合来测。
+- Aggregate：没有 group key 的 set 不分区；q67 的 ROLLUP 中间结果为 501,976 行，
+  不多出空分区 group；`PARTITION_GROUPS` 上下两种路径结果一致；Flush 后状态仍可
+  继续使用（`finish(Flush)` 不移出槽位）。
+- Window：同一个 partition 跨多个实例的行；没有 PARTITION BY 的规格只有一个桶；
+  两个窗口共用一种规格（q51 的两个 MAX）。
+- Table：分区并行和串行 `assemble` 的结果逐字节一致（`starts`、键、列），覆盖
+  `buckets < K` 的回退、NULL key、`nulls_equal` 的两种设置、word 键和编码键。
+- `cpu` 中的任务出错或 panic 时，pipeline 返回错误、不发布结果；等待期间取消能
+  及时返回。
+- Compile 与 ZeroCompile 一致；SF1 全量 103/103 两种模式。
+
+性能：使用第 11 节相同的矩阵和口径重新测量，同时重跑回退定位中 q51、q67 的分段
+计时。目标是：4 worker 的 q51、q67、q23 和高基数聚合回到迁移前的水平（±10%）；
+1 worker 不比第 11 节迁移后的结果差。结果追加到本文和 `sink_parallelism.csv`。
+
+### 12.11 实现与复测
+
+已实现上述 Cpu 接口、三阶段交接、Aggregate/Window/Table 的分区任务、Sort 的按列
+interleave 和按行数限制合批。只有 final finish 能提交工作，任务仍使用 Program 的
+执行器。`run_all` 先提交全部任务，按输入顺序取结果；等待期间取消会结束 finish，
+所有结果发布前再次检查 guard。Window 的字节 Cell 借用输入列，计算和编码任务都
+持有输入 batch 的 Arc，确保取消等待后仍在执行的任务不会访问已释放数据。
+
+验证：
+
+- `cargo test --locked --workspace`：**192 passed**，包括 doctest。
+- 新增及扩展测试覆盖 K=1/2/8、实例数与 K 不同、空全局聚合与 ROLLUP、
+  16,384 阈值两侧、Flush 后继续运行、End 状态移出、跨实例 Window partition、
+  两个 MAX 共用规格、无 PARTITION BY、字符串输出、Table 的逐字节布局一致性、
+  NULL 两种语义及小表回退。
+- Cpu 测试覆盖立即提交、结果顺序、ordered 单实例仍使用配置的分区数、错误、
+  panic 和取消时不发布。
+- SF1 **ZeroCompile 103/103、Compile 103/103**（4 worker），完整记录见
+  [`finish_parallel_validation.csv`](../benches/finish_parallel_validation.csv)。
+- 性能矩阵新增 28 个配置全部与 DataFusion 对照通过。
+
+#### 未插桩性能矩阵
+
+沿用第 11 节机器、数据与口径：Apple M4 Pro、Rust 1.95.0、LLVM 19.1.7、release，
+runtime 线程数等于 worker 数，每项取 3 次中最小总耗时，单位 ms。完整记录已追加到
+[`sink_parallelism.csv`](../benches/sink_parallelism.csv) 的 `finish_parallel` 行；
+迁移前和串行迁移后的原记录保留。
+
+4 worker：
+
+| 查询 | Zero：迁移前 | 串行 LocalSink | 并行 finish | Compile：迁移前 | 串行 LocalSink | 并行 finish |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| q23a | 1007.9 | 1278.0 | 999.1 | 1195.2 | 1434.4 | 1197.0 |
+| q23b | 999.9 | 1269.3 | 989.9 | 1176.2 | 1439.0 | 1199.6 |
+| q47 | 303.3 | 316.6 | 295.8 | 447.2 | 459.8 | 449.2 |
+| q51 | 199.0 | 393.3 | 194.3 | 219.2 | 403.3 | 226.4 |
+| q57 | 114.8 | 112.1 | 108.8 | 259.4 | 260.9 | 259.3 |
+| q67 | 487.0 | 823.0 | 471.2 | 523.1 | 862.4 | 517.4 |
+| 24 万组聚合 | 20.9 | 40.7 | 21.8 | 22.6 | 40.5 | 21.7 |
+
+**4 worker 的 14 个配置均回到迁移前 ±10% 内。** 相比串行 LocalSink，
+ZeroCompile q51 减少 50.6%，q67 减少 42.7%；Compile 分别减少 43.9%、40.0%。
+
+1 worker：
+
+| 查询 | Zero：串行 LocalSink | 并行 finish | 变化 | Compile：串行 LocalSink | 并行 finish | 变化 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| q23a | 3131.3 | 3448.7 | +10.1% | 3350.8 | 3425.8 | +2.2% |
+| q23b | 3209.4 | 3295.8 | +2.7% | 3495.2 | 3753.9 | +7.4% |
+| q47 | 867.5 | 821.9 | -5.3% | 1008.0 | 1002.5 | -0.5% |
+| q51 | 597.3 | 554.6 | -7.1% | 656.9 | 591.1 | -10.0% |
+| q57 | 313.1 | 311.0 | -0.7% | 465.4 | 464.7 | -0.2% |
+| q67 | 1273.1 | 1231.2 | -3.3% | 1429.5 | 1277.5 | -10.6% |
+| 24 万组聚合 | 65.2 | 69.4 | +6.4% | 66.0 | 66.2 | +0.3% |
+
+**“1 worker 不退化”的目标尚未完全达到。** 为排除历史测量的波动，额外对 q23
+做了两轮交替顺序复测，每个进程仍取 3 次最小值：ZeroCompile q23a 的串行版本为
+3095.7 / 3068.1 ms，当前版本为 3313.8 / 3218.9 ms，仍慢 7.0% / 4.9%；
+Compile 为 3359.5 / 3279.2 → 3366.5 / 3344.5 ms，慢 0.2% / 2.0%。
+q23b 的交替复测差异为 ZeroCompile 0%–3.0%、Compile -1.4%–-0.1%。
+尝试过单分区直接串行 merge，没有稳定收益，未保留该改动。当前证据不能把单 worker
+差异归因于排队，仍需单独定位；原矩阵中的不利数据没有用复测结果覆盖。
+原始复测及实验记录见 [`finish_parallel_profiles`](../benches/finish_parallel_profiles/README.md)。
+
+#### q51 / q67 热点复测
+
+临时源码副本插桩，每条查询 6 次、丢弃首轮、报告剩余 5 次中位数；比较列沿用
+[前次诊断](sink-parallelism-hotspots.md) 的串行 LocalSink 数据。两组均为 ZeroCompile、
+4 worker / 4 runtime 线程。下表为墙钟或 coordinator 上的串行耗时，单位 ms。
+
+| 查询 / 阶段 | 串行 LocalSink | 并行 finish |
+| --- | ---: | ---: |
+| q51 P7 store Aggregate final finish | 55.8 | 17.5 |
+| q51 P8 store Window local finish 墙钟 | 35.7 | 16.0 |
+| q51 P8 store Window final finish | 51.5 | 24.3 |
+| q51 P12 两个 MAX local finish 墙钟 | 35.5 | 25.0 |
+| q51 P12 两个 MAX final finish | 124.3 | 56.7 |
+| q67 P3 Aggregate local finish 墙钟 | 51.4 | 90.1 |
+| q67 P3 End 交接后的 LocalState 串行析构 | 50.5 | 0.009 |
+| q67 P3 Aggregate final finish | 365.8 | 118.1 |
+| q67 P4 RANK local finish 墙钟 | 44.4 | 17.5 |
+| q67 P4 RANK final finish | 82.5 | 49.5 |
+
+- q51 P12：分区归并和两个 MAX 的任务等待墙钟为 **40.2 ms**，串行 scatter
+  约 **9.2 ms**，并行 concat/decode/encode 分别约 2.2/1.5/2.6 ms。三个 Window
+  的 local finish 墙钟合计从约 91.9 降至 47.3 ms，合批行数上限改善了实例分布。
+- q67 P3：merge/evaluate 的任务等待墙钟 **103.4 ms**，任务耗时之和约 367.3 ms；
+  键入表、键列编码和最终 GroupIndex 析构确实都在这些任务中。剩余串行
+  `concat_parts` **4.8 ms**、`Layout::assemble` **10.0 ms**。
+- q67 的 ROLLUP 输出在全部 6 轮均为 **501,976 行**。空 grouping set 只用一个
+  分区，没有恢复旧实现多出 7 个空 group 的问题。
+- local Aggregate finish 变长包含了新增分区和移入 worker 的原状态析构，不能只看
+  单项判断回退。coordinator 原有的约 50 ms 析构已经消失。
+
+原始 interval、线程 ID、分组行数、统计 CSV 和可重放插桩 patch 均在
+[`finish_parallel_profiles`](../benches/finish_parallel_profiles/README.md)。任务耗时之和
+不是墙钟，pipeline 之间会重叠。插桩查询的热运行中位数为 q51 219.9、q67 524.9 ms，
+不要与未插桩 best-of-three 的 194.3/471.2 ms 拼成耗时等式。
+
+#### Table 的前后测量
+
+实现前已单独计时 q23a/b：所有 Table finish 合计中位数分别只有 **5.9/10.4 ms**。
+其中 bucket order 为 2.2/3.0 ms，key gather 为 0.9/1.3 ms，payload interleave
+为 0.7/2.3 ms。Table 不是 q23 的主要回退来源。
+
+按设计实现分区后，worker 上 bucket/key/interleave 的耗时之和分别为 q23a
+3.1/1.0/1.1 ms、q23b 5.0/1.6/3.7 ms；跨段 concat 的等待墙钟为 1.2/5.1 ms。
+所有 Table final finish 的等待时间之和反而为 55.8/79.3 ms，其中 partition 任务
+等待合计 49.2/63.8 ms，明显包含与其他 pipeline 竞争同一执行器的排队。
+它不是净增的查询耗时，多个 pipeline 可重叠；目前不能宣称 Table 本身加速。
+这也说明 `sink_finish` 累计值在引入 CPU 任务之后，必须连同 worker 实际工作量和
+查询墙钟一起解读。q23 的整体恢复主要来自 Aggregate 分区 merge/evaluate。
+
+### 12.12 后续
+
+第 12 节完成之后，按 [`source-parallelism.md`](source-parallelism.md) 把执行层
+改为每个实例一个 async 任务、新增 LocalSource，并把 Aggregate、Window、Sort 的
+按分区收尾下推到下游 source。第 12 节中的按分区处理函数会被直接复用。

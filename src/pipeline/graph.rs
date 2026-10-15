@@ -270,7 +270,7 @@ mod tests {
 
     use crate::{
         error::{Error, Result},
-        exec::{SinkExec, SourceExec},
+        exec::{ConsumeStatus, LocalSink, LocalSinkContext, SinkExec, SourceExec, StateContext},
     };
     use asyncband::shutdown::ShutdownGuard;
     use futures::future::BoxFuture;
@@ -289,7 +289,27 @@ mod tests {
             })
         }
     }
-    impl SinkExec for UnusedExec {}
+    impl SinkExec for UnusedExec {
+        fn local_sink(&self, _: &LocalSinkContext) -> Result<Box<dyn LocalSink>> {
+            unreachable!("construction only")
+        }
+        fn consume<'a>(
+            &'a mut self,
+            _: ConsumeStatus,
+            _: &'a mut dyn LocalSink,
+            _: StateContext<'a>,
+            _: &'a ShutdownGuard,
+        ) -> BoxFuture<'a, Result<()>> {
+            unreachable!("construction only")
+        }
+        fn finish<'a>(
+            &'a mut self,
+            _: &'a ShutdownGuard,
+            _cpu: &'a dyn crate::exec::Cpu,
+        ) -> BoxFuture<'a, Result<()>> {
+            unreachable!("construction only")
+        }
+    }
 
     fn pipelines(count: usize) -> Vec<Pipeline> {
         (0..count)
